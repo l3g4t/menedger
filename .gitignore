@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Хранилище паролей — никогда не должно попасть в git
+*.vault
+vault.db
+vault.bin
+
+# ОС / редакторы
+.DS_Store
+.vscode/
+.idea/
