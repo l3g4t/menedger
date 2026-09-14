@@ -1,18 +1,25 @@
 """
 vault.cli — интерфейс командной строки менеджера паролей.
 
-Реализует четыре команды поверх vault.crypto и vault.storage:
+Реализует команды поверх vault.crypto и vault.storage:
 
     python -m vault.cli create              — создать новое хранилище
     python -m vault.cli add <site>          — добавить запись
     python -m vault.cli list                — показать список сайтов
     python -m vault.cli get <site>          — показать логин/пароль
+    python -m vault.cli audit               — советник по безопасности
+    python -m vault.cli generate            — сгенерировать пароль
 
 CLI намеренно НЕ содержит крипто-логики — он только вызывает функции из
 vault.crypto (шифрование/расшифровка) и vault.storage (чтение/запись
 файла на диск), а сам отвечает за пользовательский ввод/вывод и за
 превращение внутренних исключений в понятные сообщения и коды возврата.
 Такое разделение — то же самое, что описано в CLAUDE.md, раздел 6.
+
+Команды `audit` и `generate` подключают эвристическую часть
+ИИ-помощника (пакет `assistant/`, см. CLAUDE.md, раздел 9) — она не
+использует LLM вообще, поэтому доступна уже сейчас, независимо от того,
+какой движок локальной модели будет выбран позже.
 """
 
 from __future__ import annotations
@@ -30,6 +37,10 @@ from vault.crypto import (
     encrypt_vault,
 )
 from vault.storage import load_vault_file, save_vault_file
+
+from assistant.advisor import analyze_vault, format_report
+from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
+from assistant.generator import explain_password, generate_password
 
 # Путь к хранилищу по умолчанию — в домашней директории пользователя, а
 # не в текущей рабочей папке: так `vault add ...`, запущенный из любого
@@ -187,6 +198,41 @@ def cmd_get(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_audit(args: argparse.Namespace) -> None:
+    """Проанализировать хранилище эвристическим советником по
+    безопасности (см. assistant.advisor) — без какой-либо LLM."""
+    path = Path(args.path)
+    master_password = _prompt_secret()
+    data = _open_vault(path, master_password)
+
+    report = analyze_vault(data)
+    print(format_report(report))
+
+
+def cmd_generate(args: argparse.Namespace) -> None:
+    """Сгенерировать криптографически стойкий пароль и объяснить его силу.
+
+    Не требует доступа к хранилищу и мастер-пароля — это независимая
+    утилита (см. assistant.generator). Пароль печатается в stdout,
+    объяснение — в stderr, чтобы `vault generate | xclip` и подобные
+    конвейеры получали в stdout только сам пароль, без пояснений.
+    """
+    try:
+        password = generate_password(
+            length=args.length,
+            use_lowercase=not args.no_lowercase,
+            use_uppercase=not args.no_uppercase,
+            use_digits=not args.no_digits,
+            use_symbols=not args.no_symbols,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+
+    print(password)
+    print(explain_password(password), file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vault", description="Локальный менеджер паролей")
     parser.add_argument(
@@ -219,6 +265,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_get = subparsers.add_parser("get", help="показать логин/пароль для сайта")
     p_get.add_argument("site", help="сайт/сервис, точное совпадение")
     p_get.set_defaults(func=cmd_get)
+
+    p_audit = subparsers.add_parser(
+        "audit", help="советник по безопасности: повторные/слабые/устаревшие пароли"
+    )
+    p_audit.set_defaults(func=cmd_audit)
+
+    p_generate = subparsers.add_parser("generate", help="сгенерировать надёжный пароль")
+    p_generate.add_argument(
+        "--length",
+        type=int,
+        default=DEFAULT_GENERATED_LENGTH,
+        help=f"длина пароля (по умолчанию: {DEFAULT_GENERATED_LENGTH})",
+    )
+    p_generate.add_argument("--no-lowercase", action="store_true", help="без строчных букв")
+    p_generate.add_argument("--no-uppercase", action="store_true", help="без заглавных букв")
+    p_generate.add_argument("--no-digits", action="store_true", help="без цифр")
+    p_generate.add_argument("--no-symbols", action="store_true", help="без спецсимволов")
+    p_generate.set_defaults(func=cmd_generate)
 
     return parser
 

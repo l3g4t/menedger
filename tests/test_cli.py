@@ -127,3 +127,60 @@ def test_add_or_get_without_existing_vault_returns_nonzero(tmp_path, monkeypatch
     code = _run(monkeypatch, ["--path", str(vault_path), "list"], secrets=[MASTER])
 
     assert code != 0
+
+
+def test_audit_detects_reused_password(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "SamePassword123!"],
+    )
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "other.com", "--username", "alice"],
+        secrets=[MASTER, "SamePassword123!"],
+    )
+
+    capsys.readouterr()
+    code = _run(monkeypatch, ["--path", str(vault_path), "audit"], secrets=[MASTER])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Повторно используемые пароли" in out
+    assert "example.com" in out
+    assert "other.com" in out
+
+
+def test_audit_on_clean_vault_reports_no_issues(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "Xk9#mQ2!pL7$vR4@"],
+    )
+
+    capsys.readouterr()
+    code = _run(monkeypatch, ["--path", str(vault_path), "audit"], secrets=[MASTER])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Явных проблем не найдено." in out
+
+
+def test_generate_prints_password_of_requested_length(monkeypatch, capsys):
+    code = _run(monkeypatch, ["generate", "--length", "24"])
+    out = capsys.readouterr()
+
+    assert code == 0
+    password = out.out.strip()
+    assert len(password) == 24
+    assert "бит" in out.err
+
+
+def test_generate_rejects_too_short_length(monkeypatch):
+    code = _run(monkeypatch, ["generate", "--length", "1"])
+
+    assert code != 0
