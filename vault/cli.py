@@ -29,9 +29,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
+from vault.common import DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
     InvalidMasterPasswordError,
     VaultFormatError,
@@ -43,26 +43,6 @@ from vault.storage import load_vault_file, save_vault_file
 from assistant.advisor import analyze_vault, format_report
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
-
-# Путь к хранилищу по умолчанию — в домашней директории пользователя, а
-# не в текущей рабочей папке: так `vault add ...`, запущенный из любого
-# места, всегда работает с одним и тем же файлом. Расширение .vault
-# совпадает с шаблоном в .gitignore (*.vault), чтобы файл нельзя было
-# случайно закоммитить в git, если пользователь создаст его прямо в
-# рабочей копии репозитория.
-DEFAULT_VAULT_PATH = Path.home() / "passwords.vault"
-
-# Минимальная длина мастер-пароля. Это НЕ замена стойкости Argon2id
-# (см. CLAUDE.md, раздел 2) — сама по себе длина ничего не гарантирует.
-# Это просто отсечение самых грубых случаев ("1234", "qwerty") на входе,
-# аналог валидации формы, а не крипто-механизм.
-MIN_MASTER_PASSWORD_LENGTH = 8
-
-
-def _now_iso() -> str:
-    """Текущее время в UTC в формате ISO 8601 — как в примере entries
-    из CLAUDE.md, раздел 3 ("2026-09-11T12:00:00Z")."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _prompt_secret(prompt: str = "Мастер-пароль: ") -> str:
@@ -151,7 +131,7 @@ def cmd_add(args: argparse.Namespace) -> None:
             "site": args.site,
             "username": username,
             "password": password,
-            "created_at": _now_iso(),
+            "created_at": now_iso(),
         }
     )
 
@@ -248,7 +228,7 @@ def cmd_update(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
     entry["password"] = new_password
-    entry["created_at"] = _now_iso()
+    entry["created_at"] = now_iso()
 
     blob = encrypt_vault(data, master_password)
     save_vault_file(path, blob)
