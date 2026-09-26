@@ -47,6 +47,10 @@ from vault.storage import load_vault_file, save_vault_file
 # поменяв это имя, — весь остальной код не завязан на конкретную тему.
 THEME_NAME = "bootstrap-light"
 
+# Название приложения — используется и в заголовке окна, и в крупной
+# надписи на экране разблокировки, чтобы поменять его в одном месте.
+APP_TITLE = "Хранилище тайн"
+
 # Через сколько миллисекунд GUI сам очищает системный буфер обмена
 # после копирования пароля — если пользователь скопировал пароль и
 # забыл про окно, пароль не должен вечно лежать в буфере обмена,
@@ -68,7 +72,7 @@ class App(ttk.Window):
 
     def __init__(self) -> None:
         super().__init__(
-            title="Менеджер паролей",
+            title=APP_TITLE,
             themename=THEME_NAME,
             size=(680, 460),
             minsize=(480, 320),
@@ -98,7 +102,7 @@ class App(ttk.Window):
         frame = ttk.Frame(self, padding=24)
 
         ttk.Label(
-            frame, text="Менеджер паролей", font=("", 18, "bold"), bootstyle="primary"
+            frame, text=APP_TITLE, font=("", 18, "bold"), bootstyle="primary"
         ).pack(pady=(0, 16))
 
         path_row = ttk.Frame(frame)
