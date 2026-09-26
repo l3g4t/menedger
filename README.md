@@ -81,6 +81,23 @@ python -m vault.cli --path ./work.vault add example.com
 | `audit` | Эвристический советник по безопасности: повторно используемые, слабые и устаревшие пароли. |
 | `generate [--length N] [--no-symbols] [--no-digits] [--no-uppercase] [--no-lowercase]` | Сгенерировать криптостойкий пароль. Печатает пароль в stdout, объяснение — в stderr. |
 
+## Сборка отдельного приложения (без установки Python)
+
+Через [PyInstaller](https://pyinstaller.org/) собирается один
+исполняемый файл — на целевой машине не нужен ни Python, ни
+`pip install`, только сам файл:
+
+```bash
+pip install -r requirements.txt -r requirements-build.txt
+pyinstaller packaging/menedger.spec
+```
+
+Результат — `dist/menedger` (Linux/macOS) или `dist/menedger.exe`
+(Windows), около 15 МБ, один файл. **Собирать нужно отдельно на каждой
+целевой ОС** — PyInstaller не кросс-компилирует: файл, собранный на
+Linux, не запустится на Windows, и наоборот. Подробности и обоснование
+выбора PyInstaller — CLAUDE.md, раздел 11.
+
 ## Тесты
 
 ```bash

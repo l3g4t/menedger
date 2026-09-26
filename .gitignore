@@ -11,6 +11,12 @@ venv/
 vault.db
 vault.bin
 
+# Артефакты сборки PyInstaller (см. CLAUDE.md, раздел 11) — генерируются
+# командой `pyinstaller packaging/menedger.spec`, в репозитории хранится
+# только сам .spec-файл, не результаты сборки.
+/build/
+/dist/
+
 # ОС / редакторы
 .DS_Store
 .vscode/

@@ -1,0 +1,8 @@
+# Зависимости только для СБОРКИ отдельного исполняемого файла
+# (см. CLAUDE.md, раздел 11) — обычному пользователю или разработчику
+# менеджера паролей ставить их не нужно, только requirements.txt.
+#
+#   pip install -r requirements.txt -r requirements-build.txt
+#   pyinstaller packaging/menedger.spec
+
+pyinstaller>=6.10
