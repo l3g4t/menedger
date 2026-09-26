@@ -230,6 +230,28 @@ def test_dialog_construction_does_not_raise(app, monkeypatch):
     audit = guiapp.AuditDialog(app, "report text")
     audit.destroy()
 
+
+def test_audit_dialog_close_button_is_not_squeezed_to_zero(app, monkeypatch):
+    """Регрессия: ScrolledText без явных width/height по умолчанию
+    запрашивает 80x24 символов, что больше окна 480x360 — pack тогда
+    отдавал всё место expand-виджету, а кнопку "Закрыть" сжимал до 1x1
+    пикселя (по факту невидимую, хотя и без исключения при построении).
+    Явный width/height у ScrolledText это чинит — проверяем, что кнопка
+    получает разумный, ненулевой размер после раскладки."""
+    _create_vault(app, monkeypatch)
+    audit = guiapp.AuditDialog(app, "report text")
+    audit.update_idletasks()
+
+    buttons = [
+        child for child in audit.winfo_children() if child.winfo_class() == "TButton"
+    ]
+    assert len(buttons) == 1
+    close_button = buttons[0]
+    assert close_button.winfo_reqwidth() > 10
+    assert close_button.winfo_reqheight() > 10
+
+    audit.destroy()
+
     copied = []
     generator = guiapp.GeneratorDialog(app, on_copy=copied.append)
     generator._on_copy_click()

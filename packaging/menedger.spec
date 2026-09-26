@@ -21,14 +21,15 @@ block_cipher = None
 
 # cryptography и argon2-cffi используют скомпилированные расширения
 # (у cryptography — Rust-биндинги, у argon2-cffi — cffi-биндинги).
-# Статический анализ импортов PyInstaller не всегда находит такие
-# бинарные зависимости и файлы данных сам — collect_all() явно
-# забирает из каждого пакета ВСЁ (модули, бинарники, данные), а не
-# полагается только на угадывание по коду.
+# ttkbootstrap, в свою очередь, не бинарный, но несёт с собой файлы
+# данных (описания тем и изображения для некоторых виджетов), которые
+# статический анализ импортов PyInstaller тоже не видит сам по себе.
+# collect_all() явно забирает из каждого пакета ВСЁ (модули, бинарники,
+# данные), а не полагается только на угадывание по коду.
 datas = []
 binaries = []
 hiddenimports = []
-for _package in ("cryptography", "argon2"):
+for _package in ("cryptography", "argon2", "ttkbootstrap"):
     _datas, _binaries, _hiddenimports = collect_all(_package)
     datas += _datas
     binaries += _binaries

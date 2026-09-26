@@ -5,7 +5,15 @@ gui.app — главное окно менеджера паролей.
 ядром: `App` не содержит крипто-логики и не решает сама, как хранить
 данные — она только вызывает vault.crypto/vault.storage/assistant.* в
 ответ на действия пользователя, ровно как это делает vault/cli.py в
-ответ на команды терминала (см. CLAUDE.md, раздел 6 и раздел "GUI").
+ответ на команды терминала (см. CLAUDE.md, раздел 6 и раздел 10).
+
+Визуальный слой — `ttkbootstrap` (см. CLAUDE.md, раздел 10.1): пакет
+переопределяет стандартные ttk-темы в современном плоском стиле и
+добавляет параметр `bootstyle` для семантической окраски виджетов
+(primary/success/danger/...). Это ЧИСТО оформление — он не участвует в
+обработке паролей и не меняет ни одной строчки бизнес-логики; диалоги
+подтверждения/ввода (`tkinter.messagebox`/`tkinter.simpledialog`)
+намеренно оставлены обычными для простоты и совместимости с тестами.
 
 Запуск: `python -m gui.app`.
 """
@@ -14,7 +22,10 @@ from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog
+
+import ttkbootstrap as ttk
+from ttkbootstrap.widgets import ScrolledText
 
 from assistant.advisor import analyze_vault, format_report
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
@@ -28,14 +39,26 @@ from vault.crypto import (
 )
 from vault.storage import load_vault_file, save_vault_file
 
+# Тема ttkbootstrap — "bootstrap-light": светлая, плоская, с синим
+# акцентом (современное, "2.0" имя темы; "flatly" и другие классические
+# Bootstrap-имена оставлены в ttkbootstrap для обратной совместимости,
+# но помечены как legacy). Список всех доступных тем:
+# ttkbootstrap.Style().theme_names(). Сменить оформление можно, просто
+# поменяв это имя, — весь остальной код не завязан на конкретную тему.
+THEME_NAME = "bootstrap-light"
+
 # Через сколько миллисекунд GUI сам очищает системный буфер обмена
 # после копирования пароля — если пользователь скопировал пароль и
 # забыл про окно, пароль не должен вечно лежать в буфере обмена,
 # доступном любому другому процессу в системе.
 CLIPBOARD_CLEAR_DELAY_MS = 20_000
 
+# Цвета для чередующихся строк в списке записей (см. _refresh_tree) —
+# нейтральные светлые тона, подобранные под светлую тему "flatly".
+_TREE_ROW_COLORS = {"evenrow": "#ffffff", "oddrow": "#f2f3f5"}
 
-class App(tk.Tk):
+
+class App(ttk.Window):
     """Главное окно приложения.
 
     Состояние открытой сессии хранилища живёт как атрибуты экземпляра:
@@ -44,10 +67,12 @@ class App(tk.Tk):
     """
 
     def __init__(self) -> None:
-        super().__init__()
-        self.title("Менеджер паролей")
-        self.geometry("640x420")
-        self.minsize(480, 320)
+        super().__init__(
+            title="Менеджер паролей",
+            themename=THEME_NAME,
+            size=(680, 460),
+            minsize=(480, 320),
+        )
 
         self.vault_path: Path | None = None
         self.master_password: str | None = None
@@ -72,7 +97,9 @@ class App(tk.Tk):
     def _build_unlock_frame(self) -> ttk.Frame:
         frame = ttk.Frame(self, padding=24)
 
-        ttk.Label(frame, text="Менеджер паролей", font=("", 16, "bold")).pack(pady=(0, 16))
+        ttk.Label(
+            frame, text="Менеджер паролей", font=("", 18, "bold"), bootstyle="primary"
+        ).pack(pady=(0, 16))
 
         path_row = ttk.Frame(frame)
         path_row.pack(fill="x", pady=4)
@@ -81,7 +108,9 @@ class App(tk.Tk):
         ttk.Entry(path_row, textvariable=self._path_var).pack(
             side="left", fill="x", expand=True, padx=8
         )
-        ttk.Button(path_row, text="Обзор...", command=self._on_browse).pack(side="left")
+        ttk.Button(
+            path_row, text="Обзор...", command=self._on_browse, bootstyle="secondary-outline"
+        ).pack(side="left")
 
         pw_row = ttk.Frame(frame)
         pw_row.pack(fill="x", pady=4)
@@ -93,17 +122,20 @@ class App(tk.Tk):
         password_entry.pack(side="left", fill="x", expand=True, padx=8)
         password_entry.bind("<Return>", lambda _event: self._on_unlock())
 
-        self._unlock_status = ttk.Label(frame, text="", foreground="red")
+        self._unlock_status = ttk.Label(frame, text="", bootstyle="danger")
         self._unlock_status.pack(fill="x", pady=(4, 8))
 
         buttons_row = ttk.Frame(frame)
         buttons_row.pack(fill="x", pady=8)
-        ttk.Button(buttons_row, text="Открыть", command=self._on_unlock).pack(
-            side="left", expand=True, fill="x", padx=(0, 4)
-        )
-        ttk.Button(buttons_row, text="Создать новое...", command=self._on_create).pack(
-            side="left", expand=True, fill="x", padx=(4, 0)
-        )
+        ttk.Button(
+            buttons_row, text="🔓 Открыть", command=self._on_unlock, bootstyle="primary"
+        ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(
+            buttons_row,
+            text="🆕 Создать новое...",
+            command=self._on_create,
+            bootstyle="secondary-outline",
+        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
         return frame
 
@@ -214,27 +246,33 @@ class App(tk.Tk):
         ttk.Entry(top_row, textvariable=self._search_var).pack(
             side="left", fill="x", expand=True, padx=8
         )
-        ttk.Button(top_row, text="Заблокировать", command=self._on_lock).pack(side="right")
+        ttk.Button(
+            top_row, text="🔒 Заблокировать", command=self._on_lock, bootstyle="secondary-outline"
+        ).pack(side="right")
 
         columns = ("site", "username")
         self._tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         self._tree.heading("site", text="Сайт")
         self._tree.heading("username", text="Логин")
-        self._tree.column("site", width=260)
-        self._tree.column("username", width=200)
+        self._tree.column("site", width=280)
+        self._tree.column("username", width=220)
+        self._tree.tag_configure("evenrow", background=_TREE_ROW_COLORS["evenrow"])
+        self._tree.tag_configure("oddrow", background=_TREE_ROW_COLORS["oddrow"])
         self._tree.pack(fill="both", expand=True)
         self._tree.bind("<Double-1>", lambda _event: self._on_view_selected())
 
         buttons_row = ttk.Frame(frame)
         buttons_row.pack(fill="x", pady=(8, 0))
-        for text, command in (
-            ("Добавить", self._on_add),
-            ("Открыть запись", self._on_view_selected),
-            ("Удалить", self._on_delete_selected),
-            ("Советник", self._on_audit),
-            ("Генератор", self._on_generate_standalone),
+        for text, command, style in (
+            ("➕ Добавить", self._on_add, "success"),
+            ("👁 Открыть запись", self._on_view_selected, "info"),
+            ("🗑 Удалить", self._on_delete_selected, "danger"),
+            ("🛡 Советник", self._on_audit, "warning"),
+            ("🎲 Генератор", self._on_generate_standalone, "primary"),
         ):
-            ttk.Button(buttons_row, text=text, command=command).pack(side="left", padx=(0, 6))
+            ttk.Button(buttons_row, text=text, command=command, bootstyle=style).pack(
+                side="left", padx=(0, 6)
+            )
 
         return frame
 
@@ -249,6 +287,7 @@ class App(tk.Tk):
             return
 
         query = self._search_var.get().strip().lower()
+        visible_position = 0
         for index, entry in enumerate(self.data.get("entries", [])):
             haystack = f"{entry['site']} {entry['username']}".lower()
             if query and query not in haystack:
@@ -256,10 +295,16 @@ class App(tk.Tk):
             # iid = индекс записи в data["entries"] на момент построения
             # списка (до применения фильтра) — по нему потом быстро
             # находим исходную запись, не полагаясь на то, что site
-            # уникален (см. _selected_entry).
+            # уникален (см. _selected_entry). Чередование цвета строки
+            # (evenrow/oddrow) считается отдельно, по позиции СРЕДИ
+            # ВИДИМЫХ строк — иначе после фильтрации полоски выглядели
+            # бы вразнобой, унаследовав чётность/нечётность от индекса
+            # в полном списке.
+            tag = "evenrow" if visible_position % 2 == 0 else "oddrow"
             self._tree.insert(
-                "", "end", iid=str(index), values=(entry["site"], entry["username"])
+                "", "end", iid=str(index), values=(entry["site"], entry["username"]), tags=(tag,)
             )
+            visible_position += 1
 
     def _selected_entry(self) -> dict | None:
         selection = self._tree.selection()
@@ -402,13 +447,11 @@ class App(tk.Tk):
         self.destroy()
 
 
-class EntryDialog(tk.Toplevel):
+class EntryDialog(ttk.Toplevel):
     """Модальный диалог добавления новой записи."""
 
     def __init__(self, parent: App, title: str) -> None:
-        super().__init__(parent)
-        self.title(title)
-        self.resizable(False, False)
+        super().__init__(title=title, master=parent, resizable=(False, False))
         self.transient(parent)
         self.result: tuple[str, str, str] | None = None
 
@@ -432,17 +475,23 @@ class EntryDialog(tk.Toplevel):
                 entry.focus_set()
         form.columnconfigure(1, weight=1)
 
-        ttk.Button(form, text="Сгенерировать", command=self._on_generate).grid(
-            row=len(fields), column=1, sticky="e", pady=(4, 0)
-        )
+        ttk.Button(
+            form,
+            text="🎲 Сгенерировать",
+            command=self._on_generate,
+            bootstyle="secondary-outline",
+        ).grid(row=len(fields), column=1, sticky="e", pady=(4, 0))
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Отмена", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Сохранить", command=self._on_save).pack(
-            side="right", padx=(0, 8)
+        ttk.Button(buttons, text="Отмена", command=self.destroy, bootstyle="secondary").pack(
+            side="right"
         )
+        ttk.Button(
+            buttons, text="💾 Сохранить", command=self._on_save, bootstyle="success"
+        ).pack(side="right", padx=(0, 8))
 
+        self.place_window_center()
         self.grab_set()
 
     def _on_generate(self) -> None:
@@ -467,15 +516,13 @@ class EntryDialog(tk.Toplevel):
         self.destroy()
 
 
-class ViewEntryDialog(tk.Toplevel):
+class ViewEntryDialog(ttk.Toplevel):
     """Просмотр одной записи целиком: логин/пароль/дата + действия."""
 
     def __init__(self, parent: App, entry: dict) -> None:
-        super().__init__(parent)
+        super().__init__(title=entry["site"], master=parent, resizable=(False, False))
         self._parent = parent
         self._entry = entry
-        self.title(entry["site"])
-        self.resizable(False, False)
         self.transient(parent)
 
         form = ttk.Frame(self, padding=16)
@@ -493,19 +540,23 @@ class ViewEntryDialog(tk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Закрыть", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Удалить", command=self._on_delete).pack(
-            side="right", padx=(0, 8)
-        )
-        ttk.Button(buttons, text="Сменить пароль", command=self._on_update).pack(
-            side="right", padx=(0, 8)
+        ttk.Button(buttons, text="Закрыть", command=self.destroy, bootstyle="secondary").pack(
+            side="right"
         )
         ttk.Button(
+            buttons, text="🗑 Удалить", command=self._on_delete, bootstyle="danger"
+        ).pack(side="right", padx=(0, 8))
+        ttk.Button(
+            buttons, text="✏️ Сменить пароль", command=self._on_update, bootstyle="warning"
+        ).pack(side="right", padx=(0, 8))
+        ttk.Button(
             buttons,
-            text="Копировать пароль",
+            text="📋 Копировать пароль",
             command=lambda: parent._copy_to_clipboard(entry["password"]),
+            bootstyle="info",
         ).pack(side="left")
 
+        self.place_window_center()
         self.grab_set()
 
     def _on_update(self) -> None:
@@ -522,33 +573,39 @@ class ViewEntryDialog(tk.Toplevel):
         self._parent._delete_entry(self._entry)
 
 
-class AuditDialog(tk.Toplevel):
+class AuditDialog(ttk.Toplevel):
     """Окно с отчётом советника по безопасности (см. assistant.advisor)."""
 
     def __init__(self, parent: App, report_text: str) -> None:
-        super().__init__(parent)
-        self.title("Советник по безопасности")
+        super().__init__(title="Советник по безопасности", master=parent, size=(480, 360))
         self.transient(parent)
-        self.geometry("480x360")
 
-        text_widget = tk.Text(self, wrap="word", padx=12, pady=12)
+        # width/height заданы явно в символах/строках — у Text (и
+        # ScrolledText поверх него) размер по умолчанию 80x24, что
+        # заметно больше окна 480x360 и без этого "съедало" кнопку
+        # "Закрыть" снизу (pack не ужимает уже переполненный expand-
+        # виджет ради соседа).
+        text_widget = ScrolledText(
+            self, wrap="word", padding=12, auto_hide=True, width=56, height=14
+        )
         text_widget.insert("1.0", report_text)
-        text_widget.configure(state="disabled")
+        text_widget.text.configure(state="disabled")
         text_widget.pack(fill="both", expand=True)
 
-        ttk.Button(self, text="Закрыть", command=self.destroy).pack(pady=8)
+        ttk.Button(self, text="Закрыть", command=self.destroy, bootstyle="secondary").pack(
+            pady=8
+        )
+        self.place_window_center()
         self.grab_set()
 
 
-class GeneratorDialog(tk.Toplevel):
+class GeneratorDialog(ttk.Toplevel):
     """Полноценный генератор паролей: длина + наборы символов +
     объяснение силы (см. assistant.generator). Не трогает хранилище —
     работает и без выбранной записи."""
 
     def __init__(self, parent: tk.Misc, on_copy) -> None:
-        super().__init__(parent)
-        self.title("Генератор паролей")
-        self.resizable(False, False)
+        super().__init__(title="Генератор паролей", master=parent, resizable=(False, False))
         self.transient(parent)
         self._on_copy = on_copy
 
@@ -572,8 +629,11 @@ class GeneratorDialog(tk.Toplevel):
             ("спецсимволы", self._use_symbols),
         )
         for row, (text, var) in enumerate(checkboxes, start=1):
-            ttk.Checkbutton(form, text=text, variable=var).grid(
-                row=row, column=0, columnspan=2, sticky="w"
+            # bootstyle="round-toggle" — современный переключатель
+            # вместо классического квадратного чекбокса; чисто
+            # оформление, поведение (True/False в var) не меняется.
+            ttk.Checkbutton(form, text=text, variable=var, bootstyle="round-toggle").grid(
+                row=row, column=0, columnspan=2, sticky="w", pady=2
             )
 
         result_row = 1 + len(checkboxes)
@@ -590,13 +650,18 @@ class GeneratorDialog(tk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Закрыть", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Копировать", command=self._on_copy_click).pack(
-            side="right", padx=(0, 8)
+        ttk.Button(buttons, text="Закрыть", command=self.destroy, bootstyle="secondary").pack(
+            side="right"
         )
-        ttk.Button(buttons, text="Сгенерировать", command=self._on_generate).pack(side="left")
+        ttk.Button(
+            buttons, text="📋 Копировать", command=self._on_copy_click, bootstyle="info"
+        ).pack(side="right", padx=(0, 8))
+        ttk.Button(
+            buttons, text="🎲 Сгенерировать", command=self._on_generate, bootstyle="primary"
+        ).pack(side="left")
 
         self._on_generate()
+        self.place_window_center()
         self.grab_set()
 
     def _on_generate(self) -> None:
