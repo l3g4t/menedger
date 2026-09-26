@@ -184,3 +184,167 @@ def test_generate_rejects_too_short_length(monkeypatch):
     code = _run(monkeypatch, ["generate", "--length", "1"])
 
     assert code != 0
+
+
+def test_update_changes_password(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "old-password"],
+    )
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "update", "example.com"],
+        secrets=[MASTER, "new-password"],
+    )
+    assert code == 0
+
+    capsys.readouterr()
+    _run(monkeypatch, ["--path", str(vault_path), "get", "example.com"], secrets=[MASTER])
+    out = capsys.readouterr().out
+    assert "new-password" in out
+    assert "old-password" not in out
+
+
+def test_update_requires_username_when_ambiguous(tmp_path, monkeypatch):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "pass1"],
+    )
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "bob"],
+        secrets=[MASTER, "pass2"],
+    )
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "update", "example.com"],
+        secrets=[MASTER],
+    )
+    assert code != 0
+
+
+def test_update_missing_site_returns_nonzero(tmp_path, monkeypatch):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "update", "nowhere.com"],
+        secrets=[MASTER],
+    )
+    assert code != 0
+
+
+def test_delete_removes_entry_with_confirmation(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "s3cr3t!"],
+    )
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "delete", "example.com"],
+        secrets=[MASTER],
+        plain_inputs=["y"],
+    )
+    assert code == 0
+
+    capsys.readouterr()
+    code = _run(monkeypatch, ["--path", str(vault_path), "list"], secrets=[MASTER])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "example.com" not in out
+
+
+def test_delete_without_confirmation_keeps_entry(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "s3cr3t!"],
+    )
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "delete", "example.com"],
+        secrets=[MASTER],
+        plain_inputs=["n"],
+    )
+    assert code == 0
+
+    capsys.readouterr()
+    _run(monkeypatch, ["--path", str(vault_path), "list"], secrets=[MASTER])
+    out = capsys.readouterr().out
+    assert "example.com" in out
+
+
+def test_delete_with_yes_skips_confirmation(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "s3cr3t!"],
+    )
+
+    code = _run(
+        monkeypatch, ["--path", str(vault_path), "delete", "example.com", "--yes"], secrets=[MASTER]
+    )
+    assert code == 0
+
+    capsys.readouterr()
+    _run(monkeypatch, ["--path", str(vault_path), "list"], secrets=[MASTER])
+    out = capsys.readouterr().out
+    assert "example.com" not in out
+
+
+def test_delete_with_username_narrows_to_one_entry(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "pass1"],
+    )
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "bob"],
+        secrets=[MASTER, "pass2"],
+    )
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "delete", "example.com", "--username", "alice", "--yes"],
+        secrets=[MASTER],
+    )
+    assert code == 0
+
+    capsys.readouterr()
+    _run(monkeypatch, ["--path", str(vault_path), "get", "example.com"], secrets=[MASTER])
+    out = capsys.readouterr().out
+    assert "bob" in out
+    assert "alice" not in out
+
+
+def test_delete_missing_site_returns_nonzero(tmp_path, monkeypatch):
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "delete", "nowhere.com", "--yes"],
+        secrets=[MASTER],
+    )
+    assert code != 0

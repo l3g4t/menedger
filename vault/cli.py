@@ -7,6 +7,8 @@ vault.cli — интерфейс командной строки менедже�
     python -m vault.cli add <site>          — добавить запись
     python -m vault.cli list                — показать список сайтов
     python -m vault.cli get <site>          — показать логин/пароль
+    python -m vault.cli update <site>       — сменить пароль записи
+    python -m vault.cli delete <site>       — удалить запись(и)
     python -m vault.cli audit               — советник по безопасности
     python -m vault.cli generate            — сгенерировать пароль
 
@@ -185,7 +187,7 @@ def cmd_get(args: argparse.Namespace) -> None:
     master_password = _prompt_secret()
     data = _open_vault(path, master_password)
 
-    matches = [entry for entry in data.get("entries", []) if entry["site"] == args.site]
+    matches = _find_matches(data, args.site, None)
     if not matches:
         print(f"Записей для «{args.site}» не найдено.", file=sys.stderr)
         raise SystemExit(1)
@@ -196,6 +198,99 @@ def cmd_get(args: argparse.Namespace) -> None:
         print(f"Пароль:  {entry['password']}")
         print(f"Создано: {entry['created_at']}")
         print()
+
+
+def _find_matches(data: dict, site: str, username: str | None) -> list[dict]:
+    """Найти записи по сайту (и, если указан, по логину — для случая,
+    когда на одном сайте хранится несколько аккаунтов)."""
+    return [
+        entry
+        for entry in data.get("entries", [])
+        if entry["site"] == site and (username is None or entry["username"] == username)
+    ]
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    """Сменить пароль у существующей записи.
+
+    Требует однозначно определить ОДНУ запись: если на сайте несколько
+    аккаунтов, нужно уточнить --username (иначе непонятно, чей именно
+    пароль менять).
+
+    `created_at` записи при этом обновляется на текущий момент — для
+    советника по безопасности (assistant.advisor) это поле означает
+    "когда пароль был последний раз установлен", а не буквально "когда
+    создана запись": именно от этой даты отсчитывается устаревание
+    пароля (см. CLAUDE.md, раздел 9.3), и после ротации пароль явно
+    "не устаревший", даже если сама запись была заведена год назад.
+    """
+    path = Path(args.path)
+    master_password = _prompt_secret()
+    data = _open_vault(path, master_password)
+
+    matches = _find_matches(data, args.site, args.username)
+    if not matches:
+        print(f"Записей для «{args.site}» не найдено.", file=sys.stderr)
+        raise SystemExit(1)
+    if len(matches) > 1:
+        print(
+            f"На «{args.site}» несколько записей — уточните --username:",
+            file=sys.stderr,
+        )
+        for entry in matches:
+            print(f"  - {entry['username']}", file=sys.stderr)
+        raise SystemExit(1)
+
+    entry = matches[0]
+    new_password = _prompt_secret("Новый пароль: ")
+    if not new_password:
+        print("Пароль не может быть пустым.", file=sys.stderr)
+        raise SystemExit(1)
+
+    entry["password"] = new_password
+    entry["created_at"] = _now_iso()
+
+    blob = encrypt_vault(data, master_password)
+    save_vault_file(path, blob)
+    print(f"Пароль для «{entry['site']}» ({entry['username']}) обновлён.")
+
+
+def cmd_delete(args: argparse.Namespace) -> None:
+    """Удалить одну или несколько записей по сайту (и, если указан,
+    логину). Перед удалением требует подтверждения, если не передан
+    флаг --yes — удаление необратимо (см. CLAUDE.md, раздел 5: файл
+    хранилища — единственный источник правды, случайную потерю данных
+    важно не допустить одной опечаткой)."""
+    path = Path(args.path)
+    master_password = _prompt_secret()
+    data = _open_vault(path, master_password)
+
+    matches = _find_matches(data, args.site, args.username)
+    if not matches:
+        print(f"Записей для «{args.site}» не найдено.", file=sys.stderr)
+        raise SystemExit(1)
+
+    print("Будут удалены:")
+    for entry in matches:
+        print(f"  - {entry['site']} ({entry['username']})")
+
+    if not args.yes:
+        answer = input("Подтвердите удаление [y/N]: ").strip().lower()
+        if answer not in ("y", "yes", "да"):
+            print("Отменено.")
+            return
+
+    # Сравниваем по id(), а не по значению (==) — если в хранилище
+    # случайно окажутся две записи с полностью одинаковым содержимым
+    # (включая created_at до секунды), сравнение "по значению" удалило
+    # бы и ту, что не входит в matches, просто потому что она равна
+    # одной из них. id() сравнивает конкретные объекты, а не их данные.
+    matched_ids = {id(entry) for entry in matches}
+    data["entries"] = [e for e in data.get("entries", []) if id(e) not in matched_ids]
+
+    blob = encrypt_vault(data, master_password)
+    save_vault_file(path, blob)
+    print(f"Удалено записей: {len(matches)}.")
 
 
 def cmd_audit(args: argparse.Namespace) -> None:
@@ -265,6 +360,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_get = subparsers.add_parser("get", help="показать логин/пароль для сайта")
     p_get.add_argument("site", help="сайт/сервис, точное совпадение")
     p_get.set_defaults(func=cmd_get)
+
+    p_update = subparsers.add_parser("update", help="сменить пароль существующей записи")
+    p_update.add_argument("site", help="сайт/сервис, точное совпадение")
+    p_update.add_argument(
+        "--username", help="уточнить логин, если на сайте несколько записей"
+    )
+    p_update.set_defaults(func=cmd_update)
+
+    p_delete = subparsers.add_parser("delete", help="удалить запись(и) по сайту")
+    p_delete.add_argument("site", help="сайт/сервис, точное совпадение")
+    p_delete.add_argument(
+        "--username", help="сузить удаление до конкретного логина"
+    )
+    p_delete.add_argument(
+        "--yes", action="store_true", help="не спрашивать подтверждение"
+    )
+    p_delete.set_defaults(func=cmd_delete)
 
     p_audit = subparsers.add_parser(
         "audit", help="советник по безопасности: повторные/слабые/устаревшие пароли"
