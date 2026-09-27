@@ -85,7 +85,14 @@ python -m vault.cli --path ./work.vault add example.com
 
 Через [PyInstaller](https://pyinstaller.org/) собирается один
 исполняемый файл — на целевой машине не нужен ни Python, ни
-`pip install`, только сам файл:
+`pip install`, только сам файл.
+
+**Windows — проще всего:** установите Python с [python.org](https://python.org)
+(отметьте «Add python.exe to PATH» при установке), затем дважды
+кликните по `packaging\build_windows.bat` — скрипт сам поставит
+зависимости и соберёт файл, ничего вводить в терминал не нужно.
+
+**Linux/macOS (или вручную на Windows):**
 
 ```bash
 pip install -r requirements.txt -r requirements-build.txt
@@ -93,10 +100,10 @@ pyinstaller packaging/menedger.spec
 ```
 
 Результат — `dist/menedger` (Linux/macOS) или `dist/menedger.exe`
-(Windows), около 15 МБ, один файл. **Собирать нужно отдельно на каждой
-целевой ОС** — PyInstaller не кросс-компилирует: файл, собранный на
-Linux, не запустится на Windows, и наоборот. Подробности и обоснование
-выбора PyInstaller — CLAUDE.md, раздел 11.
+(Windows), около 15–25 МБ, один файл. **Собирать нужно отдельно на
+каждой целевой ОС** — PyInstaller не кросс-компилирует: файл, собранный
+на Linux, не запустится на Windows, и наоборот. Подробности и
+обоснование выбора PyInstaller — CLAUDE.md, раздел 11.
 
 ## Тесты
 
