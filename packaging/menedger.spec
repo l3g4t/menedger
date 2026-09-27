@@ -35,6 +35,16 @@ for _package in ("cryptography", "argon2", "ttkbootstrap"):
     binaries += _binaries
     hiddenimports += _hiddenimports
 
+# ttkbootstrap рисует часть иконок темы (например, у Combobox) через
+# Pillow (PIL.ImageTk) — а Pillow сама подключает свой Tk-биндинг
+# (PIL._tkinter_finder) динамически, через отдельный от обычного
+# импорта механизм поиска модуля. Статический анализ PyInstaller видит
+# использование PIL.ImageTk, но не видит эту динамическую подгрузку —
+# без явного hiddenimport собранный файл падает с ModuleNotFoundError
+# прямо при создании главного окна (на этапе применения темы), а не при
+# запуске CLI-команд, которые тему не трогают.
+hiddenimports.append("PIL._tkinter_finder")
+
 # Путь к корню репозитория — spec лежит в packaging/, код в vault/,
 # assistant/, gui/ на уровень выше.
 project_root = Path(SPECPATH).resolve().parent
