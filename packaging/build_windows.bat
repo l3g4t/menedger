@@ -10,6 +10,31 @@ rem нужно именно на Windows (кросс-компиляция нев
 
 cd /d "%~dp0\.."
 
+echo === Проверяю версию Python ===
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" 2>nul
+if errorlevel 1 (
+    echo.
+    echo ОШИБКА: нужен Python 3.11 или новее.
+    python --version 2>nul
+    echo.
+    echo Если строка выше показала версию МЕНЬШЕ 3.11 ^(например, 3.9.x^)
+    echo или ничего не показала — установите свежий Python с python.org
+    echo ^(https://www.python.org/downloads/^), обязательно отметив галочку
+    echo "Add python.exe to PATH" при установке. Если на компьютере уже
+    echo стоит несколько версий Python, команда "python" в этом окне может
+    echo указывать на старую — проверьте это командой "python --version"
+    echo после установки новой версии ^(может понадобиться перезапустить
+    echo терминал^).
+    echo.
+    echo Почему это важно именно для этого проекта — см. CLAUDE.md,
+    echo раздел 11.2: библиотеки в requirements.txt закреплены точными
+    echo версиями, а новые версии некоторых из них ^(ttkbootstrap, pytest^)
+    echo сами требуют Python 3.10+ — с более старым Python установка падает
+    echo с непонятной ошибкой pip ещё до начала сборки.
+    pause
+    exit /b 1
+)
+
 echo === Устанавливаю зависимости (requirements.txt + requirements-build.txt) ===
 rem --upgrade — подстраховка сверх точных версий (==) в requirements*.txt:
 rem гарантирует, что уже стоящая на компьютере ДРУГАЯ версия пакета (от
