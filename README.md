@@ -95,7 +95,7 @@ python -m vault.cli --path ./work.vault add example.com
 **Linux/macOS (или вручную на Windows):**
 
 ```bash
-pip install -r requirements.txt -r requirements-build.txt
+pip install --upgrade -r requirements.txt -r requirements-build.txt
 pyinstaller packaging/menedger.spec
 ```
 

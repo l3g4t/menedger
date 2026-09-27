@@ -5,4 +5,4 @@
 #   pip install -r requirements.txt -r requirements-build.txt
 #   pyinstaller packaging/menedger.spec
 
-pyinstaller>=6.10
+pyinstaller==6.22.3

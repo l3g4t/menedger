@@ -11,7 +11,11 @@ rem нужно именно на Windows (кросс-компиляция нев
 cd /d "%~dp0\.."
 
 echo === Устанавливаю зависимости (requirements.txt + requirements-build.txt) ===
-python -m pip install -r requirements.txt -r requirements-build.txt
+rem --upgrade — подстраховка сверх точных версий (==) в requirements*.txt:
+rem гарантирует, что уже стоящая на компьютере ДРУГАЯ версия пакета (от
+rem более раннего/другого проекта) будет заменена на нужную, а не просто
+rem пропущена как "уже что-то стоит". См. CLAUDE.md, раздел 11.1.
+python -m pip install --upgrade -r requirements.txt -r requirements-build.txt
 if errorlevel 1 (
     echo.
     echo ОШИБКА: не удалось установить зависимости.
