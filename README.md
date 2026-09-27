@@ -107,7 +107,12 @@ pyinstaller packaging/menedger.spec
 
 ## Тесты
 
+`pytest` не входит в `requirements.txt` (он не нужен, чтобы просто
+пользоваться приложением или собрать `.exe`) — ставится отдельным
+файлом:
+
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest
 ```
 

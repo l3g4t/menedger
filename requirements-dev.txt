@@ -1,0 +1,16 @@
+# Зависимости только для ЗАПУСКА ТЕСТОВ (pytest) — не нужны ни для
+# работы приложения (CLI/GUI), ни для сборки .exe через PyInstaller
+# (см. requirements.txt, requirements-build.txt). Разработчику,
+# который хочет прогнать `python -m pytest`, нужен этот файл
+# дополнительно к requirements.txt.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   python -m pytest
+#
+# Версия закреплена НЕ самой последней (9.x), а последней из ветки 8.x
+# (Requires-Python >=3.9) намеренно — см. CLAUDE.md, раздел 11.1:
+# pytest>=9.0 требует Python 3.10+, а строгий `==` на такую версию
+# ломает установку на компьютере со старым Python ошибкой "Could not
+# find a version that satisfies the requirement", даже не начиная
+# сборку самого приложения (которое такого ограничения не имеет).
+pytest==8.4.2
