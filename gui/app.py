@@ -1867,7 +1867,7 @@ class GeneratorDialog(ttk.Toplevel):
                 **parent._icon_kwargs("save", "white"),
             ),
             parent._accent_style(),
-        ).pack(side="right")
+        ).pack(side="right", padx=(16, 0))
 
         self._on_generate()
         self.update_idletasks()
