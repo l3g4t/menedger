@@ -151,8 +151,8 @@ class App(ttk.Window):
         super().__init__(
             title=APP_TITLE,
             themename=THEME_NAME,
-            size=(780, 480),
-            minsize=(560, 340),
+            size=(780, 620),
+            minsize=(560, 460),
         )
 
         if ICON_PATH.exists():
@@ -484,69 +484,106 @@ class App(ttk.Window):
         center = ttk.Frame(outer, style="UnlockBg.TFrame")
         center.pack(expand=True)
 
-        card = ttk.Frame(center, padding=32, borderwidth=1, relief="solid")
+        card = ttk.Frame(center, padding=(40, 36), borderwidth=1, relief="solid")
         card.pack()
+
+        def field_label(parent: ttk.Frame, text: str) -> ttk.Label:
+            # Мелкая заглавная подпись НАД полем — как на референсе
+            # (вариант C): "ФАЙЛ ХРАНИЛИЩА"/"МАСТЕР-ПАРОЛЬ", а не привычная
+            # "Файл хранилища:" слева от поля.
+            return ttk.Label(parent, text=text.upper(), font=("", 8, "bold"), bootstyle="secondary")
 
         if hasattr(self, "_icon_image_medium"):
             ttk.Label(card, image=self._icon_image_medium).pack(pady=(0, 12))
 
-        ttk.Label(
-            card, text=APP_TITLE, font=("", 18, "bold"), bootstyle="primary"
-        ).pack()
+        # Без bootstyle="primary" — на референсе заголовок тёмный (обычный
+        # цвет текста темы), а не синий; синий на экране разблокировки
+        # оставлен только за акцентной кнопкой "Разблокировать".
+        ttk.Label(card, text=APP_TITLE, font=("", 18, "bold")).pack()
         ttk.Label(
             card,
             text="Введите мастер-пароль, чтобы открыть хранилище",
             bootstyle="secondary",
-            wraplength=280,
             justify="center",
         ).pack(pady=(2, 20))
 
+        field_label(card, "Файл хранилища").pack(fill="x", anchor="w")
         path_row = ttk.Frame(card)
-        path_row.pack(fill="x", pady=4)
-        ttk.Label(path_row, text="Файл хранилища:").pack(side="left")
+        path_row.pack(fill="x", pady=(2, 12))
         self._path_var = tk.StringVar(value=str(DEFAULT_VAULT_PATH))
         ttk.Entry(path_row, textvariable=self._path_var, width=26).pack(
-            side="left", fill="x", expand=True, padx=8
+            side="left", fill="x", expand=True, padx=(0, 8)
         )
         self._styled(
-            ttk.Button(path_row, text="Обзор...", command=self._on_browse), self._neutral_style()
+            ttk.Button(path_row, text="Выберите файл", command=self._on_browse),
+            self._neutral_style(),
         ).pack(side="left")
 
+        field_label(card, "Мастер-пароль").pack(fill="x", anchor="w")
         pw_row = ttk.Frame(card)
-        pw_row.pack(fill="x", pady=4)
-        ttk.Label(pw_row, text="Мастер-пароль:").pack(side="left")
+        pw_row.pack(fill="x", pady=(2, 4))
         self._password_var = tk.StringVar()
         # show="*" — тот же смысл, что и getpass.getpass() в CLI (см.
         # vault/cli.py): вводимые символы не должны быть видны на экране.
+        # Кнопка-"глаз" рядом (см. _on_toggle_password_visibility) даёт
+        # пользователю возможность сверить, что он ввёл, не расширяя это
+        # доверие на любого, кто просто смотрит на экран через плечо.
         password_entry = ttk.Entry(pw_row, textvariable=self._password_var, show="*")
-        password_entry.pack(side="left", fill="x", expand=True, padx=8)
+        password_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         password_entry.bind("<Return>", lambda _event: self._on_unlock())
+        self._password_entry = password_entry
+        self._password_visible = False
+        self._styled(
+            ttk.Button(
+                pw_row,
+                command=self._on_toggle_password_visibility,
+                **self._icon_kwargs("eye", "dark"),
+            ),
+            self._rounded_button_style(
+                "Rounded.IconToggle",
+                _NEUTRAL_FILL,
+                _NEUTRAL_TEXT,
+                border_color=_NEUTRAL_BORDER,
+                padding=(8, 6),
+            ),
+        ).pack(side="left")
 
         self._unlock_status = ttk.Label(card, text="", bootstyle="danger")
         self._unlock_status.pack(fill="x", pady=(4, 8))
 
-        buttons_row = ttk.Frame(card)
-        buttons_row.pack(fill="x", pady=8)
         self._styled(
             ttk.Button(
-                buttons_row,
-                text="Открыть",
+                card,
+                text="Разблокировать",
                 command=self._on_unlock,
                 **self._icon_kwargs("unlock", "white"),
             ),
             self._accent_style(),
-        ).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ).pack(fill="x", pady=(4, 16))
+
+        divider_row = ttk.Frame(card)
+        divider_row.pack(fill="x", pady=(0, 12))
+        ttk.Separator(divider_row).pack(side="left", fill="x", expand=True)
+        ttk.Label(
+            divider_row, text="НЕТ ХРАНИЛИЩА?", font=("", 8, "bold"), bootstyle="secondary"
+        ).pack(side="left", padx=8)
+        ttk.Separator(divider_row).pack(side="left", fill="x", expand=True)
+
         self._styled(
             ttk.Button(
-                buttons_row,
-                text="Создать новое...",
+                card,
+                text="Создать новое хранилище",
                 command=self._on_create,
                 **self._icon_kwargs("plus", "dark"),
             ),
             self._neutral_style(),
-        ).pack(side="left", expand=True, fill="x", padx=(4, 0))
+        ).pack(fill="x")
 
         return outer
+
+    def _on_toggle_password_visibility(self) -> None:
+        self._password_visible = not self._password_visible
+        self._password_entry.configure(show="" if self._password_visible else "*")
 
     def _on_browse(self) -> None:
         initial_dir = Path(self._path_var.get()).parent
