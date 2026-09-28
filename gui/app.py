@@ -81,6 +81,16 @@ ICONS_DIR = Path(__file__).resolve().parent / "icons"
 # нейтральные светлые тона, подобранные под светлую тему "flatly".
 _TREE_ROW_COLORS = {"evenrow": "#ffffff", "oddrow": "#f2f3f5"}
 
+# Палитра сайдбара/тёмного фона — цвет самой иконки приложения (см.
+# CLAUDE.md, раздел 10.2), тот же язык, что и в референсах "Разделённая
+# панель" (тёмный сайдбар + светлая рабочая область).
+_SIDEBAR_BG = "#12233d"
+_SIDEBAR_TEXT = "#b9c8e6"
+_SIDEBAR_TEXT_ACTIVE = "#ffffff"
+_SIDEBAR_HOVER_BG = "#1e3a63"
+_SIDEBAR_LOCK_BG = "#e0524f"
+_SIDEBAR_LOCK_HOVER_BG = "#c94742"
+
 
 class App(ttk.Window):
     """Главное окно приложения.
@@ -94,13 +104,22 @@ class App(ttk.Window):
         super().__init__(
             title=APP_TITLE,
             themename=THEME_NAME,
-            size=(680, 460),
-            minsize=(480, 320),
+            size=(780, 480),
+            minsize=(560, 340),
         )
 
         if ICON_PATH.exists():
             self._icon_image = tk.PhotoImage(file=str(ICON_PATH))
             self.iconphoto(True, self._icon_image)
+            # Уменьшенные версии для сайдбара (32px) и карточки на экране
+            # разблокировки (64px) — subsample(n) делит ровно, 256/8=32,
+            # 256/4=64, без промежуточного пережатия через Pillow (его в
+            # рантайме нет, см. раздел 10.2 про выбор PNG именно из-за
+            # нативной поддержки Tcl/Tk, без лишней зависимости).
+            self._icon_image_small = self._icon_image.subsample(8, 8)
+            self._icon_image_medium = self._icon_image.subsample(4, 4)
+
+        self._setup_custom_styles()
 
         # Кэш иконок кнопок (см. _icon/_icon_kwargs ниже) — ОБЯЗАТЕЛЬНО
         # на экземпляр окна, а не на уровень модуля: tk.PhotoImage
@@ -162,29 +181,95 @@ class App(ttk.Window):
             return {}
         return {"image": image, "compound": "left"}
 
+    def _setup_custom_styles(self) -> None:
+        """Стили для сайдбара и тёмного фона экрана разблокировки.
+
+        `bootstyle` из ttkbootstrap понимает только фиксированный набор
+        семантических токенов (primary/success/danger/warning/info/
+        light/dark + модификаторы) — попытка завести кастомный цвет
+        через `style.colors.set(...)` и передать его как `bootstyle=`
+        тихо игнорируется (ttkbootstrap печатает предупреждение про
+        "unknown token" и подставляет цвет по умолчанию, проверено в
+        разработческой сессии). Поэтому цвета сайдбара заведены НАПРЯМУЮ
+        через `ttk.Style().configure()` под собственными именами стилей,
+        в обход механизма `bootstyle` — этот путь ttkbootstrap не
+        перехватывает и не проверяет по списку токенов.
+        """
+        style = ttk.Style()
+
+        style.configure("UnlockBg.TFrame", background=_SIDEBAR_BG)
+
+        style.configure("Sidebar.TFrame", background=_SIDEBAR_BG)
+        style.configure(
+            "Sidebar.TLabel", background=_SIDEBAR_BG, foreground=_SIDEBAR_TEXT_ACTIVE
+        )
+        style.configure(
+            "SidebarNav.TButton",
+            background=_SIDEBAR_BG,
+            foreground=_SIDEBAR_TEXT,
+            borderwidth=0,
+            focuscolor=_SIDEBAR_BG,
+            padding=(12, 10),
+            anchor="w",
+        )
+        style.map(
+            "SidebarNav.TButton",
+            background=[("active", _SIDEBAR_HOVER_BG)],
+            foreground=[("active", _SIDEBAR_TEXT_ACTIVE)],
+        )
+        style.configure(
+            "SidebarLock.TButton",
+            background=_SIDEBAR_LOCK_BG,
+            foreground=_SIDEBAR_TEXT_ACTIVE,
+            borderwidth=0,
+            focuscolor=_SIDEBAR_LOCK_BG,
+            padding=(12, 10),
+        )
+        style.map("SidebarLock.TButton", background=[("active", _SIDEBAR_LOCK_HOVER_BG)])
+
     # ------------------------------------------------------------------
     # Экран разблокировки / создания хранилища
     # ------------------------------------------------------------------
 
     def _build_unlock_frame(self) -> ttk.Frame:
-        frame = ttk.Frame(self, padding=24)
+        # Тёмный фон во всё окно (тот же цвет, что у сайдбара главного
+        # экрана и у самой иконки приложения) + белая "карточка" по
+        # центру — язык "Разделённая панель" (см. CLAUDE.md, раздел 10).
+        # Центрирование — трюк pack(): виджет, упакованный с expand=True
+        # и БЕЗ fill, центрируется в родителе по обеим осям.
+        outer = ttk.Frame(self, style="UnlockBg.TFrame")
+        center = ttk.Frame(outer, style="UnlockBg.TFrame")
+        center.pack(expand=True)
+
+        card = ttk.Frame(center, padding=32, borderwidth=1, relief="solid")
+        card.pack()
+
+        if hasattr(self, "_icon_image_medium"):
+            ttk.Label(card, image=self._icon_image_medium).pack(pady=(0, 12))
 
         ttk.Label(
-            frame, text=APP_TITLE, font=("", 18, "bold"), bootstyle="primary"
-        ).pack(pady=(0, 16))
+            card, text=APP_TITLE, font=("", 18, "bold"), bootstyle="primary"
+        ).pack()
+        ttk.Label(
+            card,
+            text="Введите мастер-пароль, чтобы открыть хранилище",
+            bootstyle="secondary",
+            wraplength=280,
+            justify="center",
+        ).pack(pady=(2, 20))
 
-        path_row = ttk.Frame(frame)
+        path_row = ttk.Frame(card)
         path_row.pack(fill="x", pady=4)
         ttk.Label(path_row, text="Файл хранилища:").pack(side="left")
         self._path_var = tk.StringVar(value=str(DEFAULT_VAULT_PATH))
-        ttk.Entry(path_row, textvariable=self._path_var).pack(
+        ttk.Entry(path_row, textvariable=self._path_var, width=26).pack(
             side="left", fill="x", expand=True, padx=8
         )
         ttk.Button(
             path_row, text="Обзор...", command=self._on_browse, bootstyle="secondary-outline"
         ).pack(side="left")
 
-        pw_row = ttk.Frame(frame)
+        pw_row = ttk.Frame(card)
         pw_row.pack(fill="x", pady=4)
         ttk.Label(pw_row, text="Мастер-пароль:").pack(side="left")
         self._password_var = tk.StringVar()
@@ -194,10 +279,10 @@ class App(ttk.Window):
         password_entry.pack(side="left", fill="x", expand=True, padx=8)
         password_entry.bind("<Return>", lambda _event: self._on_unlock())
 
-        self._unlock_status = ttk.Label(frame, text="", bootstyle="danger")
+        self._unlock_status = ttk.Label(card, text="", bootstyle="danger")
         self._unlock_status.pack(fill="x", pady=(4, 8))
 
-        buttons_row = ttk.Frame(frame)
+        buttons_row = ttk.Frame(card)
         buttons_row.pack(fill="x", pady=8)
         ttk.Button(
             buttons_row,
@@ -214,7 +299,7 @@ class App(ttk.Window):
             **self._icon_kwargs("plus", "dark"),
         ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
-        return frame
+        return outer
 
     def _on_browse(self) -> None:
         initial_dir = Path(self._path_var.get()).parent
@@ -313,9 +398,52 @@ class App(ttk.Window):
     # ------------------------------------------------------------------
 
     def _build_main_frame(self) -> ttk.Frame:
-        frame = ttk.Frame(self, padding=12)
+        # "Разделённая панель" (см. CLAUDE.md, раздел 10): тёмный сайдбар
+        # слева (бренд + глобальные инструменты, не привязанные к
+        # конкретной записи — советник и генератор работают со всем
+        # хранилищем или вообще без него) и светлая рабочая область
+        # справа (поиск, список записей, действия НАД записями —
+        # добавить/удалить). "Заблокировать" — тоже в сайдбар, это
+        # действие уровня приложения, а не списка записей.
+        frame = ttk.Frame(self)
 
-        top_row = ttk.Frame(frame)
+        sidebar = ttk.Frame(frame, style="Sidebar.TFrame", padding=(16, 20))
+        sidebar.pack(side="left", fill="y")
+
+        brand_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
+        brand_row.pack(fill="x", pady=(0, 24))
+        if hasattr(self, "_icon_image_small"):
+            ttk.Label(brand_row, image=self._icon_image_small, style="Sidebar.TLabel").pack(
+                side="left", padx=(0, 10)
+            )
+        ttk.Label(
+            brand_row, text=APP_TITLE, style="Sidebar.TLabel", font=("", 13, "bold")
+        ).pack(side="left")
+
+        for text, command, icon_name in (
+            ("Советник", self._on_audit, "shield"),
+            ("Генератор", self._on_generate_standalone, "dice"),
+        ):
+            ttk.Button(
+                sidebar,
+                text=text,
+                command=command,
+                style="SidebarNav.TButton",
+                **self._icon_kwargs(icon_name, "white"),
+            ).pack(fill="x", pady=2)
+
+        ttk.Button(
+            sidebar,
+            text="Заблокировать",
+            command=self._on_lock,
+            style="SidebarLock.TButton",
+            **self._icon_kwargs("lock", "white"),
+        ).pack(side="bottom", fill="x")
+
+        content = ttk.Frame(frame, padding=12)
+        content.pack(side="left", fill="both", expand=True)
+
+        top_row = ttk.Frame(content)
         top_row.pack(fill="x", pady=(0, 8))
         ttk.Label(top_row, text="Поиск:").pack(side="left")
         self._search_var = tk.StringVar()
@@ -323,16 +451,9 @@ class App(ttk.Window):
         ttk.Entry(top_row, textvariable=self._search_var).pack(
             side="left", fill="x", expand=True, padx=8
         )
-        ttk.Button(
-            top_row,
-            text="Заблокировать",
-            command=self._on_lock,
-            bootstyle="secondary-outline",
-            **self._icon_kwargs("lock", "dark"),
-        ).pack(side="right")
 
         columns = ("site", "username")
-        self._tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        self._tree = ttk.Treeview(content, columns=columns, show="headings", selectmode="browse")
         self._tree.heading("site", text="Сайт")
         self._tree.heading("username", text="Логин")
         self._tree.column("site", width=280)
@@ -346,13 +467,11 @@ class App(ttk.Window):
         # дублем этого жеста и убрана по решению пользователя.
         self._tree.bind("<Double-1>", lambda _event: self._on_view_selected())
 
-        buttons_row = ttk.Frame(frame)
+        buttons_row = ttk.Frame(content)
         buttons_row.pack(fill="x", pady=(8, 0))
         for text, command, style, icon_name, icon_variant in (
             ("Добавить", self._on_add, "success", "plus", "white"),
             ("Удалить", self._on_delete_selected, "danger", "trash", "white"),
-            ("Советник", self._on_audit, "warning", "shield", "dark"),
-            ("Генератор", self._on_generate_standalone, "primary", "dice", "white"),
         ):
             ttk.Button(
                 buttons_row,
