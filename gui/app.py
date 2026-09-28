@@ -599,6 +599,13 @@ class App(ttk.Window):
         # и `UnlockBg.TFrame` для тёмного фона экрана разблокировки.
         style.configure("Page.TFrame", background=_PAGE_BG)
 
+        # Без собственной рамки/рельефа — используется там, где поле
+        # ввода уже сидит внутри скруглённой "плитки" от `_rounded_
+        # backdrop` (строка поиска на главном экране, раздел 10.10):
+        # рамку/тень даёт подложка, а не сам `Entry`, иначе получились
+        # бы две рамки одна в другой.
+        style.configure("Flat.TEntry", borderwidth=0, relief="flat", fieldbackground="#ffffff")
+
         style.configure("Sidebar.TFrame", background=_SIDEBAR_BG)
         style.configure(
             "Sidebar.TLabel", background=_SIDEBAR_BG, foreground=_SIDEBAR_TEXT_ACTIVE
@@ -941,12 +948,31 @@ class App(ttk.Window):
                 self._neutral_style(),
             ).pack(side="left", padx=(0, 6))
 
-        search_row = ttk.Frame(content)
+        # Скруглённая "плитка" вокруг поля поиска — тот же приём, что и
+        # у read-only полей в ViewEntryDialog (раздел 10.9): `_rounded_
+        # backdrop` кладёт картинку-подложку ПОД реальным `ttk.Entry`,
+        # а небольшой отступ (`padding`) внутри рамки не даёт собственной
+        # (прямоугольной) рамке `Entry` вылезти за скруглённые углы
+        # подложки.
+        search_row = ttk.Frame(content, padding=(6, 4))
         search_row.pack(fill="x", pady=(12, 8))
+        self._rounded_backdrop(
+            search_row,
+            "#ffffff",
+            corners=(True, True, True, True),
+            surface="#ffffff",
+            radius=_ROUNDED_RADIUS,
+            border_color=_NEUTRAL_BORDER,
+            border_width=1,
+            dynamic=True,
+        )
         self._search_var = tk.StringVar(value=_SEARCH_PLACEHOLDER)
         self._search_var.trace_add("write", lambda *_args: self._refresh_tree())
         search_entry = ttk.Entry(search_row, textvariable=self._search_var)
-        search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
+        # Стиль применяется ПОСЛЕ создания, через .configure(), а не
+        # аргументом конструктора — тот же обход перехвата style= в
+        # ttkbootstrap.Entry/Button, что и у App._styled() (раздел 10.5).
+        search_entry.configure(style="Flat.TEntry", foreground=_SEARCH_PLACEHOLDER_COLOR)
         search_entry.pack(fill="x", ipady=4)
         self._search_entry = search_entry
 
@@ -963,8 +989,27 @@ class App(ttk.Window):
         search_entry.bind("<FocusIn>", _on_search_focus_in)
         search_entry.bind("<FocusOut>", _on_search_focus_out)
 
+        # Тот же приём скруглённой "плитки", что и у строки поиска выше —
+        # `Treeview` внутри не трогаем (раздел 10.8 сознательно не лез
+        # внутрь его собственных элементов скроллинга/выделения), только
+        # добавляем скруглённую по всем четырём углам подложку СНАРУЖИ, с
+        # небольшим отступом, чтобы прямые углы самого `Treeview` не
+        # вылезали за скруглённые углы подложки.
+        table_wrap = ttk.Frame(content, padding=6)
+        table_wrap.pack(fill="both", expand=True)
+        self._rounded_backdrop(
+            table_wrap,
+            "#ffffff",
+            corners=(True, True, True, True),
+            surface="#ffffff",
+            radius=_ROUNDED_RADIUS,
+            border_color=_NEUTRAL_BORDER,
+            border_width=1,
+            dynamic=True,
+        )
+
         columns = ("site", "username")
-        self._tree = ttk.Treeview(content, columns=columns, show="headings", selectmode="browse")
+        self._tree = ttk.Treeview(table_wrap, columns=columns, show="headings", selectmode="browse")
         self._tree.heading("site", text="Сайт")
         self._tree.heading("username", text="Логин")
         self._tree.column("site", width=280)
