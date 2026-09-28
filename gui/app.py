@@ -602,9 +602,48 @@ class App(ttk.Window):
         # Без собственной рамки/рельефа — используется там, где поле
         # ввода уже сидит внутри скруглённой "плитки" от `_rounded_
         # backdrop` (строка поиска на главном экране, раздел 10.10):
-        # рамку/тень даёт подложка, а не сам `Entry`, иначе получились
-        # бы две рамки одна в другой.
-        style.configure("Flat.TEntry", borderwidth=0, relief="flat", fieldbackground="#ffffff")
+        # рамку/тень даёт подложка, а не сам `Entry`.
+        #
+        # **Найденный и исправленный баг: `borderwidth=0`/`relief="flat"`
+        # через `style.configure()` не убирали рамку.** Простой
+        # `configure()` меняет ПАРАМЕТРЫ уже существующего в раскладке
+        # элемента `Entry.field` (тот самый, что рисует прямоугольную
+        # рамку поля), но не убирает сам элемент — `Entry.field` в теме
+        # `bootstrap-light` рисует рамку не только через `borderwidth`,
+        # но и через собственный цвет обводки (`bordercolor`/`lightcolor`/
+        # `darkcolor`), который параметры `borderwidth=0`/`relief="flat"`
+        # не трогают, поэтому тонкая рамка оставалась видна ВНУТРИ уже
+        # скруглённой подложки. Исправление — `style.layout()`, который
+        # полностью убирает элемент `Entry.field` из раскладки, оставляя
+        # только `Entry.padding`/`Entry.textarea` (сам текст и отступы
+        # вокруг него, без какой-либо рамки/фона вообще — тогда сквозь
+        # эту область просто виден фон родителя, то есть уже наша
+        # скруглённая подложка).
+        style.layout(
+            "Flat.TEntry",
+            [
+                (
+                    "Entry.padding",
+                    {"sticky": "nswe", "children": [("Entry.textarea", {"sticky": "nswe"})]},
+                )
+            ],
+        )
+        style.configure("Flat.TEntry", foreground=_NEUTRAL_TEXT)
+
+        # Тот же приём (полное удаление элемента-рамки из раскладки, а
+        # не просто обнуление borderwidth) — для списка записей
+        # (`Treeview`), обёрнутого в такую же скруглённую подложку
+        # (раздел 10.10): `Treeview.field` убран, оставлены только
+        # `Treeview.padding`/`Treeview.treearea`.
+        style.layout(
+            "Flat.Treeview",
+            [
+                (
+                    "Treeview.padding",
+                    {"sticky": "nswe", "children": [("Treeview.treearea", {"sticky": "nswe"})]},
+                )
+            ],
+        )
 
         style.configure("Sidebar.TFrame", background=_SIDEBAR_BG)
         style.configure(
@@ -1010,6 +1049,7 @@ class App(ttk.Window):
 
         columns = ("site", "username")
         self._tree = ttk.Treeview(table_wrap, columns=columns, show="headings", selectmode="browse")
+        self._tree.configure(style="Flat.Treeview")
         self._tree.heading("site", text="Сайт")
         self._tree.heading("username", text="Логин")
         self._tree.column("site", width=280)
