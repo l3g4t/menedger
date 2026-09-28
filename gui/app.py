@@ -33,6 +33,7 @@ from ttkbootstrap.widgets import ScrolledText
 from assistant.advisor import analyze_vault, format_report
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
+from assistant.strength import estimate_entropy_bits
 from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
     InvalidMasterPasswordError,
@@ -159,6 +160,22 @@ _CARD_MARGIN = 22
 # фокуса, где обычно вставляется/убирается плейсхолдер.
 _SEARCH_PLACEHOLDER = "Поиск по сайту или логину..."
 _SEARCH_PLACEHOLDER_COLOR = "#9aa3b2"
+
+# Уровни сегментированной шкалы надёжности в GeneratorDialog (раздел
+# 10.14) — чисто декоративная категоризация для GUI: (порог битов,
+# сколько из 5 сегментов закрасить, подпись, цвет). Не пересекается с
+# assistant.strength — там нет понятия "уровня", только сырое число бит
+# (estimate_entropy_bits), советнику и генератору этого достаточно;
+# уровень нужен только тут, чтобы показать шкалу и бейдж, как в
+# референсе. Подобрано так, чтобы пароль по умолчанию (20 символов, все
+# 4 класса, ~130 бит) заполнял все 5 сегментов.
+_STRENGTH_LEVELS = (
+    (0, 1, "Слабая", "#d6484b"),
+    (36, 2, "Ниже среднего", "#e0724a"),
+    (60, 3, "Средняя", "#d1a625"),
+    (90, 4, "Высокая", "#4caf6b"),
+    (120, 5, "Очень высокая", "#189a5a"),
+)
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -1643,57 +1660,196 @@ class AuditDialog(ttk.Toplevel):
 
 
 class GeneratorDialog(ttk.Toplevel):
-    """Полноценный генератор паролей: длина + наборы символов. Оценка
-    надёжности (assistant.generator.explain_password) здесь больше не
-    показывается — перенесена в EntryDialog, к самому полю пароля
-    сохраняемой записи (см. CLAUDE.md, раздел 10.13). Не трогает
-    хранилище — работает и без выбранной записи."""
+    """Полноценный генератор паролей — переверстан по референсу
+    (см. CLAUDE.md, раздел 10.14): карточка с иконкой-бейджем, крупным
+    полем сгенерированного пароля, сегментированной шкалой надёжности,
+    слайдером длины вместо spinbox'а и переключателями-пилюлями для
+    наборов символов вместо обычных чекбоксов. Оценка энтропии в виде
+    текста (assistant.generator.explain_password) здесь больше не
+    единственный источник обратной связи — она дублируется бейджем и
+    цветом шкалы; для сохраняемой записи тот же текст показывается в
+    EntryDialog (раздел 10.13). Не трогает хранилище — работает и без
+    выбранной записи."""
 
-    def __init__(self, parent: tk.Misc, on_copy) -> None:
+    def __init__(self, parent: App, on_copy) -> None:
         super().__init__(title="Генератор паролей", master=parent, resizable=(False, False))
         self.transient(parent)
         self._on_copy = on_copy
 
-        form = ttk.Frame(self, padding=16)
-        form.pack(fill="both", expand=True)
+        # Собранные функции перерисовки скруглённых подложек — та же
+        # причина и тот же порядок вызова (после update_idletasks), что
+        # и в ViewEntryDialog, раздел 10.9: `dynamic=True` тут не нужен,
+        # диалог не меняет размер после построения.
+        pending_backdrops: list[Callable[[], None]] = []
 
-        ttk.Label(form, text="Длина:").grid(row=0, column=0, sticky="w")
+        # Переменные состояния заводятся ДО любых виджетов: слайдер
+        # длины ниже вызывает свой `command` уже во время построения
+        # (сразу на `.set()`), а тот сразу зовёт `_on_generate()`,
+        # которому нужны все четыре `_use_*` — если завести их только в
+        # секции "Наборы символов" (после слайдера), это падает с
+        # AttributeError ещё на этапе создания диалога.
+        self._result_var = tk.StringVar()
         self._length_var = tk.IntVar(value=DEFAULT_GENERATED_LENGTH)
-        ttk.Spinbox(form, from_=8, to=128, textvariable=self._length_var, width=6).grid(
-            row=0, column=1, sticky="w", padx=(8, 0)
-        )
-
         self._use_lower = tk.BooleanVar(value=True)
         self._use_upper = tk.BooleanVar(value=True)
         self._use_digits = tk.BooleanVar(value=True)
         self._use_symbols = tk.BooleanVar(value=True)
-        checkboxes = (
-            ("строчные буквы", self._use_lower),
-            ("ЗАГЛАВНЫЕ буквы", self._use_upper),
-            ("цифры", self._use_digits),
-            ("спецсимволы", self._use_symbols),
+
+        content = ttk.Frame(self, padding=24)
+        content.pack(fill="both", expand=True)
+
+        # --- Заголовок: иконка-бейдж + название + подпись ---
+        header = ttk.Frame(content)
+        header.pack(fill="x")
+        badge = tk.Frame(header, width=42, height=42, bd=0, highlightthickness=0)
+        badge.pack(side="left", padx=(0, 12))
+        badge_image = parent._rounded_image(42, _ACCENT, "#ffffff")
+        tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
+            x=0, y=0, relwidth=1, relheight=1
         )
-        for row, (text, var) in enumerate(checkboxes, start=1):
-            # bootstyle="round-toggle" — современный переключатель
-            # вместо классического квадратного чекбокса; чисто
-            # оформление, поведение (True/False в var) не меняется.
-            ttk.Checkbutton(form, text=text, variable=var, bootstyle="round-toggle").grid(
-                row=row, column=0, columnspan=2, sticky="w", pady=2
+        dice_icon = parent._button_icon("dice", "white")
+        if dice_icon is not None:
+            tk.Label(badge, image=dice_icon, bd=0, bg=_ACCENT, highlightthickness=0).place(
+                relx=0.5, rely=0.5, anchor="center"
+            )
+        title_stack = ttk.Frame(header)
+        title_stack.pack(side="left", fill="both", expand=True)
+        ttk.Label(title_stack, text="Генератор паролей", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(
+            anchor="w"
+        )
+        ttk.Label(
+            title_stack,
+            text="secrets · криптостойкий · полностью офлайн",
+            foreground=_SEARCH_PLACEHOLDER_COLOR,
+            font=("", 9),
+        ).pack(anchor="w")
+
+        # --- Сгенерированный пароль ---
+        password_box = ttk.Frame(content, padding=(14, 12))
+        password_box.pack(fill="x", pady=(18, 0))
+        pending_backdrops.append(
+            parent._rounded_backdrop(
+                password_box,
+                _NEUTRAL_FILL,
+                corners=(True, True, True, True),
+                surface="#ffffff",
+                radius=_ROUNDED_RADIUS,
+                border_color=_NEUTRAL_BORDER,
+                border_width=1,
+            )
+        )
+        result_entry = ttk.Entry(
+            password_box, textvariable=self._result_var, state="readonly", font=("Consolas", 13)
+        )
+        result_entry.configure(style="Flat.TEntry", background=_NEUTRAL_FILL)
+        result_entry.pack(side="left", fill="x", expand=True)
+        icon_button_style = parent._rounded_button_style(
+            "Rounded.IconToggle",
+            _NEUTRAL_FILL,
+            _NEUTRAL_TEXT,
+            border_color=_NEUTRAL_BORDER,
+            padding=(8, 6),
+        )
+        parent._styled(
+            ttk.Button(password_box, command=self._on_copy_click, **parent._icon_kwargs("copy", "dark")),
+            icon_button_style,
+        ).pack(side="left", padx=(8, 0))
+
+        # --- Надёжность: подпись + бейдж + сегментированная шкала ---
+        strength_section = ttk.Frame(content)
+        strength_section.pack(fill="x", pady=(18, 0))
+        strength_header = ttk.Frame(strength_section)
+        strength_header.pack(fill="x")
+        ttk.Label(strength_header, text="Надёжность", font=("", 10, "bold"), foreground=_NEUTRAL_TEXT).pack(
+            side="left"
+        )
+        self._strength_badge = ttk.Label(strength_header, font=("", 9, "bold"), padding=(8, 3))
+        self._strength_badge.pack(side="right")
+
+        segments_row = ttk.Frame(strength_section)
+        segments_row.pack(fill="x", pady=(8, 0))
+        self._segments: list[tk.Frame] = []
+        for i in range(5):
+            segment = tk.Frame(segments_row, height=6, bg=_NEUTRAL_BORDER)
+            segment.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else 4, 0))
+            self._segments.append(segment)
+
+        self._strength_caption = ttk.Label(
+            strength_section,
+            foreground=_SEARCH_PLACEHOLDER_COLOR,
+            font=("", 9),
+            wraplength=340,
+            justify="left",
+        )
+        self._strength_caption.pack(fill="x", anchor="w", pady=(8, 0))
+
+        ttk.Separator(content).pack(fill="x", pady=18)
+
+        # --- Длина: подпись + бейдж со значением + слайдер ---
+        length_section = ttk.Frame(content)
+        length_section.pack(fill="x")
+        length_header = ttk.Frame(length_section)
+        length_header.pack(fill="x")
+        ttk.Label(length_header, text="Длина пароля", font=("", 10, "bold"), foreground=_NEUTRAL_TEXT).pack(
+            side="left"
+        )
+        self._length_badge = ttk.Label(
+            length_header,
+            text=f"{DEFAULT_GENERATED_LENGTH} симв.",
+            background=_NEUTRAL_FILL,
+            foreground=_ACCENT,
+            font=("", 9, "bold"),
+            padding=(8, 3),
+        )
+        self._length_badge.pack(side="right")
+        length_scale = ttk.Scale(
+            length_section, from_=8, to=64, orient="horizontal", command=self._on_length_change
+        )
+        length_scale.set(DEFAULT_GENERATED_LENGTH)
+        length_scale.pack(fill="x", pady=(10, 0))
+
+        ttk.Separator(content).pack(fill="x", pady=18)
+
+        # --- Наборы символов: иконка-чип + подпись + переключатель ---
+        toggles = (
+            ("abc", "Строчные буквы", self._use_lower),
+            ("ABC", "Заглавные буквы", self._use_upper),
+            ("123", "Цифры", self._use_digits),
+            ("#$%", "Спецсимволы", self._use_symbols),
+        )
+        for chip_text, label_text, var in toggles:
+            row = ttk.Frame(content)
+            row.pack(fill="x", pady=5)
+            ttk.Label(
+                row,
+                text=chip_text,
+                width=4,
+                anchor="center",
+                background=_NEUTRAL_FILL,
+                foreground=_NEUTRAL_TEXT,
+                font=("Consolas", 9, "bold"),
+                padding=(0, 6),
+            ).pack(side="left")
+            ttk.Label(row, text=label_text, foreground=_NEUTRAL_TEXT, font=("", 10)).pack(
+                side="left", padx=(10, 0)
+            )
+            # bootstyle="round-toggle" — современный переключатель вместо
+            # классического квадратного чекбокса; command сразу
+            # перегенерирует пароль с новым набором классов символов —
+            # тот же принцип "живой" обратной связи, что и у оценщика
+            # надёжности в EntryDialog (раздел 10.13), а не только по
+            # явному клику на отдельную кнопку.
+            ttk.Checkbutton(row, variable=var, bootstyle="round-toggle", command=self._on_generate).pack(
+                side="right"
             )
 
-        result_row = 1 + len(checkboxes)
-        self._result_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self._result_var, state="readonly").grid(
-            row=result_row, column=0, columnspan=2, sticky="ew", pady=(8, 0)
-        )
-        form.columnconfigure(1, weight=1)
-
-        buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
+        # --- Действия ---
+        buttons = ttk.Frame(self, padding=(24, 0, 24, 24))
         buttons.pack(fill="x")
         parent._styled(
-            ttk.Button(buttons, text="Закрыть", command=self.destroy),
+            ttk.Button(buttons, command=self._on_generate, **parent._icon_kwargs("dice", "dark")),
             parent._neutral_style(),
-        ).pack(side="right")
+        ).pack(side="left")
         parent._styled(
             ttk.Button(
                 buttons,
@@ -1702,31 +1858,39 @@ class GeneratorDialog(ttk.Toplevel):
                 **parent._icon_kwargs("copy", "dark"),
             ),
             parent._neutral_style(),
-        ).pack(side="right", padx=(0, 8))
+        ).pack(side="left", padx=(8, 0))
         parent._styled(
             ttk.Button(
                 buttons,
-                text="Сгенерировать",
-                command=self._on_generate,
-                **parent._icon_kwargs("dice", "white"),
+                text="Готово",
+                command=self.destroy,
+                **parent._icon_kwargs("save", "white"),
             ),
             parent._accent_style(),
-        ).pack(side="left")
+        ).pack(side="right")
 
         self._on_generate()
+        self.update_idletasks()
+        for redraw in pending_backdrops:
+            redraw()
+
         self.place_window_center()
         self.grab_set()
 
+    def _on_length_change(self, value: str) -> None:
+        # ttk.Scale даёт float даже при целочисленных from_/to — округляем
+        # до целого числа символов и сразу перегенерируем пароль, чтобы
+        # движение слайдера сразу отражалось на результате (как и
+        # переключатели наборов символов, см. ниже).
+        length = round(float(value))
+        self._length_var.set(length)
+        self._length_badge.configure(text=f"{length} симв.")
+        self._on_generate()
+
     def _on_generate(self) -> None:
         try:
-            length = self._length_var.get()
-        except tk.TclError:
-            messagebox.showerror("Ошибка", "Введите корректную длину (целое число).", parent=self)
-            return
-
-        try:
             password = generate_password(
-                length=length,
+                length=self._length_var.get(),
                 use_lowercase=self._use_lower.get(),
                 use_uppercase=self._use_upper.get(),
                 use_digits=self._use_digits.get(),
@@ -1737,6 +1901,25 @@ class GeneratorDialog(ttk.Toplevel):
             return
 
         self._result_var.set(password)
+        self._update_strength(password)
+
+    def _update_strength(self, password: str) -> None:
+        """Обновить бейдж, сегментированную шкалу и текстовую подпись —
+        три независимых, но синхронных представления одной и той же
+        оценки (assistant.strength.estimate_entropy_bits), см.
+        _STRENGTH_LEVELS."""
+        bits = estimate_entropy_bits(password)
+        filled, label, color = _STRENGTH_LEVELS[0][1], _STRENGTH_LEVELS[0][2], _STRENGTH_LEVELS[0][3]
+        for threshold, level_filled, level_label, level_color in _STRENGTH_LEVELS:
+            if bits >= threshold:
+                filled, label, color = level_filled, level_label, level_color
+
+        for index, segment in enumerate(self._segments):
+            segment.configure(bg=color if index < filled else _NEUTRAL_BORDER)
+
+        badge_bg = _mix(color, "#ffffff", 0.85)
+        self._strength_badge.configure(text=label, background=badge_bg, foreground=color)
+        self._strength_caption.configure(text=explain_password(password))
 
     def _on_copy_click(self) -> None:
         password = self._result_var.get()
