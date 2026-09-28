@@ -27,7 +27,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
 import ttkbootstrap as ttk
-from PIL import Image, ImageDraw, ImageTk
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 from ttkbootstrap.widgets import ScrolledText
 
 from assistant.advisor import analyze_vault, format_report
@@ -81,8 +81,36 @@ ICON_PATH = Path(__file__).resolve().parent / "icon.png"
 ICONS_DIR = Path(__file__).resolve().parent / "icons"
 
 # Цвета для чередующихся строк в списке записей (см. _refresh_tree) —
-# нейтральные светлые тона, подобранные под светлую тему "flatly".
-_TREE_ROW_COLORS = {"evenrow": "#ffffff", "oddrow": "#f2f3f5"}
+# раздел 10.12 сделал их заметно светлее прежних (#f2f3f5 → #f7f8fa):
+# современные списки (Bitwarden, 1Password и т.п.) размечают строки
+# едва заметной полоской, а не выраженной "зеброй" таблицы-эксельки.
+_TREE_ROW_COLORS = {"evenrow": "#ffffff", "oddrow": "#f7f8fa"}
+
+# Мягкий акцентный оттенок для выделенной строки списка (раздел 10.12) —
+# осветлённый `_ACCENT` (см. ниже), а не стандартный серый/синий цвет
+# выделения темы `bootstrap-light`, чтобы выделение читалось как часть
+# той же цветовой истории, что и акцентные кнопки, а не как отдельный,
+# ничем не связанный с остальным интерфейсом системный цвет.
+_TREE_SELECTED_BG = "#dce8fd"
+
+# Палитра "аватаров" — цветных кружков с первой буквой сайта слева от
+# каждой записи списка (раздел 10.12), тот же приём, что в Bitwarden/
+# 1Password и подобных менеджерах паролей: быстро отличать записи друг
+# от друга по цветовому пятну, даже не читая текст целиком. Цвет
+# выбирается детерминированно по хэшу названия сайта (см.
+# `App._site_avatar`) — одна и та же запись всегда получает один и тот
+# же цвет между перезапусками приложения, а не случайный при каждом
+# показе.
+_AVATAR_PALETTE = (
+    "#2f6fed",
+    "#e0524f",
+    "#1b998b",
+    "#f2994a",
+    "#7c5cbf",
+    "#2aa876",
+    "#d6558c",
+    "#3d8bd4",
+)
 
 # Палитра сайдбара/тёмного фона — цвет самой иконки приложения (см.
 # CLAUDE.md, раздел 10.2), тот же язык, что и в референсах "Разделённая
@@ -210,6 +238,10 @@ class App(ttk.Window):
         # single application root window", потому что кнопка получала
         # image от PhotoImage первого, уже уничтоженного окна.
         self._icons: dict[tuple[str, str], tk.PhotoImage] = {}
+        # Тот же приём, для аватаров списка записей (`_site_avatar`,
+        # раздел 10.12) — тоже на экземпляр, а не на модуль, по той же
+        # причине (см. комментарий выше про self._icons).
+        self._avatar_images: dict[tuple[str, str], ImageTk.PhotoImage] = {}
 
         self.vault_path: Path | None = None
         self.master_password: str | None = None
@@ -258,6 +290,51 @@ class App(ttk.Window):
         if image is None:
             return {}
         return {"image": image, "compound": "left"}
+
+    def _site_avatar(self, site: str) -> ImageTk.PhotoImage:
+        """Цветной кружок с первой буквой сайта — раздел 10.12. Цвет и
+        буква зависят только от `site`, поэтому одна и та же запись
+        рисуется одинаково от показа к показу; кэш (`self._avatar_
+        images`, на экземпляр окна — по той же причине, что и
+        `self._icons`, раздел 10.3: `ImageTk.PhotoImage` привязан к
+        конкретному Tcl-интерпретатору) не даёт перерисовывать один и
+        тот же кружок на каждый вызов `_refresh_tree`.
+
+        Рисуется с альфа-каналом (`"RGBA"`, прозрачный фон вне круга) —
+        в отличие от кнопок/панелей (раздел 10.5/10.9), здесь это
+        безопасно: `Treeview` показывает `image=` обычным Tk-блиттингом
+        с честной альфа-композицией поверх фона строки (чередующегося
+        или подсвеченного при выборе), а не через кастомный ttk-стиль,
+        где с прозрачностью были проблемы.
+        """
+        letter = (site[:1] or "?").upper()
+        # Не встроенный `hash()` — для строк Python по умолчанию
+        # рандомизирует его между ЗАПУСКАМИ процесса (защита от
+        # DoS-атак на хеш-таблицы, PYTHONHASHSEED), а цвет аватара
+        # должен быть стабильным от перезапуска к перезапуску, иначе
+        # пользователь не сможет привыкнуть узнавать запись по цвету —
+        # сумма кодов символов детерминирована всегда, и для выбора
+        # цвета из маленькой палитры этого достаточно (это не
+        # криптография, а просто разбрасывание по цветам).
+        color = _AVATAR_PALETTE[sum(map(ord, site)) % len(_AVATAR_PALETTE)]
+        cache_key = (letter, color)
+        if cache_key not in self._avatar_images:
+            size, factor = 28, 4
+            big = Image.new("RGBA", (size * factor, size * factor), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            draw.ellipse([0, 0, size * factor - 1, size * factor - 1], fill=color)
+            font = ImageFont.load_default(size=size * factor // 2)
+            bbox = draw.textbbox((0, 0), letter, font=font)
+            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text(
+                ((size * factor - text_w) / 2 - bbox[0], (size * factor - text_h) / 2 - bbox[1]),
+                letter,
+                fill="#ffffff",
+                font=font,
+            )
+            small = big.resize((size, size), Image.LANCZOS)
+            self._avatar_images[cache_key] = ImageTk.PhotoImage(small)
+        return self._avatar_images[cache_key]
 
     def _rounded_image(
         self,
@@ -628,6 +705,15 @@ class App(ttk.Window):
                 )
             ],
         )
+        # `fieldbackground` здесь НЕ задаём — красить им уже нечего:
+        # `fieldbackground` — это цвет, которым закрашивает себя именно
+        # элемент `Entry.field`, а мы его выше убрали из раскладки
+        # целиком. Оставшийся `Entry.textarea` — не ttk-стилизованный
+        # элемент, а обёртка над классическим Tk-виджетом ввода текста;
+        # его цвет фона заводится не через `style`, а напрямую как
+        # обычная Tk-опция `background` на самом объекте `Entry` — см.
+        # `search_entry.configure(background=..., style="Flat.TEntry")`
+        # в `_build_main_frame` (раздел 10.11).
         style.configure("Flat.TEntry", foreground=_NEUTRAL_TEXT)
 
         # Тот же приём (полное удаление элемента-рамки из раскладки, а
@@ -644,6 +730,30 @@ class App(ttk.Window):
                 )
             ],
         )
+        # Раздел 10.12 — более просторные строки (аватар 28px + отступы
+        # не поместились бы в прежнюю компактную высоту) и мягкий
+        # акцентный цвет выделения (`_TREE_SELECTED_BG`) вместо
+        # стандартного серого/синего цвета выделения темы, чтобы список
+        # не выглядел как обычная таблица-эксель.
+        style.configure("Flat.Treeview", rowheight=40, font=("", 10), borderwidth=0)
+        style.map(
+            "Flat.Treeview",
+            background=[("selected", _TREE_SELECTED_BG)],
+            foreground=[("selected", _NEUTRAL_TEXT)],
+        )
+        # Заголовки колонок — приглушённый серый текст на белом фоне,
+        # тем же тоном (`_SEARCH_PLACEHOLDER_COLOR`), что и плейсхолдер
+        # строки поиска (раздел 10.8) — тот же язык "второстепенного"
+        # текста по всему приложению, а не ещё один новый оттенок серого.
+        style.configure(
+            "Flat.Treeview.Heading",
+            background="#ffffff",
+            foreground=_SEARCH_PLACEHOLDER_COLOR,
+            font=("", 9, "bold"),
+            relief="flat",
+            borderwidth=0,
+        )
+        style.map("Flat.Treeview.Heading", background=[("active", "#ffffff")])
 
         style.configure("Sidebar.TFrame", background=_SIDEBAR_BG)
         style.configure(
@@ -960,30 +1070,26 @@ class App(ttk.Window):
         content.pack(side="left", fill="both", expand=True)
         self._rounded_backdrop(content, "#ffffff", corners=(False, True, True, False), dynamic=True)
 
-        # Панель инструментов — действия НАД записями (раздел 10.8):
-        # "Просмотр"/"Сменить пароль" дублируют то, что раньше было
-        # доступно только через двойной клик/ViewEntryDialog, а
+        # Панель инструментов — действия НАД записями (раздел 10.8).
+        # "Просмотр"/"Сменить пароль" убраны отсюда (раздел 10.11) — они
+        # дублировали то, что уже доступно двойным кликом по строке и
+        # иконкой-карандашом прямо в ViewEntryDialog (раздел 10.9), и
+        # пользователь попросил убрать эти два дубля с панели.
         # "Советник"/"Генератор" продублированы здесь же вслед за
         # референсом, как быстрый доступ, не убирая их из сайдбара (там
-        # они остаются как глобальная навигация). Два ряда, а не один с
-        # автопереносом — настоящий flow-layout с перерасчётом переноса
-        # по ширине окна для десятка кнопок не стоит сложности, которую
-        # он добавил бы (раздел 7); ряды разбиты статично под ширину
-        # окна по умолчанию, как на референсе.
-        toolbar_row1 = ttk.Frame(content)
-        toolbar_row1.pack(fill="x")
-        toolbar_row2 = ttk.Frame(content)
-        toolbar_row2.pack(fill="x", pady=(6, 0))
-        for row, text, command, icon_name in (
-            (toolbar_row1, "Добавить", self._on_add, "plus"),
-            (toolbar_row1, "Просмотр", self._on_view_selected, "eye"),
-            (toolbar_row1, "Сменить пароль", self._on_change_password_selected, "pencil"),
-            (toolbar_row1, "Удалить", self._on_delete_selected, "trash"),
-            (toolbar_row2, "Советник", self._on_audit, "shield"),
-            (toolbar_row2, "Генератор", self._on_generate_standalone, "dice"),
+        # они остаются как глобальная навигация).
+        toolbar_row = ttk.Frame(content)
+        toolbar_row.pack(fill="x")
+        for text, command, icon_name in (
+            ("Добавить", self._on_add, "plus"),
+            ("Удалить", self._on_delete_selected, "trash"),
+            ("Советник", self._on_audit, "shield"),
+            ("Генератор", self._on_generate_standalone, "dice"),
         ):
             self._styled(
-                ttk.Button(row, text=text, command=command, **self._icon_kwargs(icon_name, "dark")),
+                ttk.Button(
+                    toolbar_row, text=text, command=command, **self._icon_kwargs(icon_name, "dark")
+                ),
                 self._neutral_style(),
             ).pack(side="left", padx=(0, 6))
 
@@ -997,7 +1103,7 @@ class App(ttk.Window):
         search_row.pack(fill="x", pady=(12, 8))
         self._rounded_backdrop(
             search_row,
-            "#ffffff",
+            _NEUTRAL_FILL,
             corners=(True, True, True, True),
             surface="#ffffff",
             radius=_ROUNDED_RADIUS,
@@ -1011,7 +1117,14 @@ class App(ttk.Window):
         # Стиль применяется ПОСЛЕ создания, через .configure(), а не
         # аргументом конструктора — тот же обход перехвата style= в
         # ttkbootstrap.Entry/Button, что и у App._styled() (раздел 10.5).
-        search_entry.configure(style="Flat.TEntry", foreground=_SEARCH_PLACEHOLDER_COLOR)
+        # Одного `fieldbackground` через `style.configure()`/`style.map()`
+        # недостаточно — он красит только элемент `Entry.field`, а мы
+        # его как раз убрали из раскладки (см. комментарий у `Flat.
+        # TEntry` в `_setup_custom_styles`). Оставшийся `Entry.textarea`
+        # красится не стилем, а обычной Tk-опцией `background` — заводим
+        # её напрямую, отдельно от ttk-стиля.
+        search_entry.configure(style="Flat.TEntry", background=_NEUTRAL_FILL)
+        search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
         search_entry.pack(fill="x", ipady=4)
         self._search_entry = search_entry
 
@@ -1047,9 +1160,20 @@ class App(ttk.Window):
             dynamic=True,
         )
 
+        # `show="tree headings"` (не просто `"headings"`, раздел 10.12) —
+        # открывает служебную колонку "#0", обычно скрытую, под цветной
+        # кружок-аватар с первой буквой сайта (`App._site_avatar`) слева
+        # от каждой строки. `values=(site, username)` при этом не
+        # меняются — колонки "Сайт"/"Логин" остаются ровно там же, где
+        # были, поэтому `tests/test_gui.py`
+        # (`app._tree.item(iid, "values")`) не потребовали переделки.
         columns = ("site", "username")
-        self._tree = ttk.Treeview(table_wrap, columns=columns, show="headings", selectmode="browse")
+        self._tree = ttk.Treeview(
+            table_wrap, columns=columns, show="tree headings", selectmode="browse"
+        )
         self._tree.configure(style="Flat.Treeview")
+        self._tree.heading("#0", text="")
+        self._tree.column("#0", width=44, stretch=False, anchor="center")
         self._tree.heading("site", text="Сайт")
         self._tree.heading("username", text="Логин")
         self._tree.column("site", width=280)
@@ -1106,7 +1230,12 @@ class App(ttk.Window):
             # в полном списке.
             tag = "evenrow" if visible_position % 2 == 0 else "oddrow"
             self._tree.insert(
-                "", "end", iid=str(index), values=(entry["site"], entry["username"]), tags=(tag,)
+                "",
+                "end",
+                iid=str(index),
+                image=self._site_avatar(entry["site"]),
+                values=(entry["site"], entry["username"]),
+                tags=(tag,),
             )
             visible_position += 1
 
@@ -1179,19 +1308,6 @@ class App(ttk.Window):
         entry["password"] = new_password
         entry["created_at"] = now_iso()
         self._save_vault()
-
-    def _on_change_password_selected(self) -> None:
-        """Кнопка "Сменить пароль" на панели инструментов (раздел
-        10.8) — то же самое действие, что и одноимённая кнопка в
-        ViewEntryDialog (`_on_update_entry`), но без промежуточного
-        открытия диалога просмотра: пользователь уже выбрал запись в
-        списке, открывать её целиком ради одной кнопки было бы лишним
-        шагом."""
-        entry = self._selected_entry()
-        if entry is None:
-            messagebox.showinfo("Нет выбора", "Сначала выберите запись в списке.", parent=self)
-            return
-        self._on_update_entry(entry)
 
     def _on_delete_selected(self) -> None:
         entry = self._selected_entry()
