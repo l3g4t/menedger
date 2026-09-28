@@ -64,6 +64,19 @@ CLIPBOARD_CLEAR_DELAY_MS = 20_000
 # указывают на один и тот же исходный рисунок.
 ICON_PATH = Path(__file__).resolve().parent / "icon.png"
 
+# Схематичные (line-art) иконки для кнопок — см. CLAUDE.md, раздел 10.1:
+# цветные emoji (🔒🗑🎲...) заменены на собственный монохромный набор,
+# потому что отрисовка emoji зависит от наличия цветного emoji-шрифта в
+# системе (в headless-окружении без такого шрифта символы отображались
+# "квадратиками" или неродственными глифами). У каждой иконки два файла
+# — светлый и тёмный вариант — потому что цвет ТЕКСТА кнопки в теме
+# bootstrap-light разный в зависимости от bootstyle: у primary/success/
+# danger он белый (тёмный фон кнопки), у info/warning/secondary-outline
+# — тёмный (светлый/жёлтый/голубой фон или белый фон-аутлайн). Значения
+# подобраны прямым замером ttk.Style().lookup(style, "foreground") для
+# каждого bootstyle в этой теме, не угадыванием.
+ICONS_DIR = Path(__file__).resolve().parent / "icons"
+
 # Цвета для чередующихся строк в списке записей (см. _refresh_tree) —
 # нейтральные светлые тона, подобранные под светлую тему "flatly".
 _TREE_ROW_COLORS = {"evenrow": "#ffffff", "oddrow": "#f2f3f5"}
@@ -89,6 +102,18 @@ class App(ttk.Window):
             self._icon_image = tk.PhotoImage(file=str(ICON_PATH))
             self.iconphoto(True, self._icon_image)
 
+        # Кэш иконок кнопок (см. _icon/_icon_kwargs ниже) — ОБЯЗАТЕЛЬНО
+        # на экземпляр окна, а не на уровень модуля: tk.PhotoImage
+        # привязан к конкретному Tcl-интерпретатору (окну), в котором
+        # создан. Модульный кэш пережил бы уничтожение этого окна и
+        # отдавал бы диалогам PhotoImage от уже закрытого интерпретатора
+        # при следующем запуске App() в том же процессе — ровно это и
+        # произошло в тестах (tests/test_gui.py создаёт новый App() на
+        # каждый тест): второй тест падал с "ttkbootstrap supports a
+        # single application root window", потому что кнопка получала
+        # image от PhotoImage первого, уже уничтоженного окна.
+        self._icons: dict[tuple[str, str], tk.PhotoImage] = {}
+
         self.vault_path: Path | None = None
         self.master_password: str | None = None
         self.data: dict | None = None
@@ -104,6 +129,38 @@ class App(ttk.Window):
         self._unlock_frame.pack(fill="both", expand=True)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _button_icon(self, name: str, variant: str) -> tk.PhotoImage | None:
+        """Вернуть кэшированный tk.PhotoImage для gui/icons/<name>_<variant>.png.
+
+        Названо НЕ `_icon` — ttkbootstrap.Window сам уже использует
+        атрибут `self._icon` внутри `_setup_icon()` (титульная иконка
+        окна, см. iconphoto/ICON_PATH выше) и молча перезаписал бы
+        одноимённый метод инстанс-атрибутом, из-за чего вызов
+        `self._icon(...)` падал с `TypeError: 'PhotoImage' object is not
+        callable`.
+
+        Диалоги (EntryDialog, ViewEntryDialog, GeneratorDialog) не
+        наследуются от App, но все получают ссылку на неё как parent —
+        поэтому зовут этот метод как `parent._icon_kwargs(...)`, тем же
+        способом, каким ViewEntryDialog уже дёргает
+        `parent._copy_to_clipboard(...)`. Если файла нет, тихо
+        возвращает None — отсутствие иконки не должно ронять кнопку.
+        """
+        key = (name, variant)
+        if key not in self._icons:
+            path = ICONS_DIR / f"{name}_{variant}.png"
+            if not path.exists():
+                return None
+            self._icons[key] = tk.PhotoImage(file=str(path))
+        return self._icons[key]
+
+    def _icon_kwargs(self, name: str, variant: str) -> dict:
+        """kwargs для ttk.Button(...): image+compound, либо {} без иконки."""
+        image = self._button_icon(name, variant)
+        if image is None:
+            return {}
+        return {"image": image, "compound": "left"}
 
     # ------------------------------------------------------------------
     # Экран разблокировки / создания хранилища
@@ -143,13 +200,18 @@ class App(ttk.Window):
         buttons_row = ttk.Frame(frame)
         buttons_row.pack(fill="x", pady=8)
         ttk.Button(
-            buttons_row, text="🔓 Открыть", command=self._on_unlock, bootstyle="primary"
+            buttons_row,
+            text="Открыть",
+            command=self._on_unlock,
+            bootstyle="primary",
+            **self._icon_kwargs("unlock", "white"),
         ).pack(side="left", expand=True, fill="x", padx=(0, 4))
         ttk.Button(
             buttons_row,
-            text="🆕 Создать новое...",
+            text="Создать новое...",
             command=self._on_create,
             bootstyle="secondary-outline",
+            **self._icon_kwargs("plus", "dark"),
         ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
         return frame
@@ -262,7 +324,11 @@ class App(ttk.Window):
             side="left", fill="x", expand=True, padx=8
         )
         ttk.Button(
-            top_row, text="🔒 Заблокировать", command=self._on_lock, bootstyle="secondary-outline"
+            top_row,
+            text="Заблокировать",
+            command=self._on_lock,
+            bootstyle="secondary-outline",
+            **self._icon_kwargs("lock", "dark"),
         ).pack(side="right")
 
         columns = ("site", "username")
@@ -278,16 +344,20 @@ class App(ttk.Window):
 
         buttons_row = ttk.Frame(frame)
         buttons_row.pack(fill="x", pady=(8, 0))
-        for text, command, style in (
-            ("➕ Добавить", self._on_add, "success"),
-            ("👁 Открыть запись", self._on_view_selected, "info"),
-            ("🗑 Удалить", self._on_delete_selected, "danger"),
-            ("🛡 Советник", self._on_audit, "warning"),
-            ("🎲 Генератор", self._on_generate_standalone, "primary"),
+        for text, command, style, icon_name, icon_variant in (
+            ("Добавить", self._on_add, "success", "plus", "white"),
+            ("Открыть запись", self._on_view_selected, "info", "eye", "dark"),
+            ("Удалить", self._on_delete_selected, "danger", "trash", "white"),
+            ("Советник", self._on_audit, "warning", "shield", "dark"),
+            ("Генератор", self._on_generate_standalone, "primary", "dice", "white"),
         ):
-            ttk.Button(buttons_row, text=text, command=command, bootstyle=style).pack(
-                side="left", padx=(0, 6)
-            )
+            ttk.Button(
+                buttons_row,
+                text=text,
+                command=command,
+                bootstyle=style,
+                **self._icon_kwargs(icon_name, icon_variant),
+            ).pack(side="left", padx=(0, 6))
 
         return frame
 
@@ -492,9 +562,10 @@ class EntryDialog(ttk.Toplevel):
 
         ttk.Button(
             form,
-            text="🎲 Сгенерировать",
+            text="Сгенерировать",
             command=self._on_generate,
             bootstyle="secondary-outline",
+            **parent._icon_kwargs("dice", "dark"),
         ).grid(row=len(fields), column=1, sticky="e", pady=(4, 0))
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
@@ -503,7 +574,11 @@ class EntryDialog(ttk.Toplevel):
             side="right"
         )
         ttk.Button(
-            buttons, text="💾 Сохранить", command=self._on_save, bootstyle="success"
+            buttons,
+            text="Сохранить",
+            command=self._on_save,
+            bootstyle="success",
+            **parent._icon_kwargs("save", "white"),
         ).pack(side="right", padx=(0, 8))
 
         self.place_window_center()
@@ -559,16 +634,25 @@ class ViewEntryDialog(ttk.Toplevel):
             side="right"
         )
         ttk.Button(
-            buttons, text="🗑 Удалить", command=self._on_delete, bootstyle="danger"
-        ).pack(side="right", padx=(0, 8))
-        ttk.Button(
-            buttons, text="✏️ Сменить пароль", command=self._on_update, bootstyle="warning"
+            buttons,
+            text="Удалить",
+            command=self._on_delete,
+            bootstyle="danger",
+            **parent._icon_kwargs("trash", "white"),
         ).pack(side="right", padx=(0, 8))
         ttk.Button(
             buttons,
-            text="📋 Копировать пароль",
+            text="Сменить пароль",
+            command=self._on_update,
+            bootstyle="warning",
+            **parent._icon_kwargs("pencil", "dark"),
+        ).pack(side="right", padx=(0, 8))
+        ttk.Button(
+            buttons,
+            text="Копировать пароль",
             command=lambda: parent._copy_to_clipboard(entry["password"]),
             bootstyle="info",
+            **parent._icon_kwargs("copy", "dark"),
         ).pack(side="left")
 
         self.place_window_center()
@@ -669,10 +753,18 @@ class GeneratorDialog(ttk.Toplevel):
             side="right"
         )
         ttk.Button(
-            buttons, text="📋 Копировать", command=self._on_copy_click, bootstyle="info"
+            buttons,
+            text="Копировать",
+            command=self._on_copy_click,
+            bootstyle="info",
+            **parent._icon_kwargs("copy", "dark"),
         ).pack(side="right", padx=(0, 8))
         ttk.Button(
-            buttons, text="🎲 Сгенерировать", command=self._on_generate, bootstyle="primary"
+            buttons,
+            text="Сгенерировать",
+            command=self._on_generate,
+            bootstyle="primary",
+            **parent._icon_kwargs("dice", "white"),
         ).pack(side="left")
 
         self._on_generate()
