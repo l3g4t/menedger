@@ -340,13 +340,16 @@ class App(ttk.Window):
         self._tree.tag_configure("evenrow", background=_TREE_ROW_COLORS["evenrow"])
         self._tree.tag_configure("oddrow", background=_TREE_ROW_COLORS["oddrow"])
         self._tree.pack(fill="both", expand=True)
+        # Двойной клик по строке — единственный способ открыть запись
+        # (просмотр логина/пароля/даты, см. ViewEntryDialog); отдельная
+        # кнопка "Открыть запись" на панели инструментов была прямым
+        # дублем этого жеста и убрана по решению пользователя.
         self._tree.bind("<Double-1>", lambda _event: self._on_view_selected())
 
         buttons_row = ttk.Frame(frame)
         buttons_row.pack(fill="x", pady=(8, 0))
         for text, command, style, icon_name, icon_variant in (
             ("Добавить", self._on_add, "success", "plus", "white"),
-            ("Открыть запись", self._on_view_selected, "info", "eye", "dark"),
             ("Удалить", self._on_delete_selected, "danger", "trash", "white"),
             ("Советник", self._on_audit, "warning", "shield", "dark"),
             ("Генератор", self._on_generate_standalone, "primary", "dice", "white"),
