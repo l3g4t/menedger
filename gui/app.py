@@ -1418,6 +1418,18 @@ class EntryDialog(ttk.Toplevel):
             parent._neutral_style(),
         ).grid(row=len(fields), column=1, sticky="e", pady=(4, 0))
 
+        # Оценщик надёжности (assistant.generator.explain_password) —
+        # перенесён сюда из отдельного GeneratorDialog: важно видеть
+        # оценку энтропии именно там, где пароль реально попадёт в
+        # сохраняемую запись, а не в оторванном от неё вспомогательном
+        # окне. Обновляется на каждое изменение self._password_var —
+        # и когда набран вручную, и когда подставлен "Сгенерировать".
+        self._strength_var = tk.StringVar()
+        ttk.Label(
+            form, textvariable=self._strength_var, wraplength=320, bootstyle="secondary"
+        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._password_var.trace_add("write", self._update_strength)
+
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
         parent._styled(
@@ -1442,6 +1454,10 @@ class EntryDialog(ttk.Toplevel):
         # настройки (длина, наборы символов) есть отдельный полноценный
         # GeneratorDialog, вызываемый из главного окна.
         self._password_var.set(generate_password())
+
+    def _update_strength(self, *_args: object) -> None:
+        password = self._password_var.get()
+        self._strength_var.set(explain_password(password) if password else "")
 
     def _on_save(self) -> None:
         site = self._site_var.get().strip()
@@ -1627,9 +1643,11 @@ class AuditDialog(ttk.Toplevel):
 
 
 class GeneratorDialog(ttk.Toplevel):
-    """Полноценный генератор паролей: длина + наборы символов +
-    объяснение силы (см. assistant.generator). Не трогает хранилище —
-    работает и без выбранной записи."""
+    """Полноценный генератор паролей: длина + наборы символов. Оценка
+    надёжности (assistant.generator.explain_password) здесь больше не
+    показывается — перенесена в EntryDialog, к самому полю пароля
+    сохраняемой записи (см. CLAUDE.md, раздел 10.13). Не трогает
+    хранилище — работает и без выбранной записи."""
 
     def __init__(self, parent: tk.Misc, on_copy) -> None:
         super().__init__(title="Генератор паролей", master=parent, resizable=(False, False))
@@ -1669,11 +1687,6 @@ class GeneratorDialog(ttk.Toplevel):
             row=result_row, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
         form.columnconfigure(1, weight=1)
-
-        self._explanation_var = tk.StringVar()
-        ttk.Label(form, textvariable=self._explanation_var, wraplength=320).grid(
-            row=result_row + 1, column=0, columnspan=2, sticky="w", pady=(4, 0)
-        )
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
@@ -1724,7 +1737,6 @@ class GeneratorDialog(ttk.Toplevel):
             return
 
         self._result_var.set(password)
-        self._explanation_var.set(explain_password(password))
 
     def _on_copy_click(self) -> None:
         password = self._result_var.get()
