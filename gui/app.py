@@ -92,20 +92,22 @@ _SIDEBAR_HOVER_BG = "#1e3a63"
 _SIDEBAR_LOCK_BG = "#e0524f"
 _SIDEBAR_LOCK_HOVER_BG = "#c94742"
 
-# Плоские цвета семантических bootstyle из темы "bootstrap-light" — см.
-# CLAUDE.md, раздел 10.5. Значения получены прямым замером
-# ttk.Style().lookup(style, "background"/"foreground") в разработческой
-# сессии, не угадыванием (та же методика, что уже применена в разделе
-# 10.3 для выбора белого/тёмного варианта схематичных иконок).
-# (фон, цвет_текста)
-_FLAT_COLORS = {
-    "primary": ("#0a58ca", "#ffffff"),
-    "success": ("#146c43", "#ffffff"),
-    "danger": ("#b02a37", "#ffffff"),
-    "info": ("#0dcaf0", "#000000"),
-    "warning": ("#ffc107", "#000000"),
-    "secondary": ("#686d71", "#ffffff"),
-}
+# Цвета кнопок референса "Разделённая панель" (вариант C, см. CLAUDE.md,
+# раздел 10.6) — сняты напрямую из HTML-мокапов (unlock_c.html,
+# dialog_c.html, variant_c_split.html), а не подобраны на глаз. Вместо
+# отдельного семантического цвета на каждое действие (было — см. раздел
+# 10.5, ttkbootstrap-подобная палитра primary/success/danger/info/
+# warning) референс использует ровно ДВА тона кнопок: нейтральный
+# (светло-серая заливка с тонкой рамкой, тёмный текст — большинство
+# кнопок, различитель действия — иконка, а не цвет) и один синий акцент
+# — только для главного действия экрана/диалога (см. _neutral_style/
+# _accent_style ниже). Красный остаётся только у "Заблокировать" в
+# сайдбаре — он не проходит через эти константы, заведён напрямую через
+# _SIDEBAR_LOCK_BG.
+_NEUTRAL_FILL = "#eef1f8"
+_NEUTRAL_BORDER = "#dfe4ee"
+_NEUTRAL_TEXT = "#33415c"
+_ACCENT = "#2f6fed"
 
 _ROUNDED_RADIUS = 10  # px скругления угла у кнопок (см. _rounded_image)
 
@@ -237,7 +239,13 @@ class App(ttk.Window):
         return {"image": image, "compound": "left"}
 
     def _rounded_image(
-        self, size: int, fill: str | None, outline: str | None, surface: str
+        self,
+        size: int,
+        fill: str,
+        surface: str,
+        *,
+        border_color: str | None = None,
+        border_width: int = 0,
     ) -> ImageTk.PhotoImage:
         """Скруглённый прямоугольник size×size — фон для скруглённой
         кнопки (см. `_rounded_button_style`). Рисуется с 4-кратным
@@ -245,8 +253,9 @@ class App(ttk.Window):
         для `gui/icon.png`/`gui/icons/*.png` (разделы 10.2–10.3), нужен
         по той же причине: `ImageDraw` рисует без антиалиасинга, а
         уменьшение с усреднением даёт гладкий, а не пиксельный край.
-        `fill=None` (только `outline`) — контурный вариант для кнопок
-        стиля "outline" (Обзор..., Создать новое..., Сгенерировать).
+        `border_color`/`border_width` — тонкая обводка НАД заливкой
+        (нейтральный стиль кнопок референса "Разделённая панель" —
+        светлая заливка + едва заметная рамка, раздел 10.6).
 
         **Найденный и исправленный баг:** первая версия рисовала фигуру
         на ПРОЗРАЧНОМ холсте (RGBA, альфа=0 за пределами скруглённого
@@ -267,13 +276,12 @@ class App(ttk.Window):
         factor = 4
         big = Image.new("RGB", (size * factor, size * factor), surface)
         draw = ImageDraw.Draw(big)
-        width = 2 * factor if outline else 0
         draw.rounded_rectangle(
             [0, 0, size * factor - 1, size * factor - 1],
             radius=_ROUNDED_RADIUS * factor,
             fill=fill,
-            outline=outline,
-            width=width,
+            outline=border_color,
+            width=border_width * factor,
         )
         small = big.resize((size, size), Image.LANCZOS)
         image = ImageTk.PhotoImage(small)
@@ -283,10 +291,10 @@ class App(ttk.Window):
     def _rounded_button_style(
         self,
         style_name: str,
-        color: str,
+        fill: str,
         foreground: str,
         *,
-        outline: bool = False,
+        border_color: str | None = None,
         anchor: str = "center",
         padding: tuple[int, int] = (14, 8),
         surface: str = "#ffffff",
@@ -321,17 +329,28 @@ class App(ttk.Window):
         if style_name in self._rounded_style_names:
             return style_name
 
-        hover = _mix(color, "#ffffff", 0.18)
-        pressed = _mix(color, "#000000", 0.18)
+        # Направление смешивания для hover зависит от того, светлый фон
+        # или тёмный: у светлых (нейтральных/акцентных) кнопок наведение
+        # чуть ЗАТЕМНЯЕТ заливку, а у тёмных кнопок сайдбара (fill —
+        # тёмно-синий/красный на тёмно-синем surface) — наоборот,
+        # чуть ОСВЕТЛЯЕТ, иначе оно ушло бы в сторону чёрного и слилось
+        # бы с фоном (это и была причина плохо заметного hover у
+        # сайдбара, см. CLAUDE.md, раздел 10.6). Порог 0x99 — грубая, но
+        # достаточная оценка "светлая/тёмная" заливка по каналу red.
+        is_dark_fill = _hex_to_rgb(fill)[0] < 0x99
+        hover = _mix(fill, "#ffffff" if is_dark_fill else "#000000", 0.10)
+        pressed = _mix(fill, "#000000", 0.15)
+        border_hover = _mix(border_color, "#000000", 0.15) if border_color else None
+        border_pressed = _mix(border_color, "#000000", 0.3) if border_color else None
 
         normal_img = self._rounded_image(
-            28, None if outline else color, color if outline else None, surface
+            28, fill, surface, border_color=border_color, border_width=1
         )
         hover_img = self._rounded_image(
-            28, None if outline else hover, hover if outline else None, surface
+            28, hover, surface, border_color=border_hover or border_color, border_width=1
         )
         pressed_img = self._rounded_image(
-            28, None if outline else pressed, pressed if outline else None, surface
+            28, pressed, surface, border_color=border_pressed or border_color, border_width=1
         )
 
         style = ttk.Style()
@@ -369,30 +388,35 @@ class App(ttk.Window):
             style_name,
             foreground=foreground,
             borderwidth=0,
-            focuscolor=color,
+            focuscolor=fill,
             padding=padding,
             anchor=anchor,
         )
         self._rounded_style_names.add(style_name)
         return style_name
 
-    def _flat_style(self, name: str, **kwargs) -> str:
-        """Скруглённый стиль для одного из стандартных плоских цветов
-        ttkbootstrap (`_FLAT_COLORS`) — короткая замена частому вызову
-        `self._rounded_button_style(f"Rounded.{name}", *_FLAT_COLORS[name])`
-        для всех кнопок, которые раньше просто писали `bootstyle=name`.
-        """
-        color, foreground = _FLAT_COLORS[name]
-        return self._rounded_button_style(f"Rounded.{name}", color, foreground, **kwargs)
-
-    def _outline_style(self, name: str = "secondary", **kwargs) -> str:
-        """Скруглённый контурный стиль (замена `bootstyle="{name}-outline"`)
-        — заливки нет, только цветная обводка и текст того же цвета,
-        как и у прежнего плоского `*-outline` в ttkbootstrap."""
-        color, _ = _FLAT_COLORS[name]
+    def _neutral_style(self, **kwargs) -> str:
+        """Нейтральный скруглённый стиль референса "Разделённая панель"
+        (раздел 10.4/10.6) — светлая заливка + едва заметная рамка,
+        тёмный текст; используется для всех кнопок, которые в референсе
+        НЕ несут собственного смыслового цвета (Добавить, Удалить,
+        Обзор..., Отмена, Закрыть и т.п. — там роль различителя играет
+        иконка, а не цвет кнопки, см. `gui/icons/`, раздел 10.3)."""
         return self._rounded_button_style(
-            f"Rounded.{name}.Outline", color, color, outline=True, **kwargs
+            "Rounded.Neutral",
+            _NEUTRAL_FILL,
+            _NEUTRAL_TEXT,
+            border_color=_NEUTRAL_BORDER,
+            **kwargs,
         )
+
+    def _accent_style(self, **kwargs) -> str:
+        """Единственный акцентный (синий) стиль референса — только для
+        главного действия экрана/диалога: Открыть, Копировать пароль,
+        Сохранить, Сгенерировать. Остальные кнопки того же экрана —
+        нейтральные (`_neutral_style`), чтобы акцент не терялся среди
+        одинаково ярких кнопок."""
+        return self._rounded_button_style("Rounded.Accent", _ACCENT, "#ffffff", **kwargs)
 
     @staticmethod
     def _styled(widget: ttk.Button, style_name: str) -> ttk.Button:
@@ -485,7 +509,7 @@ class App(ttk.Window):
             side="left", fill="x", expand=True, padx=8
         )
         self._styled(
-            ttk.Button(path_row, text="Обзор...", command=self._on_browse), self._outline_style()
+            ttk.Button(path_row, text="Обзор...", command=self._on_browse), self._neutral_style()
         ).pack(side="left")
 
         pw_row = ttk.Frame(card)
@@ -510,7 +534,7 @@ class App(ttk.Window):
                 command=self._on_unlock,
                 **self._icon_kwargs("unlock", "white"),
             ),
-            self._flat_style("primary"),
+            self._accent_style(),
         ).pack(side="left", expand=True, fill="x", padx=(0, 4))
         self._styled(
             ttk.Button(
@@ -519,7 +543,7 @@ class App(ttk.Window):
                 command=self._on_create,
                 **self._icon_kwargs("plus", "dark"),
             ),
-            self._outline_style(),
+            self._neutral_style(),
         ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
         return outer
@@ -701,18 +725,21 @@ class App(ttk.Window):
 
         buttons_row = ttk.Frame(content)
         buttons_row.pack(fill="x", pady=(8, 0))
-        for text, command, flat_name, icon_name, icon_variant in (
-            ("Добавить", self._on_add, "success", "plus", "white"),
-            ("Удалить", self._on_delete_selected, "danger", "trash", "white"),
+        # Обе кнопки — нейтральные (см. раздел 10.6): в референсе C у
+        # "Добавить"/"Удалить" нет собственного смыслового цвета, роль
+        # различителя действия несёт иконка, а не заливка кнопки.
+        for text, command, icon_name in (
+            ("Добавить", self._on_add, "plus"),
+            ("Удалить", self._on_delete_selected, "trash"),
         ):
             self._styled(
                 ttk.Button(
                     buttons_row,
                     text=text,
                     command=command,
-                    **self._icon_kwargs(icon_name, icon_variant),
+                    **self._icon_kwargs(icon_name, "dark"),
                 ),
-                self._flat_style(flat_name),
+                self._neutral_style(),
             ).pack(side="left", padx=(0, 6))
 
         return frame
@@ -923,14 +950,14 @@ class EntryDialog(ttk.Toplevel):
                 command=self._on_generate,
                 **parent._icon_kwargs("dice", "dark"),
             ),
-            parent._outline_style(),
+            parent._neutral_style(),
         ).grid(row=len(fields), column=1, sticky="e", pady=(4, 0))
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
         parent._styled(
             ttk.Button(buttons, text="Отмена", command=self.destroy),
-            parent._flat_style("secondary"),
+            parent._neutral_style(),
         ).pack(side="right")
         parent._styled(
             ttk.Button(
@@ -939,7 +966,7 @@ class EntryDialog(ttk.Toplevel):
                 command=self._on_save,
                 **parent._icon_kwargs("save", "white"),
             ),
-            parent._flat_style("success"),
+            parent._accent_style(),
         ).pack(side="right", padx=(0, 8))
 
         self.place_window_center()
@@ -993,16 +1020,16 @@ class ViewEntryDialog(ttk.Toplevel):
         buttons.pack(fill="x")
         parent._styled(
             ttk.Button(buttons, text="Закрыть", command=self.destroy),
-            parent._flat_style("secondary"),
+            parent._neutral_style(),
         ).pack(side="right")
         parent._styled(
             ttk.Button(
                 buttons,
                 text="Удалить",
                 command=self._on_delete,
-                **parent._icon_kwargs("trash", "white"),
+                **parent._icon_kwargs("trash", "dark"),
             ),
-            parent._flat_style("danger"),
+            parent._neutral_style(),
         ).pack(side="right", padx=(0, 8))
         parent._styled(
             ttk.Button(
@@ -1011,16 +1038,16 @@ class ViewEntryDialog(ttk.Toplevel):
                 command=self._on_update,
                 **parent._icon_kwargs("pencil", "dark"),
             ),
-            parent._flat_style("warning"),
+            parent._neutral_style(),
         ).pack(side="right", padx=(0, 8))
         parent._styled(
             ttk.Button(
                 buttons,
                 text="Копировать пароль",
                 command=lambda: parent._copy_to_clipboard(entry["password"]),
-                **parent._icon_kwargs("copy", "dark"),
+                **parent._icon_kwargs("copy", "white"),
             ),
-            parent._flat_style("info"),
+            parent._accent_style(),
         ).pack(side="left")
 
         self.place_window_center()
@@ -1061,7 +1088,7 @@ class AuditDialog(ttk.Toplevel):
 
         parent._styled(
             ttk.Button(self, text="Закрыть", command=self.destroy),
-            parent._flat_style("secondary"),
+            parent._neutral_style(),
         ).pack(pady=8)
         self.place_window_center()
         self.grab_set()
@@ -1120,7 +1147,7 @@ class GeneratorDialog(ttk.Toplevel):
         buttons.pack(fill="x")
         parent._styled(
             ttk.Button(buttons, text="Закрыть", command=self.destroy),
-            parent._flat_style("secondary"),
+            parent._neutral_style(),
         ).pack(side="right")
         parent._styled(
             ttk.Button(
@@ -1129,7 +1156,7 @@ class GeneratorDialog(ttk.Toplevel):
                 command=self._on_copy_click,
                 **parent._icon_kwargs("copy", "dark"),
             ),
-            parent._flat_style("info"),
+            parent._neutral_style(),
         ).pack(side="right", padx=(0, 8))
         parent._styled(
             ttk.Button(
@@ -1138,7 +1165,7 @@ class GeneratorDialog(ttk.Toplevel):
                 command=self._on_generate,
                 **parent._icon_kwargs("dice", "white"),
             ),
-            parent._flat_style("primary"),
+            parent._accent_style(),
         ).pack(side="left")
 
         self._on_generate()
