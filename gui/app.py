@@ -21,6 +21,8 @@ gui.app — главное окно менеджера паролей.
 from __future__ import annotations
 
 import tkinter as tk
+from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
@@ -31,7 +33,7 @@ from ttkbootstrap.widgets import ScrolledText
 from assistant.advisor import analyze_vault, format_report
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
-from vault.common import DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
+from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
     InvalidMasterPasswordError,
     VaultFormatError,
@@ -115,7 +117,8 @@ _ROUNDED_RADIUS = 10  # px скругления угла у кнопок (см. 
 # впритык к краям окна, а единая "карточка" (сайдбар + рабочая область)
 # со скруглёнными ТОЛЬКО внешними углами, отступом от края окна и на
 # фоне светло-серой "страницы" — тот же язык, что уже даёт объём кнопкам
-# (раздел 10.5), только применённый к панелям целиком (см. _panel_style).
+# (раздел 10.5), только применённый к панелям целиком (см. _rounded_backdrop,
+# раздел 10.9).
 _PAGE_BG = "#eef1f6"
 _CARD_RADIUS = 20
 _CARD_MARGIN = 22
@@ -436,47 +439,115 @@ class App(ttk.Window):
         одинаково ярких кнопок."""
         return self._rounded_button_style("Rounded.Accent", _ACCENT, "#ffffff", **kwargs)
 
-    def _panel_style(
-        self, style_name: str, fill: str, corners: tuple[bool, bool, bool, bool]
-    ) -> str:
-        """Стиль TFrame со скруглёнными углами по маске `corners`
-        (top_left, top_right, bottom_right, bottom_left) — тот же
-        9-patch приём, что и у кнопок (`_rounded_button_style`), только
-        без hover/pressed-состояний (панель не кликабельна сама по
-        себе) и с асимметричным скруглением: сайдбар округляет только
-        левые углы, рабочая область — только правые, а стыкующиеся
-        прямые края остаются острыми, чтобы вместе они читались как
-        ОДНА карточка с едиными внешними углами (раздел 10.8).
+    def _rounded_backdrop(
+        self,
+        frame: ttk.Frame,
+        fill: str,
+        corners: tuple[bool, bool, bool, bool],
+        *,
+        surface: str = _PAGE_BG,
+        radius: int = _CARD_RADIUS,
+        border_color: str | None = None,
+        border_width: int = 0,
+        dynamic: bool = False,
+    ) -> Callable[[], None] | None:
+        """Кладёт скруглённый по маске `corners` (top_left, top_right,
+        bottom_right, bottom_left) фон ПОД уже созданный `frame`, поверх
+        которого можно как обычно `pack()`/`grid()` реальные виджеты.
 
-        Одного небольшого изображения достаточно — Tk растягивает
-        среднюю область 9-patch'а под любой реальный размер фрейма, а
-        растягивание сплошной заливки (не текстуры) визуально
-        неотличимо от рисования этой заливки напрямую нужного размера.
+        **Найденный и исправленный баг (раздел 10.9): предыдущая версия
+        этого метода (`_panel_style`) заводила фон через `ttk.Style().
+        element_create(..., "image", ...)` — тот же 9-patch-приём, что и
+        у кнопок (`_rounded_button_style`, раздел 10.5). Для кнопок этот
+        приём работает надёжно (подтверждено — полноширинная кнопка
+        "Разблокировать" растягивается и остаётся скруглённой при любой
+        ширине карточки), но для `ttk.Frame` под `ttkbootstrap`
+        ОКАЗАЛОСЬ НЕ ТАК: изолированным экспериментом (минимальная
+        репродукция вне всего проекта) подтверждено, что тот же самый
+        код, применённый к `ttk.Frame` под plain `tkinter.ttk` без
+        ttkbootstrap, растягивается и скругляется корректно, а под
+        `ttkbootstrap.Window` — НЕТ: фон-картинка не перерисовывается
+        под итоговый размер фрейма вообще (виден только в границах
+        первого пакованного ребёнка, а не по всей ширине/высоте фрейма),
+        сколько бы фрейм ни говорил через `winfo_width()`, что он
+        занимает нужную площадь. На главном экране (раздел 10.8) эта
+        деградация была НЕЗАМЕТНА только потому, что вложенный плоский
+        `Sidebar.TFrame`/белый `content` перекрывал собой всю ту же
+        область тем же сплошным цветом — угол выглядел скруглённым лишь
+        случайно совпадая с общим цветом, а не оттого, что скругление
+        реально работало (проверено попиксельно: угол на самом деле
+        был острым все это время). У диалога (`ViewEntryDialog`, где
+        тёмная шапка НЕ закрыта изнутри своим же цветом целиком) это
+        стало заметно сразу — за текстом заголовка была видна не
+        навy-заливка, а белый фон диалога.
+
+        **Исправление — обычный `tk.Label` с картинкой вместо
+        ttk-стиля.** Рисуем скруглённый прямоугольник нужного размера
+        (сразу под финальный `frame.winfo_width()/height()`, а не
+        абстрактный маленький 9-patch-исходник), кладём его в `frame`
+        через `.place(relwidth=1, relheight=1)` (не `.pack()`/`.grid()`
+        — не конкурирует за место с обычными детьми `frame`) и
+        опускаем на задний план `.lower()`, чтобы обычные виджеты,
+        запакованные в `frame` как всегда, рисовались поверх. Это уже
+        НЕ зависит от ttkbootstrap-специфичной обработки стилей вообще —
+        `tk.Label`/`.place()` — базовый Tk без каких-либо ttk-стилей
+        поверх картинки.
+
+        `dynamic=True` (главный экран, раздел 10.8 — окно пользователь
+        МОЖЕТ менять в размере) перерисовывает картинку заново при
+        каждом `<Configure>` фрейма — ничего не возвращает. `dynamic=
+        False` (диалоги, раздел 10.9 — всегда `resizable=(False,
+        False)`, размер после построения больше не меняется) вместо
+        этого ВОЗВРАЩАЕТ саму функцию перерисовки, ничего не вызывая
+        сама — раньше здесь стоял `frame.after_idle(redraw)`, и это НЕ
+        работало: `pack`/`grid` в Tk пересчитывают реальную геометрию
+        виджетов тоже через очередь idle-задач, и наш собственный
+        `after_idle`, поставленный в очередь РАНЬШЕ (сразу при
+        создании фрейма, до того как в него добавлены дети), срабатывал
+        ПЕРЕД пересчётом геометрии — `frame.winfo_width()/height()`
+        внутри `redraw()` в этот момент ещё показывали "не
+        размещённый" плейсхолдер `1×1`, а не итоговый размер (проверено
+        напрямую: `image cget -width/-height` у получившейся картинки
+        были буквально `1 1`). Правильно — вызвать `self.
+        update_idletasks()` (это СИНХРОННО прогоняет пересчёт геометрии
+        до конца) один раз, когда весь диалог уже построен целиком, и
+        только ПОСЛЕ этого вызвать каждую собранную функцию
+        перерисовки — это и делает вызывающий код (см.
+        `ViewEntryDialog.__init__`).
         """
-        if style_name in self._rounded_style_names:
-            return style_name
+        backdrop = tk.Label(frame, bd=0, highlightthickness=0)
+        # bordermode="outside" — без него `.place()` считает (0,0) и
+        # relwidth/relheight от ВНУТРЕННЕЙ, уже отступленной области
+        # `frame`, если у того задан свой `padding=` (как у всех вызовов
+        # здесь: `header`/`body`/`box` — раздел 10.9): подложка съезжала
+        # бы внутрь ровно на величину padding и не доставала бы до
+        # истинных краёв фрейма, где и рисуются скруглённые углы.
+        backdrop.place(x=0, y=0, relwidth=1, relheight=1, bordermode="outside")
+        backdrop.lower()
 
-        factor = 4
-        size = 64
-        big = Image.new("RGB", (size * factor, size * factor), _PAGE_BG)
-        draw = ImageDraw.Draw(big)
-        draw.rounded_rectangle(
-            [0, 0, size * factor - 1, size * factor - 1],
-            radius=_CARD_RADIUS * factor,
-            fill=fill,
-            corners=corners,
-        )
-        small = big.resize((size, size), Image.LANCZOS)
-        image = ImageTk.PhotoImage(small)
-        self._rounded_images.append(image)
+        def redraw(_event: object = None) -> None:
+            width = max(frame.winfo_width(), 1)
+            height = max(frame.winfo_height(), 1)
+            factor = 2
+            big = Image.new("RGB", (width * factor, height * factor), surface)
+            draw = ImageDraw.Draw(big)
+            draw.rounded_rectangle(
+                [0, 0, width * factor - 1, height * factor - 1],
+                radius=radius * factor,
+                fill=fill,
+                outline=border_color,
+                width=border_width * factor,
+                corners=corners,
+            )
+            small = big.resize((width, height), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(small)
+            self._rounded_images.append(photo)
+            backdrop.configure(image=photo)
 
-        style = ttk.Style()
-        element = f"{style_name}.panel"
-        style.element_create(element, "image", image, border=_CARD_RADIUS, sticky="nsew")
-        style.layout(style_name, [(element, {"sticky": "nsew"})])
-        style.configure(style_name, background=fill)
-        self._rounded_style_names.add(style_name)
-        return style_name
+        if dynamic:
+            frame.bind("<Configure>", redraw)
+            return None
+        return redraw
 
     @staticmethod
     def _styled(widget: ttk.Button, style_name: str) -> ttk.Button:
@@ -522,7 +593,8 @@ class App(ttk.Window):
 
         # Светло-серая "страница" вокруг карточки главного экрана (раздел
         # 10.8) — сама карточка (сайдбар + рабочая область) получает
-        # скруглённые внешние углы через `_panel_style`, а этот плоский
+        # скруглённые внешние углы через `_rounded_backdrop` (раздел 10.9),
+        # а этот плоский
         # фон нужен только для контраста снаружи неё, тем же приёмом, что
         # и `UnlockBg.TFrame` для тёмного фона экрана разблокировки.
         style.configure("Page.TFrame", background=_PAGE_BG)
@@ -762,13 +834,20 @@ class App(ttk.Window):
         card_wrap = ttk.Frame(page, style="Page.TFrame")
         card_wrap.pack(fill="both", expand=True, padx=_CARD_MARGIN, pady=_CARD_MARGIN)
 
-        sidebar_panel_style = self._panel_style(
-            "Panel.Sidebar", _SIDEBAR_BG, corners=(True, False, False, True)
+        # Один фрейм на панель, а не "внешний под скругление + внутренний
+        # под цвет", как было раньше (раздел 10.8) — вложенный
+        # полноразмерный внутренний фрейм закрывал бы собой скруглённые
+        # углы подложки квадратными своими собственными (раздел 10.9:
+        # `_rounded_backdrop` кладёт фон ПОД реальные виджеты через
+        # `.place()+.lower()`, а не через стиль фрейма, так что содержимому
+        # достаточно не залезать в сами угловые радиусы — обеспечивается
+        # обычным `padding=`, которое у ttk.Frame и так уже отступает
+        # контент от края независимо от способа заливки фона).
+        sidebar = ttk.Frame(card_wrap, style="Sidebar.TFrame", padding=(16, 20))
+        sidebar.pack(side="left", fill="y")
+        self._rounded_backdrop(
+            sidebar, _SIDEBAR_BG, corners=(True, False, False, True), dynamic=True
         )
-        sidebar_outer = ttk.Frame(card_wrap, style=sidebar_panel_style)
-        sidebar_outer.pack(side="left", fill="y")
-        sidebar = ttk.Frame(sidebar_outer, style="Sidebar.TFrame", padding=(16, 20))
-        sidebar.pack(fill="both", expand=True)
 
         brand_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
         brand_row.pack(fill="x", pady=(0, 24))
@@ -831,13 +910,9 @@ class App(ttk.Window):
             ),
         ).pack(side="bottom", fill="x")
 
-        content_panel_style = self._panel_style(
-            "Panel.Content", "#ffffff", corners=(False, True, True, False)
-        )
-        content_outer = ttk.Frame(card_wrap, style=content_panel_style)
-        content_outer.pack(side="left", fill="both", expand=True)
-        content = ttk.Frame(content_outer, padding=16)
-        content.pack(fill="both", expand=True)
+        content = ttk.Frame(card_wrap, padding=20)
+        content.pack(side="left", fill="both", expand=True)
+        self._rounded_backdrop(content, "#ffffff", corners=(False, True, True, False), dynamic=True)
 
         # Панель инструментов — действия НАД записями (раздел 10.8):
         # "Просмотр"/"Сменить пароль" дублируют то, что раньше было
@@ -1184,51 +1259,107 @@ class EntryDialog(ttk.Toplevel):
 
 
 class ViewEntryDialog(ttk.Toplevel):
-    """Просмотр одной записи целиком: логин/пароль/дата + действия."""
+    """Просмотр одной записи целиком: логин/пароль/дата + действия
+    (раздел 10.9) — тёмная "шапка" с названием записи + белое тело с
+    полями как read-only "плитками" (тот же язык, что и карточка
+    главного экрана, раздел 10.8) вместо прежней плоской формы
+    label/label в grid."""
 
     def __init__(self, parent: App, entry: dict) -> None:
-        super().__init__(title=entry["site"], master=parent, resizable=(False, False))
+        title = f"Запись — {entry['site']}"
+        super().__init__(title=title, master=parent, resizable=(False, False))
         self._parent = parent
         self._entry = entry
         self.transient(parent)
 
-        form = ttk.Frame(self, padding=16)
-        form.pack(fill="both", expand=True)
+        # Собранные, но ещё НЕ вызванные функции перерисовки скруглённых
+        # подложек (`_rounded_backdrop`, раздел 10.9) — вызываются все
+        # разом в самом конце, ПОСЛЕ `update_idletasks()`, когда у всех
+        # фреймов уже точно сложился итоговый размер (см. подробное
+        # объяснение бага в докстринге `_rounded_backdrop`).
+        pending_backdrops: list[Callable[[], None]] = []
 
-        rows = (
-            ("Сайт:", entry["site"]),
-            ("Логин:", entry["username"]),
-            ("Пароль:", entry["password"]),
-            ("Создано:", entry["created_at"]),
+        header = ttk.Frame(self, padding=(20, 14))
+        header.pack(fill="x")
+        pending_backdrops.append(
+            parent._rounded_backdrop(header, _SIDEBAR_BG, corners=(True, True, False, False), surface="#ffffff")
         )
-        for row, (label, value) in enumerate(rows):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            ttk.Label(form, text=value).grid(row=row, column=1, sticky="w", pady=4, padx=(8, 0))
+        if hasattr(parent, "_icon_image_small"):
+            ttk.Label(header, image=parent._icon_image_small, style="Sidebar.TLabel").pack(
+                side="left", padx=(0, 10)
+            )
+        ttk.Label(header, text=title, style="Sidebar.TLabel", font=("", 12, "bold")).pack(side="left")
 
-        buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
+        body = ttk.Frame(self, padding=20)
+        body.pack(fill="both", expand=True)
+        pending_backdrops.append(
+            parent._rounded_backdrop(body, "#ffffff", corners=(False, False, True, True), surface="#ffffff")
+        )
+
+        icon_button_style = parent._rounded_button_style(
+            "Rounded.IconToggle",
+            _NEUTRAL_FILL,
+            _NEUTRAL_TEXT,
+            border_color=_NEUTRAL_BORDER,
+            padding=(8, 6),
+        )
+
+        def field_row(label_text: str, value: str) -> tuple[ttk.Label, ttk.Frame]:
+            ttk.Label(body, text=label_text.upper(), font=("", 8, "bold"), bootstyle="secondary").pack(
+                fill="x", anchor="w", pady=(10, 2)
+            )
+            row = ttk.Frame(body)
+            row.pack(fill="x")
+            box = ttk.Frame(row, padding=(10, 8))
+            box.pack(side="left", fill="x", expand=True)
+            pending_backdrops.append(
+                parent._rounded_backdrop(
+                    box,
+                    _NEUTRAL_FILL,
+                    corners=(True, True, True, True),
+                    surface="#ffffff",
+                    radius=_ROUNDED_RADIUS,
+                    border_color=_NEUTRAL_BORDER,
+                    border_width=1,
+                )
+            )
+            value_label = ttk.Label(box, text=value, background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT)
+            value_label.pack(anchor="w")
+            return value_label, row
+
+        def add_icon_button(row: ttk.Frame, icon_name: str, command) -> None:
+            parent._styled(
+                ttk.Button(row, command=command, **parent._icon_kwargs(icon_name, "dark")),
+                icon_button_style,
+            ).pack(side="left", padx=(6, 0))
+
+        field_row("Сайт", entry["site"])
+
+        _, login_row = field_row("Логин", entry["username"])
+        add_icon_button(login_row, "copy", lambda: parent._copy_to_clipboard(entry["username"]))
+
+        # Пароль замаскирован точками по умолчанию — тот же смысл, что
+        # у show="*" в полях ввода мастер-пароля (раздел 10.7): не
+        # показывать секрет на экране, пока пользователь явно не
+        # попросил кнопкой-"глазом". "Сменить пароль" (иконка-карандаш)
+        # перенесена сюда, в строку самого поля, с прежнего отдельного
+        # широкого места в футере — по запросу пользователя, раздел 10.9.
+        self._password_visible = False
+        masked = "•" * len(entry["password"])
+        password_label, password_row = field_row("Пароль", masked)
+        add_icon_button(password_row, "eye", lambda: self._toggle_password(password_label))
+        add_icon_button(password_row, "pencil", self._on_update)
+        add_icon_button(password_row, "copy", lambda: parent._copy_to_clipboard(entry["password"]))
+
+        created_at = datetime.strptime(entry["created_at"], CREATED_AT_FORMAT)
+        field_row("Создан / изменён", created_at.strftime("%d.%m.%Y"))
+
+        buttons = ttk.Frame(self, padding=(20, 0, 20, 20))
         buttons.pack(fill="x")
         parent._styled(
             ttk.Button(buttons, text="Закрыть", command=self.destroy),
             parent._neutral_style(),
         ).pack(side="right")
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Удалить",
-                command=self._on_delete,
-                **parent._icon_kwargs("trash", "dark"),
-            ),
-            parent._neutral_style(),
-        ).pack(side="right", padx=(0, 8))
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Сменить пароль",
-                command=self._on_update,
-                **parent._icon_kwargs("pencil", "dark"),
-            ),
-            parent._neutral_style(),
-        ).pack(side="right", padx=(0, 8))
         parent._styled(
             ttk.Button(
                 buttons,
@@ -1239,8 +1370,23 @@ class ViewEntryDialog(ttk.Toplevel):
             parent._accent_style(),
         ).pack(side="left")
 
+        # Синхронно досчитать геометрию ВСЕГО уже построенного диалога —
+        # и только ПОСЛЕ этого перерисовать скруглённые подложки под их
+        # настоящий итоговый размер (см. докстринг `_rounded_backdrop`,
+        # раздел 10.9, о том, почему делать это раньше — в частности,
+        # через `after_idle` сразу в момент создания каждого фрейма —
+        # не работает).
+        self.update_idletasks()
+        for redraw in pending_backdrops:
+            redraw()
+
         self.place_window_center()
         self.grab_set()
+
+    def _toggle_password(self, label: ttk.Label) -> None:
+        self._password_visible = not self._password_visible
+        password = self._entry["password"]
+        label.configure(text=password if self._password_visible else "•" * len(password))
 
     def _on_update(self) -> None:
         # Сначала закрываем это окно (снимаем его модальный grab) — и
@@ -1250,10 +1396,6 @@ class ViewEntryDialog(ttk.Toplevel):
         self.destroy()
         self._parent._on_update_entry(self._entry)
         self._parent._refresh_tree()
-
-    def _on_delete(self) -> None:
-        self.destroy()
-        self._parent._delete_entry(self._entry)
 
 
 class AuditDialog(ttk.Toplevel):
