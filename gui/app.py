@@ -25,6 +25,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 
 import ttkbootstrap as ttk
+from PIL import Image, ImageDraw, ImageTk
 from ttkbootstrap.widgets import ScrolledText
 
 from assistant.advisor import analyze_vault, format_report
@@ -91,6 +92,50 @@ _SIDEBAR_HOVER_BG = "#1e3a63"
 _SIDEBAR_LOCK_BG = "#e0524f"
 _SIDEBAR_LOCK_HOVER_BG = "#c94742"
 
+# Плоские цвета семантических bootstyle из темы "bootstrap-light" — см.
+# CLAUDE.md, раздел 10.5. Значения получены прямым замером
+# ttk.Style().lookup(style, "background"/"foreground") в разработческой
+# сессии, не угадыванием (та же методика, что уже применена в разделе
+# 10.3 для выбора белого/тёмного варианта схематичных иконок).
+# (фон, цвет_текста)
+_FLAT_COLORS = {
+    "primary": ("#0a58ca", "#ffffff"),
+    "success": ("#146c43", "#ffffff"),
+    "danger": ("#b02a37", "#ffffff"),
+    "info": ("#0dcaf0", "#000000"),
+    "warning": ("#ffc107", "#000000"),
+    "secondary": ("#686d71", "#ffffff"),
+}
+
+_ROUNDED_RADIUS = 10  # px скругления угла у кнопок (см. _rounded_image)
+
+
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    color = color.lstrip("#")
+    return int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def _mix(color: str, other: str, amount: float) -> str:
+    """Смешать `color` с `other` в пропорции `amount` (0..1 — доля `other`).
+    Используется для цвета кнопки при наведении/нажатии — без этого
+    скруглённая кнопка была бы совсем статичной (никакой обратной связи
+    на клик), поэтому нужны хотя бы приблизительные hover/pressed тона,
+    даже не совпадающие пиксель-в-пиксель с тем, что раньше считал сам
+    `ttkbootstrap` для плоских кнопок (раздел 10.1)."""
+    r1, g1, b1 = _hex_to_rgb(color)
+    r2, g2, b2 = _hex_to_rgb(other)
+    return _rgb_to_hex(
+        (
+            round(r1 + (r2 - r1) * amount),
+            round(g1 + (g2 - g1) * amount),
+            round(b1 + (b2 - b1) * amount),
+        )
+    )
+
 
 class App(ttk.Window):
     """Главное окно приложения.
@@ -113,11 +158,21 @@ class App(ttk.Window):
             self.iconphoto(True, self._icon_image)
             # Уменьшенные версии для сайдбара (32px) и карточки на экране
             # разблокировки (64px) — subsample(n) делит ровно, 256/8=32,
-            # 256/4=64, без промежуточного пережатия через Pillow (его в
-            # рантайме нет, см. раздел 10.2 про выбор PNG именно из-за
-            # нативной поддержки Tcl/Tk, без лишней зависимости).
+            # 256/4=64. Можно было бы сделать это и через Pillow (она
+            # теперь всё равно используется для скруглённых кнопок, см.
+            # раздел 10.5), но `subsample()` — на одну строку короче и
+            # даёт точный результат именно для целых делителей, как тут.
             self._icon_image_small = self._icon_image.subsample(8, 8)
             self._icon_image_medium = self._icon_image.subsample(4, 4)
+
+        # Кэш скруглённых изображений-фонов кнопок (см. _rounded_button_style
+        # ниже) — как и self._icons, живёт на экземпляре, а не на модуле:
+        # ImageTk.PhotoImage так же привязан к конкретному Tcl-интерпретатору.
+        # Список (а не словарь) — сюда просто складываются все сгенерированные
+        # картинки, чтобы держать их живыми для сборщика мусора; повторный
+        # поиск по ключу не нужен, за него отвечает _rounded_style_names.
+        self._rounded_images: list[ImageTk.PhotoImage] = []
+        self._rounded_style_names: set[str] = set()
 
         self._setup_custom_styles()
 
@@ -181,6 +236,188 @@ class App(ttk.Window):
             return {}
         return {"image": image, "compound": "left"}
 
+    def _rounded_image(
+        self, size: int, fill: str | None, outline: str | None, surface: str
+    ) -> ImageTk.PhotoImage:
+        """Скруглённый прямоугольник size×size — фон для скруглённой
+        кнопки (см. `_rounded_button_style`). Рисуется с 4-кратным
+        суперсэмплингом и уменьшается `LANCZOS` — тот же приём, что и
+        для `gui/icon.png`/`gui/icons/*.png` (разделы 10.2–10.3), нужен
+        по той же причине: `ImageDraw` рисует без антиалиасинга, а
+        уменьшение с усреднением даёт гладкий, а не пиксельный край.
+        `fill=None` (только `outline`) — контурный вариант для кнопок
+        стиля "outline" (Обзор..., Создать новое..., Сгенерировать).
+
+        **Найденный и исправленный баг:** первая версия рисовала фигуру
+        на ПРОЗРАЧНОМ холсте (RGBA, альфа=0 за пределами скруглённого
+        угла) в расчёте, что Tk сам покажет сквозь прозрачность то, что
+        реально позади кнопки. На практике на углах появлялись заметные
+        белёсые "уголки"-артефакты — Tk рисует свой штатный (светлый)
+        фон кнопки ПОД нашим image-элементом ещё до его наложения, и
+        по контрастирующим цветам (тёмный сайдбар) это стало видно;
+        сама фигура при этом рисовалась корректно — проверено отдельным
+        сравнением `LANCZOS`/`BILINEAR`, звон интерполяции был не при
+        чём. Исправление — никакой прозрачности вообще: холст сразу
+        заливается РЕАЛЬНЫМ цветом того, на чём кнопка стоит
+        (`surface` — навy сайдбара, белый у карточки/диалогов), поверх
+        рисуется уже сама скруглённая фигура. Кнопка получается полностью
+        непрозрачной, и вопрос "что видно под прозрачным углом" просто
+        не возникает.
+        """
+        factor = 4
+        big = Image.new("RGB", (size * factor, size * factor), surface)
+        draw = ImageDraw.Draw(big)
+        width = 2 * factor if outline else 0
+        draw.rounded_rectangle(
+            [0, 0, size * factor - 1, size * factor - 1],
+            radius=_ROUNDED_RADIUS * factor,
+            fill=fill,
+            outline=outline,
+            width=width,
+        )
+        small = big.resize((size, size), Image.LANCZOS)
+        image = ImageTk.PhotoImage(small)
+        self._rounded_images.append(image)
+        return image
+
+    def _rounded_button_style(
+        self,
+        style_name: str,
+        color: str,
+        foreground: str,
+        *,
+        outline: bool = False,
+        anchor: str = "center",
+        padding: tuple[int, int] = (14, 8),
+        surface: str = "#ffffff",
+    ) -> str:
+        """Создать (при первом обращении) и вернуть имя ttk-стиля
+        скруглённой кнопки.
+
+        `ttk.Button` в теме `bootstrap-light` рисуется плоским
+        прямоугольным элементом (border/relief) — сам `bootstyle` такого
+        скругления не поддерживает, см. CLAUDE.md, раздел 10.5 (в этой
+        версии ttkbootstrap модификатор `round` относится только к
+        чекбоксам-переключателям, а комбинация `"... round"` с обычной
+        кнопкой — `invalid bootstyle combination 'round-button'`,
+        проверено прямым запуском в разработческой сессии). Поэтому фон
+        кнопки подменяется на изображение скруглённого прямоугольника —
+        классический 9-patch приём: `border=_ROUNDED_RADIUS` в
+        `style.element_create(..., "image", ...)` держит угловые радиусы
+        нетронутыми, а остальную площадь растягивает под ширину текста
+        (одна маленькая картинка работает для кнопки любой ширины).
+
+        Кэшируется по `style_name` — повторный вызов с тем же именем
+        просто возвращает уже созданный стиль (важно, потому что
+        `_build_main_frame`/диалоги вызываются заново при каждом
+        пересоздании `App`, но `element_create` с уже занятым именем
+        внутри ОДНОГО Tcl-интерпретатора бросил бы ошибку).
+
+        `surface` — реальный цвет фона ПОД кнопкой (белый по умолчанию —
+        карточка/диалоги; для кнопок сайдбара передаётся `_SIDEBAR_BG`).
+        Он не "снаружи виден" — запекается прямо в картинку кнопки, см.
+        `_rounded_image`.
+        """
+        if style_name in self._rounded_style_names:
+            return style_name
+
+        hover = _mix(color, "#ffffff", 0.18)
+        pressed = _mix(color, "#000000", 0.18)
+
+        normal_img = self._rounded_image(
+            28, None if outline else color, color if outline else None, surface
+        )
+        hover_img = self._rounded_image(
+            28, None if outline else hover, hover if outline else None, surface
+        )
+        pressed_img = self._rounded_image(
+            28, None if outline else pressed, pressed if outline else None, surface
+        )
+
+        style = ttk.Style()
+        element = f"{style_name}.border"
+        style.element_create(
+            element,
+            "image",
+            normal_img,
+            ("pressed", pressed_img),
+            ("active", hover_img),
+            border=_ROUNDED_RADIUS,
+            sticky="nsew",
+        )
+        style.layout(
+            style_name,
+            [
+                (
+                    element,
+                    {
+                        "sticky": "nsew",
+                        "children": [
+                            (
+                                "Button.padding",
+                                {
+                                    "sticky": "nsew",
+                                    "children": [("Button.label", {"sticky": "nsew"})],
+                                },
+                            )
+                        ],
+                    },
+                )
+            ],
+        )
+        style.configure(
+            style_name,
+            foreground=foreground,
+            borderwidth=0,
+            focuscolor=color,
+            padding=padding,
+            anchor=anchor,
+        )
+        self._rounded_style_names.add(style_name)
+        return style_name
+
+    def _flat_style(self, name: str, **kwargs) -> str:
+        """Скруглённый стиль для одного из стандартных плоских цветов
+        ttkbootstrap (`_FLAT_COLORS`) — короткая замена частому вызову
+        `self._rounded_button_style(f"Rounded.{name}", *_FLAT_COLORS[name])`
+        для всех кнопок, которые раньше просто писали `bootstyle=name`.
+        """
+        color, foreground = _FLAT_COLORS[name]
+        return self._rounded_button_style(f"Rounded.{name}", color, foreground, **kwargs)
+
+    def _outline_style(self, name: str = "secondary", **kwargs) -> str:
+        """Скруглённый контурный стиль (замена `bootstyle="{name}-outline"`)
+        — заливки нет, только цветная обводка и текст того же цвета,
+        как и у прежнего плоского `*-outline` в ttkbootstrap."""
+        color, _ = _FLAT_COLORS[name]
+        return self._rounded_button_style(
+            f"Rounded.{name}.Outline", color, color, outline=True, **kwargs
+        )
+
+    @staticmethod
+    def _styled(widget: ttk.Button, style_name: str) -> ttk.Button:
+        """Применить кастомный ttk-стиль к уже СОЗДАННОЙ кнопке и вернуть
+        её же (удобно для однострочного `self._styled(ttk.Button(...),
+        style).pack(...)`).
+
+        НЕ передавать скруглённый стиль как `style=` в сам конструктор
+        `ttk.Button(...)` — у `ttkbootstrap.Button.__init__` (см.
+        CLAUDE.md, раздел 10.5) есть перехват аргумента `style`: если имя
+        стиля не значится в ЕГО СОБСТВЕННОМ реестре стилей
+        (`Style.style_exists_in_theme()`), он молча трактует переданную
+        строку как строку `bootstyle` и пересчитывает стиль заново через
+        свой парсер токенов ("primary"/"outline"/... — раздел 10.1) —
+        именно так наши кастомные `Rounded.*`-стили в конструкторе
+        превращались обратно в старые плоские (или вовсе в голый
+        `TButton`, если в имени не находилось ни одного распознанного
+        токена). `ttkbootstrap.Button` не переопределяет `configure()`
+        (только `__init__`) — обращение к нему ПОСЛЕ создания виджета
+        идёт напрямую в обычный `ttk.Widget.configure`, без этого
+        перехвата, и стиль применяется как есть.
+        """
+        widget.configure(style=style_name)
+        return widget
+
     def _setup_custom_styles(self) -> None:
         """Стили для сайдбара и тёмного фона экрана разблокировки.
 
@@ -203,29 +440,11 @@ class App(ttk.Window):
         style.configure(
             "Sidebar.TLabel", background=_SIDEBAR_BG, foreground=_SIDEBAR_TEXT_ACTIVE
         )
-        style.configure(
-            "SidebarNav.TButton",
-            background=_SIDEBAR_BG,
-            foreground=_SIDEBAR_TEXT,
-            borderwidth=0,
-            focuscolor=_SIDEBAR_BG,
-            padding=(12, 10),
-            anchor="w",
-        )
-        style.map(
-            "SidebarNav.TButton",
-            background=[("active", _SIDEBAR_HOVER_BG)],
-            foreground=[("active", _SIDEBAR_TEXT_ACTIVE)],
-        )
-        style.configure(
-            "SidebarLock.TButton",
-            background=_SIDEBAR_LOCK_BG,
-            foreground=_SIDEBAR_TEXT_ACTIVE,
-            borderwidth=0,
-            focuscolor=_SIDEBAR_LOCK_BG,
-            padding=(12, 10),
-        )
-        style.map("SidebarLock.TButton", background=[("active", _SIDEBAR_LOCK_HOVER_BG)])
+        # Кнопки сайдбара (SidebarNav/SidebarLock) — скруглённые, заведены
+        # через `_rounded_button_style` прямо в местах создания кнопок в
+        # `_build_main_frame` (раздел 10.5), не здесь: этому методу тогда
+        # ещё недоступны self._rounded_images/_rounded_style_names — они
+        # заполняются позже в __init__, до вызова _build_main_frame.
 
     # ------------------------------------------------------------------
     # Экран разблокировки / создания хранилища
@@ -265,8 +484,8 @@ class App(ttk.Window):
         ttk.Entry(path_row, textvariable=self._path_var, width=26).pack(
             side="left", fill="x", expand=True, padx=8
         )
-        ttk.Button(
-            path_row, text="Обзор...", command=self._on_browse, bootstyle="secondary-outline"
+        self._styled(
+            ttk.Button(path_row, text="Обзор...", command=self._on_browse), self._outline_style()
         ).pack(side="left")
 
         pw_row = ttk.Frame(card)
@@ -284,19 +503,23 @@ class App(ttk.Window):
 
         buttons_row = ttk.Frame(card)
         buttons_row.pack(fill="x", pady=8)
-        ttk.Button(
-            buttons_row,
-            text="Открыть",
-            command=self._on_unlock,
-            bootstyle="primary",
-            **self._icon_kwargs("unlock", "white"),
+        self._styled(
+            ttk.Button(
+                buttons_row,
+                text="Открыть",
+                command=self._on_unlock,
+                **self._icon_kwargs("unlock", "white"),
+            ),
+            self._flat_style("primary"),
         ).pack(side="left", expand=True, fill="x", padx=(0, 4))
-        ttk.Button(
-            buttons_row,
-            text="Создать новое...",
-            command=self._on_create,
-            bootstyle="secondary-outline",
-            **self._icon_kwargs("plus", "dark"),
+        self._styled(
+            ttk.Button(
+                buttons_row,
+                text="Создать новое...",
+                command=self._on_create,
+                **self._icon_kwargs("plus", "dark"),
+            ),
+            self._outline_style(),
         ).pack(side="left", expand=True, fill="x", padx=(4, 0))
 
         return outer
@@ -420,24 +643,33 @@ class App(ttk.Window):
             brand_row, text=APP_TITLE, style="Sidebar.TLabel", font=("", 13, "bold")
         ).pack(side="left")
 
+        sidebar_nav_style = self._rounded_button_style(
+            "Rounded.SidebarNav", _SIDEBAR_BG, _SIDEBAR_TEXT, anchor="w", surface=_SIDEBAR_BG
+        )
         for text, command, icon_name in (
             ("Советник", self._on_audit, "shield"),
             ("Генератор", self._on_generate_standalone, "dice"),
         ):
-            ttk.Button(
-                sidebar,
-                text=text,
-                command=command,
-                style="SidebarNav.TButton",
-                **self._icon_kwargs(icon_name, "white"),
+            self._styled(
+                ttk.Button(
+                    sidebar, text=text, command=command, **self._icon_kwargs(icon_name, "white")
+                ),
+                sidebar_nav_style,
             ).pack(fill="x", pady=2)
 
-        ttk.Button(
-            sidebar,
-            text="Заблокировать",
-            command=self._on_lock,
-            style="SidebarLock.TButton",
-            **self._icon_kwargs("lock", "white"),
+        self._styled(
+            ttk.Button(
+                sidebar,
+                text="Заблокировать",
+                command=self._on_lock,
+                **self._icon_kwargs("lock", "white"),
+            ),
+            self._rounded_button_style(
+                "Rounded.SidebarLock",
+                _SIDEBAR_LOCK_BG,
+                _SIDEBAR_TEXT_ACTIVE,
+                surface=_SIDEBAR_BG,
+            ),
         ).pack(side="bottom", fill="x")
 
         content = ttk.Frame(frame, padding=12)
@@ -469,16 +701,18 @@ class App(ttk.Window):
 
         buttons_row = ttk.Frame(content)
         buttons_row.pack(fill="x", pady=(8, 0))
-        for text, command, style, icon_name, icon_variant in (
+        for text, command, flat_name, icon_name, icon_variant in (
             ("Добавить", self._on_add, "success", "plus", "white"),
             ("Удалить", self._on_delete_selected, "danger", "trash", "white"),
         ):
-            ttk.Button(
-                buttons_row,
-                text=text,
-                command=command,
-                bootstyle=style,
-                **self._icon_kwargs(icon_name, icon_variant),
+            self._styled(
+                ttk.Button(
+                    buttons_row,
+                    text=text,
+                    command=command,
+                    **self._icon_kwargs(icon_name, icon_variant),
+                ),
+                self._flat_style(flat_name),
             ).pack(side="left", padx=(0, 6))
 
         return frame
@@ -682,25 +916,30 @@ class EntryDialog(ttk.Toplevel):
                 entry.focus_set()
         form.columnconfigure(1, weight=1)
 
-        ttk.Button(
-            form,
-            text="Сгенерировать",
-            command=self._on_generate,
-            bootstyle="secondary-outline",
-            **parent._icon_kwargs("dice", "dark"),
+        parent._styled(
+            ttk.Button(
+                form,
+                text="Сгенерировать",
+                command=self._on_generate,
+                **parent._icon_kwargs("dice", "dark"),
+            ),
+            parent._outline_style(),
         ).grid(row=len(fields), column=1, sticky="e", pady=(4, 0))
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Отмена", command=self.destroy, bootstyle="secondary").pack(
-            side="right"
-        )
-        ttk.Button(
-            buttons,
-            text="Сохранить",
-            command=self._on_save,
-            bootstyle="success",
-            **parent._icon_kwargs("save", "white"),
+        parent._styled(
+            ttk.Button(buttons, text="Отмена", command=self.destroy),
+            parent._flat_style("secondary"),
+        ).pack(side="right")
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Сохранить",
+                command=self._on_save,
+                **parent._icon_kwargs("save", "white"),
+            ),
+            parent._flat_style("success"),
         ).pack(side="right", padx=(0, 8))
 
         self.place_window_center()
@@ -752,29 +991,36 @@ class ViewEntryDialog(ttk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Закрыть", command=self.destroy, bootstyle="secondary").pack(
-            side="right"
-        )
-        ttk.Button(
-            buttons,
-            text="Удалить",
-            command=self._on_delete,
-            bootstyle="danger",
-            **parent._icon_kwargs("trash", "white"),
+        parent._styled(
+            ttk.Button(buttons, text="Закрыть", command=self.destroy),
+            parent._flat_style("secondary"),
+        ).pack(side="right")
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Удалить",
+                command=self._on_delete,
+                **parent._icon_kwargs("trash", "white"),
+            ),
+            parent._flat_style("danger"),
         ).pack(side="right", padx=(0, 8))
-        ttk.Button(
-            buttons,
-            text="Сменить пароль",
-            command=self._on_update,
-            bootstyle="warning",
-            **parent._icon_kwargs("pencil", "dark"),
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Сменить пароль",
+                command=self._on_update,
+                **parent._icon_kwargs("pencil", "dark"),
+            ),
+            parent._flat_style("warning"),
         ).pack(side="right", padx=(0, 8))
-        ttk.Button(
-            buttons,
-            text="Копировать пароль",
-            command=lambda: parent._copy_to_clipboard(entry["password"]),
-            bootstyle="info",
-            **parent._icon_kwargs("copy", "dark"),
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Копировать пароль",
+                command=lambda: parent._copy_to_clipboard(entry["password"]),
+                **parent._icon_kwargs("copy", "dark"),
+            ),
+            parent._flat_style("info"),
         ).pack(side="left")
 
         self.place_window_center()
@@ -813,9 +1059,10 @@ class AuditDialog(ttk.Toplevel):
         text_widget.text.configure(state="disabled")
         text_widget.pack(fill="both", expand=True)
 
-        ttk.Button(self, text="Закрыть", command=self.destroy, bootstyle="secondary").pack(
-            pady=8
-        )
+        parent._styled(
+            ttk.Button(self, text="Закрыть", command=self.destroy),
+            parent._flat_style("secondary"),
+        ).pack(pady=8)
         self.place_window_center()
         self.grab_set()
 
@@ -871,22 +1118,27 @@ class GeneratorDialog(ttk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
         buttons.pack(fill="x")
-        ttk.Button(buttons, text="Закрыть", command=self.destroy, bootstyle="secondary").pack(
-            side="right"
-        )
-        ttk.Button(
-            buttons,
-            text="Копировать",
-            command=self._on_copy_click,
-            bootstyle="info",
-            **parent._icon_kwargs("copy", "dark"),
+        parent._styled(
+            ttk.Button(buttons, text="Закрыть", command=self.destroy),
+            parent._flat_style("secondary"),
+        ).pack(side="right")
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Копировать",
+                command=self._on_copy_click,
+                **parent._icon_kwargs("copy", "dark"),
+            ),
+            parent._flat_style("info"),
         ).pack(side="right", padx=(0, 8))
-        ttk.Button(
-            buttons,
-            text="Сгенерировать",
-            command=self._on_generate,
-            bootstyle="primary",
-            **parent._icon_kwargs("dice", "white"),
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Сгенерировать",
+                command=self._on_generate,
+                **parent._icon_kwargs("dice", "white"),
+            ),
+            parent._flat_style("primary"),
         ).pack(side="left")
 
         self._on_generate()
