@@ -111,6 +111,24 @@ _ACCENT = "#2f6fed"
 
 _ROUNDED_RADIUS = 10  # px скругления угла у кнопок (см. _rounded_image)
 
+# Главный экран референса ("вариант C", раздел 10.8) — не просто сайдбар
+# впритык к краям окна, а единая "карточка" (сайдбар + рабочая область)
+# со скруглёнными ТОЛЬКО внешними углами, отступом от края окна и на
+# фоне светло-серой "страницы" — тот же язык, что уже даёт объём кнопкам
+# (раздел 10.5), только применённый к панелям целиком (см. _panel_style).
+_PAGE_BG = "#eef1f6"
+_CARD_RADIUS = 20
+_CARD_MARGIN = 22
+
+# Плейсхолдер строки поиска (раздел 10.8) — показывается прямо в самом
+# поле вместо отдельной подписи "Поиск:" слева; сравнивается по значению
+# с текущим текстом поля (см. _refresh_tree), а не через отдельный
+# булев флаг — это устойчиво к прямой установке `_search_var.set(...)`
+# в тестах (tests/test_gui.py), которая не проходит через события
+# фокуса, где обычно вставляется/убирается плейсхолдер.
+_SEARCH_PLACEHOLDER = "Поиск по сайту или логину..."
+_SEARCH_PLACEHOLDER_COLOR = "#9aa3b2"
+
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
     color = color.lstrip("#")
@@ -151,8 +169,8 @@ class App(ttk.Window):
         super().__init__(
             title=APP_TITLE,
             themename=THEME_NAME,
-            size=(780, 620),
-            minsize=(560, 460),
+            size=(980, 640),
+            minsize=(760, 460),
         )
 
         if ICON_PATH.exists():
@@ -418,6 +436,48 @@ class App(ttk.Window):
         одинаково ярких кнопок."""
         return self._rounded_button_style("Rounded.Accent", _ACCENT, "#ffffff", **kwargs)
 
+    def _panel_style(
+        self, style_name: str, fill: str, corners: tuple[bool, bool, bool, bool]
+    ) -> str:
+        """Стиль TFrame со скруглёнными углами по маске `corners`
+        (top_left, top_right, bottom_right, bottom_left) — тот же
+        9-patch приём, что и у кнопок (`_rounded_button_style`), только
+        без hover/pressed-состояний (панель не кликабельна сама по
+        себе) и с асимметричным скруглением: сайдбар округляет только
+        левые углы, рабочая область — только правые, а стыкующиеся
+        прямые края остаются острыми, чтобы вместе они читались как
+        ОДНА карточка с едиными внешними углами (раздел 10.8).
+
+        Одного небольшого изображения достаточно — Tk растягивает
+        среднюю область 9-patch'а под любой реальный размер фрейма, а
+        растягивание сплошной заливки (не текстуры) визуально
+        неотличимо от рисования этой заливки напрямую нужного размера.
+        """
+        if style_name in self._rounded_style_names:
+            return style_name
+
+        factor = 4
+        size = 64
+        big = Image.new("RGB", (size * factor, size * factor), _PAGE_BG)
+        draw = ImageDraw.Draw(big)
+        draw.rounded_rectangle(
+            [0, 0, size * factor - 1, size * factor - 1],
+            radius=_CARD_RADIUS * factor,
+            fill=fill,
+            corners=corners,
+        )
+        small = big.resize((size, size), Image.LANCZOS)
+        image = ImageTk.PhotoImage(small)
+        self._rounded_images.append(image)
+
+        style = ttk.Style()
+        element = f"{style_name}.panel"
+        style.element_create(element, "image", image, border=_CARD_RADIUS, sticky="nsew")
+        style.layout(style_name, [(element, {"sticky": "nsew"})])
+        style.configure(style_name, background=fill)
+        self._rounded_style_names.add(style_name)
+        return style_name
+
     @staticmethod
     def _styled(widget: ttk.Button, style_name: str) -> ttk.Button:
         """Применить кастомный ttk-стиль к уже СОЗДАННОЙ кнопке и вернуть
@@ -459,6 +519,13 @@ class App(ttk.Window):
         style = ttk.Style()
 
         style.configure("UnlockBg.TFrame", background=_SIDEBAR_BG)
+
+        # Светло-серая "страница" вокруг карточки главного экрана (раздел
+        # 10.8) — сама карточка (сайдбар + рабочая область) получает
+        # скруглённые внешние углы через `_panel_style`, а этот плоский
+        # фон нужен только для контраста снаружи неё, тем же приёмом, что
+        # и `UnlockBg.TFrame` для тёмного фона экрана разблокировки.
+        style.configure("Page.TFrame", background=_PAGE_BG)
 
         style.configure("Sidebar.TFrame", background=_SIDEBAR_BG)
         style.configure(
@@ -682,17 +749,26 @@ class App(ttk.Window):
     # ------------------------------------------------------------------
 
     def _build_main_frame(self) -> ttk.Frame:
-        # "Разделённая панель" (см. CLAUDE.md, раздел 10): тёмный сайдбар
-        # слева (бренд + глобальные инструменты, не привязанные к
-        # конкретной записи — советник и генератор работают со всем
-        # хранилищем или вообще без него) и светлая рабочая область
-        # справа (поиск, список записей, действия НАД записями —
-        # добавить/удалить). "Заблокировать" — тоже в сайдбар, это
-        # действие уровня приложения, а не списка записей.
-        frame = ttk.Frame(self)
+        # "Разделённая панель" (см. CLAUDE.md, разделы 10/10.8): единая
+        # "карточка" (тёмный сайдбар + светлая рабочая область) со
+        # скруглёнными ТОЛЬКО внешними углами, с отступом от края окна,
+        # на фоне светло-серой "страницы" — page/card_wrap ниже. Сайдбар
+        # несёт бренд + глобальные инструменты (советник/генератор не
+        # привязаны к конкретной записи), рабочая область — поиск,
+        # список и действия НАД записями. "Заблокировать" — тоже в
+        # сайдбар, это действие уровня приложения, а не списка записей.
+        page = ttk.Frame(self, style="Page.TFrame")
 
-        sidebar = ttk.Frame(frame, style="Sidebar.TFrame", padding=(16, 20))
-        sidebar.pack(side="left", fill="y")
+        card_wrap = ttk.Frame(page, style="Page.TFrame")
+        card_wrap.pack(fill="both", expand=True, padx=_CARD_MARGIN, pady=_CARD_MARGIN)
+
+        sidebar_panel_style = self._panel_style(
+            "Panel.Sidebar", _SIDEBAR_BG, corners=(True, False, False, True)
+        )
+        sidebar_outer = ttk.Frame(card_wrap, style=sidebar_panel_style)
+        sidebar_outer.pack(side="left", fill="y")
+        sidebar = ttk.Frame(sidebar_outer, style="Sidebar.TFrame", padding=(16, 20))
+        sidebar.pack(fill="both", expand=True)
 
         brand_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
         brand_row.pack(fill="x", pady=(0, 24))
@@ -703,6 +779,28 @@ class App(ttk.Window):
         ttk.Label(
             brand_row, text=APP_TITLE, style="Sidebar.TLabel", font=("", 13, "bold")
         ).pack(side="left")
+
+        # "Все записи" — единственный сейчас существующий "экран" внутри
+        # главного окна, поэтому всегда показан как активный пункт
+        # навигации (светлее фона сайдбара, `_SIDEBAR_HOVER_BG`, — тот же
+        # цвет, что уже был заведён под hover, но раньше нигде не
+        # использовался как самостоятельный "выбранный" фон). Клик сбрасывает
+        # фильтр поиска — осмысленное действие даже при одном экране.
+        self._styled(
+            ttk.Button(
+                sidebar,
+                text="Все записи",
+                command=self._on_show_all_entries,
+                **self._icon_kwargs("eye", "white"),
+            ),
+            self._rounded_button_style(
+                "Rounded.SidebarActive",
+                _SIDEBAR_HOVER_BG,
+                _SIDEBAR_TEXT_ACTIVE,
+                anchor="w",
+                surface=_SIDEBAR_BG,
+            ),
+        ).pack(fill="x", pady=2)
 
         sidebar_nav_style = self._rounded_button_style(
             "Rounded.SidebarNav", _SIDEBAR_BG, _SIDEBAR_TEXT, anchor="w", surface=_SIDEBAR_BG
@@ -733,17 +831,62 @@ class App(ttk.Window):
             ),
         ).pack(side="bottom", fill="x")
 
-        content = ttk.Frame(frame, padding=12)
-        content.pack(side="left", fill="both", expand=True)
-
-        top_row = ttk.Frame(content)
-        top_row.pack(fill="x", pady=(0, 8))
-        ttk.Label(top_row, text="Поиск:").pack(side="left")
-        self._search_var = tk.StringVar()
-        self._search_var.trace_add("write", lambda *_args: self._refresh_tree())
-        ttk.Entry(top_row, textvariable=self._search_var).pack(
-            side="left", fill="x", expand=True, padx=8
+        content_panel_style = self._panel_style(
+            "Panel.Content", "#ffffff", corners=(False, True, True, False)
         )
+        content_outer = ttk.Frame(card_wrap, style=content_panel_style)
+        content_outer.pack(side="left", fill="both", expand=True)
+        content = ttk.Frame(content_outer, padding=16)
+        content.pack(fill="both", expand=True)
+
+        # Панель инструментов — действия НАД записями (раздел 10.8):
+        # "Просмотр"/"Сменить пароль" дублируют то, что раньше было
+        # доступно только через двойной клик/ViewEntryDialog, а
+        # "Советник"/"Генератор" продублированы здесь же вслед за
+        # референсом, как быстрый доступ, не убирая их из сайдбара (там
+        # они остаются как глобальная навигация). Два ряда, а не один с
+        # автопереносом — настоящий flow-layout с перерасчётом переноса
+        # по ширине окна для десятка кнопок не стоит сложности, которую
+        # он добавил бы (раздел 7); ряды разбиты статично под ширину
+        # окна по умолчанию, как на референсе.
+        toolbar_row1 = ttk.Frame(content)
+        toolbar_row1.pack(fill="x")
+        toolbar_row2 = ttk.Frame(content)
+        toolbar_row2.pack(fill="x", pady=(6, 0))
+        for row, text, command, icon_name in (
+            (toolbar_row1, "Добавить", self._on_add, "plus"),
+            (toolbar_row1, "Просмотр", self._on_view_selected, "eye"),
+            (toolbar_row1, "Сменить пароль", self._on_change_password_selected, "pencil"),
+            (toolbar_row1, "Удалить", self._on_delete_selected, "trash"),
+            (toolbar_row2, "Советник", self._on_audit, "shield"),
+            (toolbar_row2, "Генератор", self._on_generate_standalone, "dice"),
+        ):
+            self._styled(
+                ttk.Button(row, text=text, command=command, **self._icon_kwargs(icon_name, "dark")),
+                self._neutral_style(),
+            ).pack(side="left", padx=(0, 6))
+
+        search_row = ttk.Frame(content)
+        search_row.pack(fill="x", pady=(12, 8))
+        self._search_var = tk.StringVar(value=_SEARCH_PLACEHOLDER)
+        self._search_var.trace_add("write", lambda *_args: self._refresh_tree())
+        search_entry = ttk.Entry(search_row, textvariable=self._search_var)
+        search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
+        search_entry.pack(fill="x", ipady=4)
+        self._search_entry = search_entry
+
+        def _on_search_focus_in(_event: object) -> None:
+            if self._search_var.get() == _SEARCH_PLACEHOLDER:
+                self._search_var.set("")
+                search_entry.configure(foreground="")
+
+        def _on_search_focus_out(_event: object) -> None:
+            if not self._search_var.get():
+                self._search_var.set(_SEARCH_PLACEHOLDER)
+                search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
+
+        search_entry.bind("<FocusIn>", _on_search_focus_in)
+        search_entry.bind("<FocusOut>", _on_search_focus_out)
 
         columns = ("site", "username")
         self._tree = ttk.Treeview(content, columns=columns, show="headings", selectmode="browse")
@@ -754,36 +897,27 @@ class App(ttk.Window):
         self._tree.tag_configure("evenrow", background=_TREE_ROW_COLORS["evenrow"])
         self._tree.tag_configure("oddrow", background=_TREE_ROW_COLORS["oddrow"])
         self._tree.pack(fill="both", expand=True)
-        # Двойной клик по строке — единственный способ открыть запись
-        # (просмотр логина/пароля/даты, см. ViewEntryDialog); отдельная
-        # кнопка "Открыть запись" на панели инструментов была прямым
-        # дублем этого жеста и убрана по решению пользователя.
+        # Двойной клик по строке — по-прежнему открывает запись (просмотр
+        # логина/пароля/даты, см. ViewEntryDialog), теперь наравне с
+        # кнопкой "Просмотр" на панели инструментов, а не единственным
+        # способом это сделать.
         self._tree.bind("<Double-1>", lambda _event: self._on_view_selected())
 
-        buttons_row = ttk.Frame(content)
-        buttons_row.pack(fill="x", pady=(8, 0))
-        # Обе кнопки — нейтральные (см. раздел 10.6): в референсе C у
-        # "Добавить"/"Удалить" нет собственного смыслового цвета, роль
-        # различителя действия несёт иконка, а не заливка кнопки.
-        for text, command, icon_name in (
-            ("Добавить", self._on_add, "plus"),
-            ("Удалить", self._on_delete_selected, "trash"),
-        ):
-            self._styled(
-                ttk.Button(
-                    buttons_row,
-                    text=text,
-                    command=command,
-                    **self._icon_kwargs(icon_name, "dark"),
-                ),
-                self._neutral_style(),
-            ).pack(side="left", padx=(0, 6))
-
-        return frame
+        return page
 
     def _show_main(self) -> None:
         self._unlock_frame.pack_forget()
         self._main_frame.pack(fill="both", expand=True)
+        self._refresh_tree()
+
+    def _on_show_all_entries(self) -> None:
+        """Пункт навигации "Все записи" в сайдбаре (раздел 10.8) —
+        сейчас единственный экран внутри главного окна, поэтому всегда
+        показан как активный; клик сбрасывает фильтр поиска обратно к
+        плейсхолдеру, что и значит "показать вообще все записи"."""
+        self._search_var.set(_SEARCH_PLACEHOLDER)
+        self._search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
+        self.focus_set()
         self._refresh_tree()
 
     def _refresh_tree(self) -> None:
@@ -791,7 +925,12 @@ class App(ttk.Window):
         if self.data is None:
             return
 
-        query = self._search_var.get().strip().lower()
+        raw_query = self._search_var.get()
+        # Плейсхолдер живёт в том же StringVar, что и реальный ввод (см.
+        # _build_main_frame) — сравнение по значению, а не по отдельному
+        # флагу, устойчиво и к программной установке `_search_var.set(...)`
+        # в обход событий фокуса (как делают tests/test_gui.py).
+        query = "" if raw_query == _SEARCH_PLACEHOLDER else raw_query.strip().lower()
         visible_position = 0
         for index, entry in enumerate(self.data.get("entries", [])):
             haystack = f"{entry['site']} {entry['username']}".lower()
@@ -880,6 +1019,19 @@ class App(ttk.Window):
         entry["password"] = new_password
         entry["created_at"] = now_iso()
         self._save_vault()
+
+    def _on_change_password_selected(self) -> None:
+        """Кнопка "Сменить пароль" на панели инструментов (раздел
+        10.8) — то же самое действие, что и одноимённая кнопка в
+        ViewEntryDialog (`_on_update_entry`), но без промежуточного
+        открытия диалога просмотра: пользователь уже выбрал запись в
+        списке, открывать её целиком ради одной кнопки было бы лишним
+        шагом."""
+        entry = self._selected_entry()
+        if entry is None:
+            messagebox.showinfo("Нет выбора", "Сначала выберите запись в списке.", parent=self)
+            return
+        self._on_update_entry(entry)
 
     def _on_delete_selected(self) -> None:
         entry = self._selected_entry()
