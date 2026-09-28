@@ -49,6 +49,14 @@ hiddenimports.append("PIL._tkinter_finder")
 # assistant/, gui/ на уровень выше.
 project_root = Path(SPECPATH).resolve().parent
 
+# gui/icon.png — иконка окна, которую gui/app.py грузит по относительному
+# пути ЧЕРЕЗ Path(__file__).resolve().parent (см. ICON_PATH в app.py), а
+# не через import — статический анализ PyInstaller видит только импорты,
+# поэтому файл нужно добавить в datas явно, иначе внутри собранного .exe
+# его просто не окажется и окно останется без иконки (без ошибки — файл
+# при отсутствии просто не подключается, см. ICON_PATH.exists() в app.py).
+datas.append((str(project_root / "gui" / "icon.png"), "gui"))
+
 a = Analysis(
     [str(project_root / "gui" / "app.py")],
     pathex=[str(project_root)],
@@ -91,4 +99,10 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # Значок самого menedger.exe (Проводник, панель задач, ярлык) — это
+    # ОТДЕЛЬНО от иконки окна (datas выше): Windows берёт его из ресурсов
+    # exe-файла, а не из PNG, который грузит tkinter в рантайме, поэтому
+    # здесь нужен .ico, а не тот же icon.png. На Linux/macOS PyInstaller
+    # этот параметр просто игнорирует.
+    icon=str(project_root / "gui" / "icon.ico"),
 )

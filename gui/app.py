@@ -57,6 +57,13 @@ APP_TITLE = "Хранилище тайн"
 # доступном любому другому процессу в системе.
 CLIPBOARD_CLEAR_DELAY_MS = 20_000
 
+# Иконка окна (PNG, читается через tk.PhotoImage — Tcl/Tk 8.6+ понимает
+# PNG нативно, без Pillow). Значок исполняемого файла на Windows задаётся
+# отдельно, через parameter icon= в packaging/menedger.spec (там нужен
+# .ico, см. CLAUDE.md, раздел 11.2) — это два независимых места, и оба
+# указывают на один и тот же исходный рисунок.
+ICON_PATH = Path(__file__).resolve().parent / "icon.png"
+
 # Цвета для чередующихся строк в списке записей (см. _refresh_tree) —
 # нейтральные светлые тона, подобранные под светлую тему "flatly".
 _TREE_ROW_COLORS = {"evenrow": "#ffffff", "oddrow": "#f2f3f5"}
@@ -77,6 +84,10 @@ class App(ttk.Window):
             size=(680, 460),
             minsize=(480, 320),
         )
+
+        if ICON_PATH.exists():
+            self._icon_image = tk.PhotoImage(file=str(ICON_PATH))
+            self.iconphoto(True, self._icon_image)
 
         self.vault_path: Path | None = None
         self.master_password: str | None = None
