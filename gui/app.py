@@ -733,6 +733,58 @@ class App(ttk.Window):
         # в `_build_main_frame` (раздел 10.11).
         style.configure("Flat.TEntry", foreground=_NEUTRAL_TEXT)
 
+        # `PasswordDisplay.TEntry` (раздел 10.16) — для поля
+        # сгенерированного пароля в `GeneratorDialog`: НЕ переиспользует
+        # `Flat.TEntry` (несмотря на то, что оба поля сидят в такой же
+        # скруглённой подложке), потому что это поле — `state="readonly"`,
+        # а `Flat.TEntry` в этом состоянии красится некорректно (см. ниже).
+        #
+        # **Найденный и исправленный баг: `Entry.textarea` в состоянии
+        # `readonly` игнорирует прямую Tk-опцию `background` и остаётся
+        # белым, даже когда `Entry.field` уже убран из раскладки (как у
+        # `Flat.TEntry`).** Приём из `Flat.TEntry` (раздел 10.11) —
+        # напрямую красить `Entry.textarea` через обычную Tk-опцию
+        # `background`, В ОБХОД стиля — работает ТОЛЬКО для обычного
+        # (редактируемого) состояния поля: `search_entry` в главном экране
+        # никогда не бывает readonly, поэтому баг там не проявлялся. Для
+        # readonly-поля `Entry.textarea` красит фон ПОД текстом уже не по
+        # прямой Tk-опции, а полагаясь на элемент `Entry.field` (тот
+        # самый, что рисует и рамку), который `Flat.TEntry` убрал из
+        # раскладки целиком, — без него у readonly-текста просто нет
+        # источника цвета фона, и он остаётся белым (подтверждено
+        # изолированным тестовым скриптом: `.state(["readonly"])` без
+        # удаления `Entry.field` красится корректно через `fieldbackground`,
+        # а с удалённым `Entry.field` — не красится НИКАК, даже если
+        # `fieldbackground` явно задан через `style.map()`).
+        #
+        # Исправление — не трогать раскладку вообще (оставить
+        # `Entry.field` на месте, чтобы `fieldbackground` было кому
+        # красить), а вместо "убрать рамку" сделать рамку НЕВИДИМОЙ —
+        # покрасить её в тот же цвет, что и заливку (`bordercolor`/
+        # `lightcolor`/`darkcolor` = `_NEUTRAL_FILL`, тот же трюк, что и
+        # у "прозрачных" картинок кнопок в разделе 10.5: не прозрачность,
+        # а буквально одинаковый цвет с тем, на чём стоит элемент).
+        # `style.map(...)` дополнительно перекрывает `fieldbackground`/
+        # цвета рамки для состояний `readonly`/`disabled`, потому что в
+        # теме `bootstrap-light` они по умолчанию заданы отдельно от
+        # обычного состояния (там же, `style.lookup(..., ("readonly",))`
+        # без этой перезаписи возвращает `#ffffff`, а не наш `_NEUTRAL_FILL`).
+        style.configure(
+            "PasswordDisplay.TEntry",
+            foreground=_NEUTRAL_TEXT,
+            fieldbackground=_NEUTRAL_FILL,
+            bordercolor=_NEUTRAL_FILL,
+            lightcolor=_NEUTRAL_FILL,
+            darkcolor=_NEUTRAL_FILL,
+        )
+        style.map(
+            "PasswordDisplay.TEntry",
+            fieldbackground=[("readonly", _NEUTRAL_FILL), ("disabled", _NEUTRAL_FILL)],
+            bordercolor=[("readonly", _NEUTRAL_FILL), ("disabled", _NEUTRAL_FILL)],
+            lightcolor=[("readonly", _NEUTRAL_FILL), ("disabled", _NEUTRAL_FILL)],
+            darkcolor=[("readonly", _NEUTRAL_FILL), ("disabled", _NEUTRAL_FILL)],
+        )
+
         # Тот же приём (полное удаление элемента-рамки из раскладки, а
         # не просто обнуление borderwidth) — для списка записей
         # (`Treeview`), обёрнутого в такую же скруглённую подложку
@@ -1741,7 +1793,11 @@ class GeneratorDialog(ttk.Toplevel):
         result_entry = ttk.Entry(
             password_box, textvariable=self._result_var, state="readonly", font=("Consolas", 13)
         )
-        result_entry.configure(style="Flat.TEntry", background=_NEUTRAL_FILL)
+        # `PasswordDisplay.TEntry`, а не `Flat.TEntry` — у readonly-поля
+        # раскладка с удалённым `Entry.field` красится некорректно
+        # (см. подробный разбор бага в `_setup_custom_styles`,
+        # раздел 10.16).
+        result_entry.configure(style="PasswordDisplay.TEntry")
         result_entry.pack(side="left", fill="x", expand=True)
         icon_button_style = parent._rounded_button_style(
             "Rounded.IconToggle",
