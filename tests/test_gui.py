@@ -54,8 +54,30 @@ def app(tmp_path, monkeypatch):
 
 
 def _create_vault(app, monkeypatch, master=MASTER):
-    answers = iter([master, master])
-    monkeypatch.setattr(guiapp.simpledialog, "askstring", lambda *a, **k: next(answers, None))
+    # `_on_create` теперь открывает `CreateVaultDialog` (раздел 10.18) —
+    # обычный Toplevel с полями и `self.wait_window(dialog)`, а не пару
+    # `simpledialog.askstring`. Для тестов, которым нужен просто готовый
+    # разблокированный vault (а не проверка самого диалога), подменяем
+    # класс диалога на фейковый: реальный `tk.Toplevel`, который сразу
+    # выставляет `.result` и планирует своё уничтожение через `after(0,
+    # ...)`. **Найденный при написании этого теста нюанс:** уничтожить
+    # окно СРАЗУ в `__init__` нельзя — `App._on_create` вызывает
+    # `wait_window` уже ПОСЛЕ того, как конструктор отработал, и на
+    # момент вызова путь окна в Tcl уже невалиден
+    # (`_tkinter.TclError: bad window path name`), а не "возвращается
+    # немедленно", как можно было бы ожидать. `after(0, self.destroy)`
+    # правильно откладывает уничтожение на момент, когда `wait_window`
+    # уже запустил свой локальный цикл обработки событий Tcl и обработает
+    # отложенный вызов как обычное событие. Валидацию полей самого
+    # диалога (несовпадение, короткий пароль, слабый пароль) тесты
+    # проверяют отдельно, вызывая `CreateVaultDialog` напрямую — см. ниже.
+    class _FakeCreateVaultDialog(tk.Toplevel):
+        def __init__(self, parent):
+            super().__init__(parent)
+            self.result = master
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "CreateVaultDialog", _FakeCreateVaultDialog)
     app._on_create()
 
 
@@ -67,28 +89,51 @@ def test_create_vault(app, monkeypatch, tmp_path):
     assert Path(app._path_var.get()).exists()
 
 
-def test_create_rejects_mismatched_confirmation(app, monkeypatch):
-    answers = iter([MASTER, "something else"])
-    monkeypatch.setattr(guiapp.simpledialog, "askstring", lambda *a, **k: next(answers, None))
-    errors = []
-    monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a))
+def test_create_dialog_rejects_mismatched_confirmation(app, monkeypatch):
+    # Валидация полей теперь внутри самого CreateVaultDialog (раздел
+    # 10.18), а не в App._on_create — тестируем диалог напрямую, тем же
+    # способом, каким test_dialog_construction_does_not_raise уже строит
+    # другие диалоги напрямую через app как parent.
+    dialog = guiapp.CreateVaultDialog(app)
+    dialog._password_var.set(MASTER)
+    dialog._confirm_var.set("something else")
 
-    app._on_create()
+    dialog._on_submit()
 
-    assert app.data is None
-    assert errors  # хоть одна ошибка должна была показаться
+    assert dialog.result is None
+    assert "не совпад" in dialog._status_label.cget("text")
+    dialog.destroy()
 
 
-def test_create_rejects_too_short_password(app, monkeypatch):
-    answers = iter(["short", "short"])
-    monkeypatch.setattr(guiapp.simpledialog, "askstring", lambda *a, **k: next(answers, None))
-    errors = []
-    monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a))
+def test_create_dialog_rejects_too_short_password(app, monkeypatch):
+    dialog = guiapp.CreateVaultDialog(app)
+    dialog._password_var.set("short")
+    dialog._confirm_var.set("short")
 
-    app._on_create()
+    dialog._on_submit()
 
-    assert app.data is None
-    assert errors
+    assert dialog.result is None
+    assert "не короче" in dialog._status_label.cget("text")
+    dialog.destroy()
+
+
+def test_create_dialog_warns_about_weak_master_password(app, monkeypatch):
+    # Слабый (но достаточно длинный, чтобы пройти проверку длины) пароль
+    # не блокируется молча — показывается предупреждение (askyesno);
+    # ответ "нет" отменяет создание, "да" — пропускает его дальше.
+    dialog = guiapp.CreateVaultDialog(app)
+    dialog._password_var.set("aaaaaaaa")
+    dialog._confirm_var.set("aaaaaaaa")
+
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: False)
+    dialog._on_submit()
+    assert dialog.result is None
+
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: True)
+    dialog._on_submit()
+    assert dialog.result == "aaaaaaaa"
+
+    dialog.destroy()
 
 
 def test_unlock_wrong_master_password_shows_status(app, monkeypatch):
@@ -223,6 +268,9 @@ def test_dialog_construction_does_not_raise(app, monkeypatch):
 
     dialog = guiapp.EntryDialog(app, title="test")
     dialog.destroy()
+
+    create_dialog = guiapp.CreateVaultDialog(app)
+    create_dialog.destroy()
 
     view = guiapp.ViewEntryDialog(app, entry)
     view.destroy()

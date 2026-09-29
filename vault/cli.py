@@ -40,9 +40,10 @@ from vault.crypto import (
 )
 from vault.storage import load_vault_file, save_vault_file
 
-from assistant.advisor import analyze_vault, format_report
+from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, analyze_vault, format_report
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
+from assistant.strength import estimate_entropy_bits, is_common_password
 
 
 def _prompt_secret(prompt: str = "Мастер-пароль: ") -> str:
@@ -108,6 +109,28 @@ def cmd_create(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         raise SystemExit(1)
+
+    # Мастер-пароль оценивается по ТЕМ ЖЕ критериям "слабости", что и
+    # обычные пароли записей в советнике (assistant.advisor, раздел
+    # 9.3) — общий порог WEAK_ENTROPY_THRESHOLD_BITS и список утёкших
+    # паролей, а не отдельная планка, придуманная только для этого
+    # места. Не блокирует создание (мастер-пароль — не пароль сайта,
+    # который можно перегенерировать одной кнопкой; пользователь может
+    # осознанно предпочесть короткую, но заученную фразу) — только
+    # предупреждает и просит явно подтвердить решение, той же формой
+    # y/N-подтверждения, что уже использует cmd_delete для необратимых
+    # действий.
+    if is_common_password(master_password) or estimate_entropy_bits(master_password) < WEAK_ENTROPY_THRESHOLD_BITS:
+        print(
+            f"Внимание: мастер-пароль слабый (оценка энтропии: "
+            f"~{estimate_entropy_bits(master_password):.0f} бит, порог — "
+            f"{WEAK_ENTROPY_THRESHOLD_BITS:.0f}). Он защищает ВСЁ хранилище целиком.",
+            file=sys.stderr,
+        )
+        answer = input("Всё равно продолжить с этим паролем? [y/N]: ").strip().lower()
+        if answer not in ("y", "yes", "да"):
+            print("Отменено.")
+            raise SystemExit(1)
 
     blob = encrypt_vault({"entries": []}, master_password)
     save_vault_file(path, blob)

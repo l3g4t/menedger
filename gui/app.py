@@ -30,10 +30,10 @@ import ttkbootstrap as ttk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 from ttkbootstrap.widgets import ScrolledText
 
-from assistant.advisor import analyze_vault, format_report
+from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, analyze_vault, format_report
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
-from assistant.strength import estimate_entropy_bits
+from assistant.strength import estimate_entropy_bits, is_common_password
 from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
     InvalidMasterPasswordError,
@@ -667,6 +667,71 @@ class App(ttk.Window):
         widget.configure(style=style_name)
         return widget
 
+    def _build_strength_meter(
+        self, parent: ttk.Frame, *, label_text: str = "Надёжность"
+    ) -> Callable[[str], None]:
+        """Построить внутри `parent` блок "подпись + цветной бейдж +
+        пятисегментная шкала + текстовая подпись" и вернуть `update(
+        password)` — единственную точку, которой вызывающий код обязан
+        дёргать при каждом изменении пароля (раздел 10.18).
+
+        Раньше это была разметка, вручную продублированная внутри
+        `GeneratorDialog.__init__`/`_update_strength` (раздел 10.14) —
+        вынесена сюда, когда понадобилась ВТОРАЯ живая оценка надёжности
+        (`CreateVaultDialog`, для мастер-пароля): раз разметка и логика
+        обеих оценок дословно совпадают (одни и те же цвета,
+        `_STRENGTH_LEVELS`, `explain_password`), держать их как два
+        независимых куска кода значило бы просто дублировать один и тот
+        же виджет под двумя разными именами.
+        """
+        header = ttk.Frame(parent)
+        header.pack(fill="x")
+        ttk.Label(header, text=label_text, font=("", 10, "bold"), foreground=_NEUTRAL_TEXT).pack(
+            side="left"
+        )
+        badge = ttk.Label(header, font=("", 9, "bold"), padding=(8, 3))
+        badge.pack(side="right")
+
+        segments_row = ttk.Frame(parent)
+        segments_row.pack(fill="x", pady=(8, 0))
+        segments: list[tk.Frame] = []
+        for i in range(5):
+            segment = tk.Frame(segments_row, height=6, bg=_NEUTRAL_BORDER)
+            segment.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else 4, 0))
+            segments.append(segment)
+
+        caption = ttk.Label(
+            parent,
+            foreground=_SEARCH_PLACEHOLDER_COLOR,
+            font=("", 9),
+            wraplength=320,
+            justify="left",
+        )
+        caption.pack(fill="x", anchor="w", pady=(8, 0))
+
+        def update(password: str) -> None:
+            if not password:
+                for segment in segments:
+                    segment.configure(bg=_NEUTRAL_BORDER)
+                badge.configure(text="", background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT)
+                caption.configure(text="")
+                return
+
+            bits = estimate_entropy_bits(password)
+            filled, label, color = _STRENGTH_LEVELS[0][1], _STRENGTH_LEVELS[0][2], _STRENGTH_LEVELS[0][3]
+            for threshold, level_filled, level_label, level_color in _STRENGTH_LEVELS:
+                if bits >= threshold:
+                    filled, label, color = level_filled, level_label, level_color
+
+            for index, segment in enumerate(segments):
+                segment.configure(bg=color if index < filled else _NEUTRAL_BORDER)
+
+            badge_bg = _mix(color, "#ffffff", 0.85)
+            badge.configure(text=label, background=badge_bg, foreground=color)
+            caption.configure(text=explain_password(password))
+
+        return update
+
     def _setup_custom_styles(self) -> None:
         """Стили для сайдбара и тёмного фона экрана разблокировки.
 
@@ -980,27 +1045,11 @@ class App(ttk.Window):
             if not overwrite:
                 return
 
-        password = simpledialog.askstring(
-            "Новый мастер-пароль", "Придумайте мастер-пароль:", show="*", parent=self
-        )
-        if not password:
+        dialog = CreateVaultDialog(self)
+        self.wait_window(dialog)
+        if dialog.result is None:
             return
-        confirmation = simpledialog.askstring(
-            "Подтверждение", "Повторите мастер-пароль:", show="*", parent=self
-        )
-        if confirmation is None:
-            return
-
-        if password != confirmation:
-            messagebox.showerror("Ошибка", "Пароли не совпадают.", parent=self)
-            return
-        if len(password) < MIN_MASTER_PASSWORD_LENGTH:
-            messagebox.showerror(
-                "Ошибка",
-                f"Мастер-пароль должен быть не короче {MIN_MASTER_PASSWORD_LENGTH} символов.",
-                parent=self,
-            )
-            return
+        password = dialog.result
 
         data = {"entries": []}
         try:
@@ -1520,6 +1569,159 @@ class EntryDialog(ttk.Toplevel):
         self.destroy()
 
 
+class CreateVaultDialog(ttk.Toplevel):
+    """Диалог создания нового хранилища (раздел 10.18) — современная
+    замена паре `simpledialog.askstring`, которыми `App._on_create`
+    раньше запрашивал мастер-пароль и подтверждение. Показывает живую
+    оценку надёжности (тот же виджет, что и в `GeneratorDialog`, см.
+    `App._build_strength_meter`) — мастер-пароль защищает ВСЁ
+    хранилище целиком, поэтому его сила заслуживает такой же наглядной
+    обратной связи, что и пароль отдельной записи (раздел 10.13), а не
+    просто безликое текстовое поле ввода."""
+
+    def __init__(self, parent: App) -> None:
+        super().__init__(title="Новое хранилище", master=parent, resizable=(False, False))
+        self.transient(parent)
+        self.result: str | None = None
+
+        content = ttk.Frame(self, padding=24)
+        content.pack(fill="both", expand=True)
+
+        # --- Заголовок: иконка-бейдж + название + подпись ---
+        header = ttk.Frame(content)
+        header.pack(fill="x")
+        badge = tk.Frame(header, width=42, height=42, bd=0, highlightthickness=0)
+        badge.pack(side="left", padx=(0, 12))
+        badge_image = parent._rounded_image(42, _ACCENT, "#ffffff")
+        tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
+            x=0, y=0, relwidth=1, relheight=1
+        )
+        lock_icon = parent._button_icon("lock", "white")
+        if lock_icon is not None:
+            tk.Label(badge, image=lock_icon, bd=0, bg=_ACCENT, highlightthickness=0).place(
+                relx=0.5, rely=0.5, anchor="center"
+            )
+        title_stack = ttk.Frame(header)
+        title_stack.pack(side="left", fill="both", expand=True)
+        ttk.Label(title_stack, text="Новое хранилище", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(
+            anchor="w"
+        )
+        ttk.Label(
+            title_stack,
+            text="Мастер-пароль защищает всё хранилище целиком",
+            foreground=_SEARCH_PLACEHOLDER_COLOR,
+            font=("", 9),
+        ).pack(anchor="w")
+
+        # --- Поле мастер-пароля + кнопка-"глаз" (тот же приём, что и на
+        # экране разблокировки, раздел 10.7) ---
+        ttk.Label(content, text="МАСТЕР-ПАРОЛЬ", font=("", 8, "bold"), bootstyle="secondary").pack(
+            fill="x", anchor="w", pady=(18, 2)
+        )
+        self._password_var = tk.StringVar()
+        pw_row = ttk.Frame(content)
+        pw_row.pack(fill="x")
+        password_entry = ttk.Entry(pw_row, textvariable=self._password_var, show="*")
+        password_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        password_entry.bind("<Return>", lambda _event: self._on_submit())
+        self._password_entry = password_entry
+        self._password_visible = False
+        parent._styled(
+            ttk.Button(
+                pw_row,
+                command=self._on_toggle_visibility,
+                **parent._icon_kwargs("eye", "dark"),
+            ),
+            parent._rounded_button_style(
+                "Rounded.IconToggle",
+                _NEUTRAL_FILL,
+                _NEUTRAL_TEXT,
+                border_color=_NEUTRAL_BORDER,
+                padding=(8, 6),
+            ),
+        ).pack(side="left")
+
+        # --- Живая оценка надёжности мастер-пароля ---
+        strength_section = ttk.Frame(content)
+        strength_section.pack(fill="x", pady=(12, 0))
+        self._update_strength = parent._build_strength_meter(strength_section)
+        self._password_var.trace_add(
+            "write", lambda *_args: self._update_strength(self._password_var.get())
+        )
+
+        # --- Подтверждение ---
+        ttk.Label(content, text="ПОДТВЕРЖДЕНИЕ", font=("", 8, "bold"), bootstyle="secondary").pack(
+            fill="x", anchor="w", pady=(18, 2)
+        )
+        self._confirm_var = tk.StringVar()
+        confirm_entry = ttk.Entry(content, textvariable=self._confirm_var, show="*")
+        confirm_entry.pack(fill="x")
+        confirm_entry.bind("<Return>", lambda _event: self._on_submit())
+
+        self._status_label = ttk.Label(
+            content, text="", bootstyle="danger", wraplength=320, justify="left"
+        )
+        self._status_label.pack(fill="x", pady=(10, 0))
+
+        buttons = ttk.Frame(self, padding=(24, 0, 24, 24))
+        buttons.pack(fill="x")
+        parent._styled(
+            ttk.Button(buttons, text="Отмена", command=self.destroy),
+            parent._neutral_style(),
+        ).pack(side="right")
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Создать",
+                command=self._on_submit,
+                **parent._icon_kwargs("plus", "white"),
+            ),
+            parent._accent_style(),
+        ).pack(side="right", padx=(0, 16))
+
+        password_entry.focus_set()
+        self.place_window_center()
+        self.grab_set()
+
+    def _on_toggle_visibility(self) -> None:
+        self._password_visible = not self._password_visible
+        self._password_entry.configure(show="" if self._password_visible else "*")
+
+    def _on_submit(self) -> None:
+        password = self._password_var.get()
+        confirmation = self._confirm_var.get()
+
+        if password != confirmation:
+            self._status_label.configure(text="Пароли не совпадают.")
+            return
+        if len(password) < MIN_MASTER_PASSWORD_LENGTH:
+            self._status_label.configure(
+                text=f"Мастер-пароль должен быть не короче {MIN_MASTER_PASSWORD_LENGTH} символов."
+            )
+            return
+
+        # Мастер-пароль оценивается по ТЕМ ЖЕ критериям "слабости", что и
+        # обычные пароли записей в советнике (раздел 9.3) — общий порог
+        # `WEAK_ENTROPY_THRESHOLD_BITS` и список утёкших паролей, а не
+        # отдельная, придуманная только для этого места планка. Не
+        # блокирует создание — только предупреждает: решение оставлено
+        # за пользователем (как у советника — раздел 9.3, отчёт не
+        # запрещает ничего сам по себе).
+        if is_common_password(password) or estimate_entropy_bits(password) < WEAK_ENTROPY_THRESHOLD_BITS:
+            proceed = messagebox.askyesno(
+                "Слабый мастер-пароль",
+                "Этот пароль легко подобрать (см. оценку выше), а он "
+                "защищает ВСЁ хранилище целиком, а не одну запись. "
+                "Всё равно использовать его?",
+                parent=self,
+            )
+            if not proceed:
+                return
+
+        self.result = password
+        self.destroy()
+
+
 class ViewEntryDialog(ttk.Toplevel):
     """Просмотр одной записи целиком: логин/пароль/дата + действия
     (раздел 10.9) — тёмная "шапка" с названием записи + белое тело с
@@ -1789,32 +1991,11 @@ class GeneratorDialog(ttk.Toplevel):
         ).pack(side="left", padx=(8, 0))
 
         # --- Надёжность: подпись + бейдж + сегментированная шкала ---
+        # Разметка вынесена в App._build_strength_meter (раздел 10.18) —
+        # тот же виджет использует CreateVaultDialog для мастер-пароля.
         strength_section = ttk.Frame(content)
         strength_section.pack(fill="x", pady=(18, 0))
-        strength_header = ttk.Frame(strength_section)
-        strength_header.pack(fill="x")
-        ttk.Label(strength_header, text="Надёжность", font=("", 10, "bold"), foreground=_NEUTRAL_TEXT).pack(
-            side="left"
-        )
-        self._strength_badge = ttk.Label(strength_header, font=("", 9, "bold"), padding=(8, 3))
-        self._strength_badge.pack(side="right")
-
-        segments_row = ttk.Frame(strength_section)
-        segments_row.pack(fill="x", pady=(8, 0))
-        self._segments: list[tk.Frame] = []
-        for i in range(5):
-            segment = tk.Frame(segments_row, height=6, bg=_NEUTRAL_BORDER)
-            segment.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else 4, 0))
-            self._segments.append(segment)
-
-        self._strength_caption = ttk.Label(
-            strength_section,
-            foreground=_SEARCH_PLACEHOLDER_COLOR,
-            font=("", 9),
-            wraplength=340,
-            justify="left",
-        )
-        self._strength_caption.pack(fill="x", anchor="w", pady=(8, 0))
+        self._update_strength = parent._build_strength_meter(strength_section)
 
         ttk.Separator(content).pack(fill="x", pady=18)
 
@@ -1935,24 +2116,6 @@ class GeneratorDialog(ttk.Toplevel):
 
         self._result_var.set(password)
         self._update_strength(password)
-
-    def _update_strength(self, password: str) -> None:
-        """Обновить бейдж, сегментированную шкалу и текстовую подпись —
-        три независимых, но синхронных представления одной и той же
-        оценки (assistant.strength.estimate_entropy_bits), см.
-        _STRENGTH_LEVELS."""
-        bits = estimate_entropy_bits(password)
-        filled, label, color = _STRENGTH_LEVELS[0][1], _STRENGTH_LEVELS[0][2], _STRENGTH_LEVELS[0][3]
-        for threshold, level_filled, level_label, level_color in _STRENGTH_LEVELS:
-            if bits >= threshold:
-                filled, label, color = level_filled, level_label, level_color
-
-        for index, segment in enumerate(self._segments):
-            segment.configure(bg=color if index < filled else _NEUTRAL_BORDER)
-
-        badge_bg = _mix(color, "#ffffff", 0.85)
-        self._strength_badge.configure(text=label, background=badge_bg, foreground=color)
-        self._strength_caption.configure(text=explain_password(password))
 
     def _on_copy_click(self) -> None:
         password = self._result_var.get()

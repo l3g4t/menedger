@@ -93,6 +93,38 @@ def test_create_rejects_too_short_master_password(tmp_path, monkeypatch):
     assert not vault_path.exists()
 
 
+def test_create_warns_about_weak_master_password_and_can_be_declined(tmp_path, monkeypatch):
+    # "aaaaaaaa" проходит проверку длины (>= MIN_MASTER_PASSWORD_LENGTH),
+    # но слабый по оценке энтропии (assistant.strength) — та же планка
+    # WEAK_ENTROPY_THRESHOLD_BITS, что и у советника для паролей записей.
+    # Ответ "n" на подтверждение должен отменить создание.
+    vault_path = tmp_path / "test.vault"
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "create"],
+        secrets=["aaaaaaaa", "aaaaaaaa"],
+        plain_inputs=["n"],
+    )
+
+    assert code != 0
+    assert not vault_path.exists()
+
+
+def test_create_warns_about_weak_master_password_and_can_be_accepted(tmp_path, monkeypatch):
+    vault_path = tmp_path / "test.vault"
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "create"],
+        secrets=["aaaaaaaa", "aaaaaaaa"],
+        plain_inputs=["y"],
+    )
+
+    assert code == 0
+    assert vault_path.exists()
+
+
 def test_list_shows_sites_without_passwords(tmp_path, monkeypatch, capsys):
     vault_path = tmp_path / "test.vault"
     _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
