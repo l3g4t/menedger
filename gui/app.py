@@ -142,6 +142,13 @@ _ACCENT = "#2f6fed"
 
 _ROUNDED_RADIUS = 10  # px скругления угла у кнопок (см. _rounded_image)
 
+# Фиксированный размер полей МАСТЕР-ПАРОЛЬ/ПОДТВЕРЖДЕНИЕ в
+# `CreateVaultDialog` (раздел 10.19) — по запросу пользователя заметно
+# меньше, чем ширина остальных рядов диалога (заголовок, шкала
+# надёжности), а не растянуты на всю ширину карточки, как было раньше.
+_MASTER_FIELD_WIDTH = 260  # px
+_MASTER_FIELD_HEIGHT = 38  # px
+
 # Главный экран референса ("вариант C", раздел 10.8) — не просто сайдбар
 # впритык к краям окна, а единая "карточка" (сайдбар + рабочая область)
 # со скруглёнными ТОЛЬКО внешними углами, отступом от края окна и на
@@ -1620,8 +1627,18 @@ class CreateVaultDialog(ttk.Toplevel):
             fill="x", anchor="w", pady=(18, 2)
         )
         self._password_var = tk.StringVar()
-        pw_row = ttk.Frame(content, padding=(14, 10))
-        pw_row.pack(fill="x")
+        # Поля мастер-пароля/подтверждения заведомо ýже и ниже, чем
+        # остальные ряды диалога (заголовок, шкала надёжности) — по
+        # запросу пользователя уменьшены и длина (высота), и ширина
+        # полей. Фиксированный размер, а не просто меньший padding:
+        # `pack_propagate(False)` держит `pw_row`/`confirm_box` РОВНО
+        # `_MASTER_FIELD_WIDTH`×`_MASTER_FIELD_HEIGHT`, независимо от
+        # того, что внутри (с кнопкой-"глазом" у пароля или без неё у
+        # подтверждения) — иначе поля не совпадали бы по размеру между
+        # собой, раз только одно из них ещё содержит кнопку.
+        pw_row = ttk.Frame(content, padding=(10, 6), width=_MASTER_FIELD_WIDTH, height=_MASTER_FIELD_HEIGHT)
+        pw_row.pack_propagate(False)
+        pw_row.pack(anchor="w")
         pending_backdrops.append(
             parent._rounded_backdrop(
                 pw_row,
@@ -1640,7 +1657,7 @@ class CreateVaultDialog(ttk.Toplevel):
         # от `Flat.TEntry`), поэтому и заливка, и отсутствие второй рамки
         # красятся корректно поверх скруглённой подложки этой "плитки".
         password_entry.configure(style="NeutralField.TEntry")
-        password_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        password_entry.pack(side="left", fill="both", expand=True, padx=(0, 8))
         password_entry.bind("<Return>", lambda _event: self._on_submit())
         self._password_entry = password_entry
         self._password_visible = False
@@ -1672,8 +1689,11 @@ class CreateVaultDialog(ttk.Toplevel):
             fill="x", anchor="w", pady=(18, 2)
         )
         self._confirm_var = tk.StringVar()
-        confirm_box = ttk.Frame(content, padding=(14, 10))
-        confirm_box.pack(fill="x")
+        confirm_box = ttk.Frame(
+            content, padding=(10, 6), width=_MASTER_FIELD_WIDTH, height=_MASTER_FIELD_HEIGHT
+        )
+        confirm_box.pack_propagate(False)
+        confirm_box.pack(anchor="w")
         pending_backdrops.append(
             parent._rounded_backdrop(
                 confirm_box,
@@ -1687,7 +1707,7 @@ class CreateVaultDialog(ttk.Toplevel):
         )
         confirm_entry = ttk.Entry(confirm_box, textvariable=self._confirm_var, show="*")
         confirm_entry.configure(style="NeutralField.TEntry")
-        confirm_entry.pack(fill="x")
+        confirm_entry.pack(fill="both", expand=True)
         confirm_entry.bind("<Return>", lambda _event: self._on_submit())
 
         self._status_label = ttk.Label(
@@ -1697,10 +1717,14 @@ class CreateVaultDialog(ttk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(24, 0, 24, 24))
         buttons.pack(fill="x")
-        parent._styled(
-            ttk.Button(buttons, text="Отмена", command=self.destroy),
-            parent._neutral_style(),
-        ).pack(side="right")
+        # "Создать" (с иконкой) и "Отмена" (без) сами по себе имели бы
+        # разную ширину — по запросу пользователя обе кнопки заведены
+        # через `grid` с двумя РАВНЫМИ по весу колонками (`uniform=`
+        # объединяет их в одну группу выравнивания ширины), а не через
+        # `pack`, где ширина каждой кнопки определялась бы только её
+        # собственным содержимым.
+        buttons.columnconfigure(0, weight=1, uniform="create_vault_footer")
+        buttons.columnconfigure(1, weight=1, uniform="create_vault_footer")
         parent._styled(
             ttk.Button(
                 buttons,
@@ -1709,7 +1733,11 @@ class CreateVaultDialog(ttk.Toplevel):
                 **parent._icon_kwargs("plus", "white"),
             ),
             parent._accent_style(),
-        ).pack(side="right", padx=(0, 16))
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        parent._styled(
+            ttk.Button(buttons, text="Отмена", command=self.destroy),
+            parent._neutral_style(),
+        ).grid(row=0, column=1, sticky="ew")
 
         password_entry.focus_set()
         self.update_idletasks()
