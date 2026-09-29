@@ -1583,6 +1583,7 @@ class CreateVaultDialog(ttk.Toplevel):
         super().__init__(title="Новое хранилище", master=parent, resizable=(False, False))
         self.transient(parent)
         self.result: str | None = None
+        pending_backdrops: list[Callable[[], None]] = []
 
         content = ttk.Frame(self, padding=24)
         content.pack(fill="both", expand=True)
@@ -1619,9 +1620,26 @@ class CreateVaultDialog(ttk.Toplevel):
             fill="x", anchor="w", pady=(18, 2)
         )
         self._password_var = tk.StringVar()
-        pw_row = ttk.Frame(content)
+        pw_row = ttk.Frame(content, padding=(14, 10))
         pw_row.pack(fill="x")
+        pending_backdrops.append(
+            parent._rounded_backdrop(
+                pw_row,
+                _NEUTRAL_FILL,
+                corners=(True, True, True, True),
+                surface="#ffffff",
+                radius=_ROUNDED_RADIUS,
+                border_color=_NEUTRAL_BORDER,
+                border_width=1,
+            )
+        )
         password_entry = ttk.Entry(pw_row, textvariable=self._password_var, show="*")
+        # `NeutralField.TEntry` (раздел 10.17) — тот же стиль, что уже
+        # применён к полю поиска главного экрана и к полю результата в
+        # `GeneratorDialog`: раскладка `Entry.field` сохранена (в отличие
+        # от `Flat.TEntry`), поэтому и заливка, и отсутствие второй рамки
+        # красятся корректно поверх скруглённой подложки этой "плитки".
+        password_entry.configure(style="NeutralField.TEntry")
         password_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         password_entry.bind("<Return>", lambda _event: self._on_submit())
         self._password_entry = password_entry
@@ -1654,7 +1672,21 @@ class CreateVaultDialog(ttk.Toplevel):
             fill="x", anchor="w", pady=(18, 2)
         )
         self._confirm_var = tk.StringVar()
-        confirm_entry = ttk.Entry(content, textvariable=self._confirm_var, show="*")
+        confirm_box = ttk.Frame(content, padding=(14, 10))
+        confirm_box.pack(fill="x")
+        pending_backdrops.append(
+            parent._rounded_backdrop(
+                confirm_box,
+                _NEUTRAL_FILL,
+                corners=(True, True, True, True),
+                surface="#ffffff",
+                radius=_ROUNDED_RADIUS,
+                border_color=_NEUTRAL_BORDER,
+                border_width=1,
+            )
+        )
+        confirm_entry = ttk.Entry(confirm_box, textvariable=self._confirm_var, show="*")
+        confirm_entry.configure(style="NeutralField.TEntry")
         confirm_entry.pack(fill="x")
         confirm_entry.bind("<Return>", lambda _event: self._on_submit())
 
@@ -1680,6 +1712,9 @@ class CreateVaultDialog(ttk.Toplevel):
         ).pack(side="right", padx=(0, 16))
 
         password_entry.focus_set()
+        self.update_idletasks()
+        for redraw in pending_backdrops:
+            redraw()
         self.place_window_center()
         self.grab_set()
 
