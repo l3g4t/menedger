@@ -1595,20 +1595,20 @@ class CreateVaultDialog(ttk.Toplevel):
         content = ttk.Frame(self, padding=24)
         content.pack(fill="both", expand=True)
 
-        # --- Заголовок: иконка-бейдж + название + подпись ---
+        # --- Заголовок: иконка приложения + название + подпись ---
+        # По запросу пользователя здесь больше не самодельный синий
+        # квадрат со схематичным замком (`_rounded_image`+"lock") — вместо
+        # него настоящая иконка приложения (`gui/icon.png`, раздел 10.2),
+        # та же картинка, что и в заголовке окна и на экране разблокировки
+        # (`self._icon_image_medium`, 64px — subsample готового PNG,
+        # см. `App.__init__`). `hasattr`-проверка — та же предосторожность,
+        # что и там: без файла иконки на диске (например, в урезанном
+        # тестовом окружении) атрибута не будет, и диалог просто обходится
+        # без картинки, а не падает.
         header = ttk.Frame(content)
         header.pack(fill="x")
-        badge = tk.Frame(header, width=42, height=42, bd=0, highlightthickness=0)
-        badge.pack(side="left", padx=(0, 12))
-        badge_image = parent._rounded_image(42, _ACCENT, "#ffffff")
-        tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
-            x=0, y=0, relwidth=1, relheight=1
-        )
-        lock_icon = parent._button_icon("lock", "white")
-        if lock_icon is not None:
-            tk.Label(badge, image=lock_icon, bd=0, bg=_ACCENT, highlightthickness=0).place(
-                relx=0.5, rely=0.5, anchor="center"
-            )
+        if hasattr(parent, "_icon_image_medium"):
+            ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, 12))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="both", expand=True)
         ttk.Label(title_stack, text="Новое хранилище", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(
@@ -1631,17 +1631,28 @@ class CreateVaultDialog(ttk.Toplevel):
         # остальные ряды диалога (заголовок, шкала надёжности) — по
         # запросу пользователя уменьшены и длина (высота), и ширина
         # полей. Фиксированный размер, а не просто меньший padding:
-        # `pack_propagate(False)` держит `pw_row`/`confirm_box` РОВНО
-        # `_MASTER_FIELD_WIDTH`×`_MASTER_FIELD_HEIGHT`, независимо от
-        # того, что внутри (с кнопкой-"глазом" у пароля или без неё у
-        # подтверждения) — иначе поля не совпадали бы по размеру между
-        # собой, раз только одно из них ещё содержит кнопку.
-        pw_row = ttk.Frame(content, padding=(10, 6), width=_MASTER_FIELD_WIDTH, height=_MASTER_FIELD_HEIGHT)
-        pw_row.pack_propagate(False)
-        pw_row.pack(anchor="w")
+        # `pack_propagate(False)` держит `pw_box`/`confirm_box` РОВНО
+        # `_MASTER_FIELD_WIDTH`×`_MASTER_FIELD_HEIGHT`.
+        #
+        # Кнопка-"глаз" по отдельному запросу пользователя вынесена ИЗ
+        # этой скруглённой "плитки" — раньше она была третьим ребёнком
+        # внутри `pw_row` вместе с самим полем, из-за чего визуально поле
+        # и кнопка сливались в одну сплошную рамку. Теперь `pw_box`
+        # (плитка поля, ровно того же вида, что и `confirm_box` ниже) и
+        # кнопка — два независимых соседних виджета в общем `pw_container`,
+        # с обычным зазором `padx` между ними, каждый со своим
+        # собственным скруглением (у кнопки — своё, из
+        # `_rounded_button_style`, оно не менялось).
+        pw_container = ttk.Frame(content)
+        pw_container.pack(anchor="w")
+        pw_box = ttk.Frame(
+            pw_container, padding=(10, 6), width=_MASTER_FIELD_WIDTH, height=_MASTER_FIELD_HEIGHT
+        )
+        pw_box.pack_propagate(False)
+        pw_box.pack(side="left")
         pending_backdrops.append(
             parent._rounded_backdrop(
-                pw_row,
+                pw_box,
                 _NEUTRAL_FILL,
                 corners=(True, True, True, True),
                 surface="#ffffff",
@@ -1650,20 +1661,20 @@ class CreateVaultDialog(ttk.Toplevel):
                 border_width=1,
             )
         )
-        password_entry = ttk.Entry(pw_row, textvariable=self._password_var, show="*")
+        password_entry = ttk.Entry(pw_box, textvariable=self._password_var, show="*")
         # `NeutralField.TEntry` (раздел 10.17) — тот же стиль, что уже
         # применён к полю поиска главного экрана и к полю результата в
         # `GeneratorDialog`: раскладка `Entry.field` сохранена (в отличие
         # от `Flat.TEntry`), поэтому и заливка, и отсутствие второй рамки
         # красятся корректно поверх скруглённой подложки этой "плитки".
         password_entry.configure(style="NeutralField.TEntry")
-        password_entry.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        password_entry.pack(fill="both", expand=True)
         password_entry.bind("<Return>", lambda _event: self._on_submit())
         self._password_entry = password_entry
         self._password_visible = False
         parent._styled(
             ttk.Button(
-                pw_row,
+                pw_container,
                 command=self._on_toggle_visibility,
                 **parent._icon_kwargs("eye", "dark"),
             ),
@@ -1674,7 +1685,7 @@ class CreateVaultDialog(ttk.Toplevel):
                 border_color=_NEUTRAL_BORDER,
                 padding=(8, 6),
             ),
-        ).pack(side="left")
+        ).pack(side="left", padx=(8, 0))
 
         # --- Живая оценка надёжности мастер-пароля ---
         strength_section = ttk.Frame(content)
