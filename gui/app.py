@@ -1672,9 +1672,23 @@ class CreateVaultDialog(ttk.Toplevel):
         password_entry.bind("<Return>", lambda _event: self._on_submit())
         self._password_entry = password_entry
         self._password_visible = False
+        # Кнопка-"глаз" по запросу пользователя соразмерна полю ввода —
+        # квадрат высотой РОВНО `_MASTER_FIELD_HEIGHT`, как и сама
+        # `pw_box`, а не мельче неё (раньше её размер определялся только
+        # внутренним `padding=(8, 6)` вокруг иконки 22px, что давало
+        # заметно более низкую кнопку, чем высота поля). Тот же приём
+        # `pack_propagate(False)` на обёртке фиксированного размера, что
+        # и у самих полей — `_rounded_button_style` рисует растягиваемый
+        # (9-patch) фон, поэтому корректно заполняет любой заданный
+        # размер, не только свой "естественный" под текст/иконку.
+        eye_button_box = ttk.Frame(
+            pw_container, width=_MASTER_FIELD_HEIGHT, height=_MASTER_FIELD_HEIGHT
+        )
+        eye_button_box.pack_propagate(False)
+        eye_button_box.pack(side="left", padx=(8, 0))
         parent._styled(
             ttk.Button(
-                pw_container,
+                eye_button_box,
                 command=self._on_toggle_visibility,
                 **parent._icon_kwargs("eye", "dark"),
             ),
@@ -1685,7 +1699,7 @@ class CreateVaultDialog(ttk.Toplevel):
                 border_color=_NEUTRAL_BORDER,
                 padding=(8, 6),
             ),
-        ).pack(side="left", padx=(8, 0))
+        ).pack(fill="both", expand=True)
 
         # --- Живая оценка надёжности мастер-пароля ---
         strength_section = ttk.Frame(content)
