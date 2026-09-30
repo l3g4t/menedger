@@ -1513,7 +1513,7 @@ class EntryDialog(ttk.Toplevel):
     """Модальный диалог добавления новой записи."""
 
     def __init__(self, parent: App, title: str) -> None:
-        super().__init__(title=title, master=parent, resizable=(False, False))
+        super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
         self.transient(parent)
         self.result: tuple[str, str, str] | None = None
 
@@ -1615,7 +1615,7 @@ class CreateVaultDialog(ttk.Toplevel):
     просто безликое текстовое поле ввода."""
 
     def __init__(self, parent: App) -> None:
-        super().__init__(title="Новое хранилище", master=parent, resizable=(False, False))
+        super().__init__(title="Новое хранилище", master=parent, resizable=(False, False), iconphoto=None)
         self.transient(parent)
         self.result: str | None = None
         pending_backdrops: list[Callable[[], None]] = []
@@ -1864,7 +1864,7 @@ class ViewEntryDialog(ttk.Toplevel):
 
     def __init__(self, parent: App, entry: dict) -> None:
         title = f"Запись — {entry['site']}"
-        super().__init__(title=title, master=parent, resizable=(False, False))
+        super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
         self._parent = parent
         self._entry = entry
         self.transient(parent)
@@ -2006,7 +2006,7 @@ class AuditDialog(ttk.Toplevel):
     username/reasons), а не единый блок текста."""
 
     def __init__(self, parent: App, report: AdvisorReport) -> None:
-        super().__init__(title="Советник по безопасности", master=parent, resizable=(False, False))
+        super().__init__(title="Советник по безопасности", master=parent, resizable=(False, False), iconphoto=None)
         self.transient(parent)
 
         content = ttk.Frame(self, padding=24)
@@ -2226,7 +2226,7 @@ class GeneratorDialog(ttk.Toplevel):
     выбранной записи."""
 
     def __init__(self, parent: App, on_copy) -> None:
-        super().__init__(title="Генератор паролей", master=parent, resizable=(False, False))
+        super().__init__(title="Генератор паролей", master=parent, resizable=(False, False), iconphoto=None)
         self.transient(parent)
         self._on_copy = on_copy
 
