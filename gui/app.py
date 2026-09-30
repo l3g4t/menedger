@@ -1834,6 +1834,11 @@ class CreateVaultDialog(ttk.Toplevel):
         ).grid(row=0, column=1, sticky="ew")
 
         password_entry.focus_set()
+        # ДВА вызова подряд — см. раздел 10.27 (тот же приём, что и в
+        # `ViewEntryDialog`): `pw_box` и кнопка-"глаз" — тоже два соседних
+        # виджета, пакуемых в `pw_container` по отдельности, а не сразу
+        # оба при создании.
+        self.update_idletasks()
         self.update_idletasks()
         for redraw in pending_backdrops:
             redraw()
@@ -1996,7 +2001,14 @@ class ViewEntryDialog(ttk.Toplevel):
         # настоящий итоговый размер (см. докстринг `_rounded_backdrop`,
         # раздел 10.9, о том, почему делать это раньше — в частности,
         # через `after_idle` сразу в момент создания каждого фрейма —
-        # не работает).
+        # не работает). ДВА вызова подряд, а не один — см. раздел 10.27:
+        # для полей с иконкой-кнопкой (`add_icon_button` пакует кнопку
+        # ВТОРЫМ соседом в уже упакованный `row` ПОСЛЕ создания `box`)
+        # одного прохода пересчёта оказалось недостаточно на Windows —
+        # `box` ещё не успевал "сжаться" под финальную ширину (с учётом
+        # соседней кнопки) к моменту, когда `redraw()` уже читает его
+        # `winfo_width()`.
+        self.update_idletasks()
         self.update_idletasks()
         for redraw in pending_backdrops:
             redraw()
@@ -2432,6 +2444,8 @@ class GeneratorDialog(ttk.Toplevel):
         ).pack(side="right", padx=(16, 0))
 
         self._on_generate()
+        # ДВА вызова подряд — см. раздел 10.27.
+        self.update_idletasks()
         self.update_idletasks()
         for redraw in pending_backdrops:
             redraw()
