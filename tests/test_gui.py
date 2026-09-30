@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from assistant.advisor import AdvisorReport, EntryIssue
+
 tk = pytest.importorskip("tkinter")
 
 try:
@@ -275,24 +277,47 @@ def test_dialog_construction_does_not_raise(app, monkeypatch):
     view = guiapp.ViewEntryDialog(app, entry)
     view.destroy()
 
-    audit = guiapp.AuditDialog(app, "report text")
+    # Отчёт со всеми тремя категориями находок — проверяет, что все
+    # ветки построения фида (`add_reused_row`/`add_issue_row`) строятся
+    # без ошибок, а не только "пустой" отчёт.
+    report_with_issues = AdvisorReport(
+        reused_groups=[["a.com (bob)", "b.com (bob)"]],
+        weak_entries=[EntryIssue(site="c.com", username="bob", reasons=["слабый"])],
+        old_entries=[EntryIssue(site="d.com", username="bob", reasons=["устарел"])],
+    )
+    audit = guiapp.AuditDialog(app, report_with_issues)
     audit.destroy()
+
+    clean_audit = guiapp.AuditDialog(app, AdvisorReport())
+    clean_audit.destroy()
+
+
+def _find_widgets_by_class(widget, class_name):
+    """Рекурсивно собрать все дочерние виджеты заданного ttk-класса —
+    нужно, потому что кнопка "Закрыть" `AuditDialog` (раздел 10.24)
+    лежит не прямым ребёнком диалога, а внутри отдельного `footer`-
+    Frame'а, в отличие от прежней (плоской) вёрстки."""
+    found = []
+    for child in widget.winfo_children():
+        if child.winfo_class() == class_name:
+            found.append(child)
+        found.extend(_find_widgets_by_class(child, class_name))
+    return found
 
 
 def test_audit_dialog_close_button_is_not_squeezed_to_zero(app, monkeypatch):
-    """Регрессия: ScrolledText без явных width/height по умолчанию
-    запрашивает 80x24 символов, что больше окна 480x360 — pack тогда
-    отдавал всё место expand-виджету, а кнопку "Закрыть" сжимал до 1x1
-    пикселя (по факту невидимую, хотя и без исключения при построении).
-    Явный width/height у ScrolledText это чинит — проверяем, что кнопка
-    получает разумный, ненулевой размер после раскладки."""
+    """Регрессия-переставка: раньше (при вёрстке на ScrolledText, см.
+    историю в CLAUDE.md, раздел 10.1) виджет без явных width/height
+    запрашивал больше места, чем было в окне, и `pack` сжимал кнопку
+    "Закрыть" до 1x1 пикселя. Вёрстка сменилась (раздел 10.24 — единый
+    прокручиваемый список находок вместо ScrolledText), но сама
+    проверка "кнопка не сжата до нуля после раскладки" остаётся
+    осмысленным регрессионным тестом и для новой вёрстки."""
     _create_vault(app, monkeypatch)
-    audit = guiapp.AuditDialog(app, "report text")
+    audit = guiapp.AuditDialog(app, AdvisorReport())
     audit.update_idletasks()
 
-    buttons = [
-        child for child in audit.winfo_children() if child.winfo_class() == "TButton"
-    ]
+    buttons = _find_widgets_by_class(audit, "TButton")
     assert len(buttons) == 1
     close_button = buttons[0]
     assert close_button.winfo_reqwidth() > 10
