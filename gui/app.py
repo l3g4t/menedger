@@ -1686,6 +1686,23 @@ class CreateVaultDialog(ttk.Toplevel):
         )
         eye_button_box.pack_propagate(False)
         eye_button_box.pack(side="left", padx=(8, 0))
+        # Отдельный стиль ("Rounded.IconToggleSquare"), а НЕ "Rounded.
+        # IconToggle" — тот занят другими кнопками-"глазами" приложения
+        # (экран разблокировки и т.п.) с их собственным `padding=(8, 6)`,
+        # и `_rounded_button_style` кэширует стиль по имени: второй вызов
+        # с другим padding тем же именем был бы просто проигнорирован
+        # (раздел 10.7). `padding=(0, 0)`, а не унаследованный `(8, 6)`, —
+        # НЕ произвольный выбор, а обход найденного бага: при точном
+        # совпадении размера кнопки (38×38) с суммой иконки и padding
+        # (22 + 2×8 = 38 по ширине — совпадение до пикселя) `ttk.Button`
+        # почему-то смещает иконку к правому нижнему углу вместо
+        # центрирования (проверено изолированным тестовым скриптом вне
+        # проекта: тот же стиль/иконка при padding=(8, 6) в контейнере
+        # 38×38 стабильно даёт смещение, при padding=(0, 0) — центрирует
+        # идеально). Раз `eye_button_box` и так уже задаёт нужный размер
+        # квадрата, внутренний padding для "воздуха" вокруг иконки не
+        # нужен — он там был исторически нужен только пока кнопка сама
+        # определяла свой размер по содержимому (раздел 10.7).
         parent._styled(
             ttk.Button(
                 eye_button_box,
@@ -1693,11 +1710,11 @@ class CreateVaultDialog(ttk.Toplevel):
                 **parent._icon_kwargs("eye", "dark"),
             ),
             parent._rounded_button_style(
-                "Rounded.IconToggle",
+                "Rounded.IconToggleSquare",
                 _NEUTRAL_FILL,
                 _NEUTRAL_TEXT,
                 border_color=_NEUTRAL_BORDER,
-                padding=(8, 6),
+                padding=(0, 0),
             ),
         ).pack(fill="both", expand=True)
 
