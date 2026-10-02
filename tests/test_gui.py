@@ -345,3 +345,49 @@ def test_resource_dir_in_frozen_build_points_to_meipass_gui(monkeypatch, tmp_pat
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     assert guiapp._gui_resource_dir() == tmp_path / "gui"
+
+
+# --- Собственная рамка окна (раздел 10.33) ---------------------------------
+
+
+def test_custom_titlebar_has_all_three_controls(app):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    assert set(app._titlebar._buttons) == {"min", "max", "close"}
+
+
+def test_toggle_maximize_roundtrip_restores_geometry(app):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    app.update()
+    before = app.geometry()
+    app._toggle_maximize()
+    app.update()
+    assert app._maximized
+    assert app.geometry() != before
+    app._toggle_maximize()
+    app.update()
+    assert not app._maximized
+    assert app.geometry() == before
+
+
+def test_titlebar_theme_follows_screen(app, monkeypatch):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    assert app._titlebar._theme == "dark"
+    _create_vault(app, monkeypatch)
+    assert app._titlebar._theme == "light"
+    app._on_lock()
+    assert app._titlebar._theme == "dark"
+
+
+def test_dialog_gets_close_only_titlebar(app):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    dialog = guiapp.GeneratorDialog(app, lambda _v: None)
+    try:
+        bars = [w for w in dialog.winfo_children() if isinstance(w, guiapp.TitleBar)]
+        assert len(bars) == 1
+        assert set(bars[0]._buttons) == {"close"}
+    finally:
+        dialog.destroy()

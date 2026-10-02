@@ -270,6 +270,192 @@ def _avatar_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             continue
     return ImageFont.load_default(size=size)
 
+# ----------------------------------------------------------------------
+# Собственная строка заголовка окна (раздел 10.33)
+# ----------------------------------------------------------------------
+
+# Цветовые темы строки заголовка: "dark" — над тёмным экраном
+# разблокировки и тёмными шапками диалогов, "light" — над светлой
+# "страницей" главного экрана и диалогами. Фон строки совпадает с фоном
+# того, что под ней, поэтому она не читается как отдельная полоса.
+_CHROME_THEMES = {
+    "dark": {"bg": _SIDEBAR_BG, "fg": _SIDEBAR_TEXT_ACTIVE, "hover": _SIDEBAR_HOVER_BG, "title": "#8fa0bd"},
+    "light": {"bg": _PAGE_BG, "fg": _NEUTRAL_TEXT, "hover": _NEUTRAL_BORDER, "title": "#7a869c"},
+}
+_CHROME_CLOSE_HOVER = "#e5484d"
+_CHROME_BORDER = "#b8c2d6"  # 1px рамка диалогов: без неё безрамочное окно "растворяется"
+_CHROME_BAR_HEIGHT = 36
+_CHROME_BUTTON_WIDTH = 42
+
+
+def _chrome_glyph(kind: str, fg: str, bg: str, hover_bg: str | None) -> Image.Image:
+    """Значок кнопки строки заголовка: `min`/`max`/`restore`/`close`/`grip`.
+
+    Рисуется на непрозрачном фоне `bg` (а не на прозрачном — урок
+    раздела 10.5: прозрачность под ttk/Tk-виджетом на Windows даёт
+    артефакты) с 4-кратным суперсэмплингом; `hover_bg` — подсветка
+    скруглённым прямоугольником при наведении."""
+    factor = 4
+    width, height = _px(_CHROME_BUTTON_WIDTH) * factor, _px(_CHROME_BAR_HEIGHT) * factor
+    if kind == "grip":
+        width = height = _px(16) * factor
+    image = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(image)
+    if hover_bg is not None:
+        inset = _px(3) * factor
+        draw.rounded_rectangle(
+            (inset, inset, width - inset - 1, height - inset - 1),
+            radius=_px(8) * factor,
+            fill=hover_bg,
+        )
+    line = max(2, round(1.5 * _UI_SCALE)) * factor
+    cx, cy = width // 2, height // 2
+    half = _px(5) * factor
+
+    def cap_line(x1: float, y1: float, x2: float, y2: float) -> None:
+        draw.line((x1, y1, x2, y2), fill=fg, width=line)
+        radius = line / 2
+        for x, y in ((x1, y1), (x2, y2)):
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=fg)
+
+    if kind == "min":
+        cap_line(cx - half, cy + half // 2, cx + half, cy + half // 2)
+    elif kind == "max":
+        draw.rounded_rectangle(
+            (cx - half, cy - half, cx + half, cy + half), radius=_px(2) * factor, outline=fg, width=line
+        )
+    elif kind == "restore":
+        shift = _px(2) * factor
+        side = half - shift // 2
+        # Задний квадрат — только его видимый "уголок", передний — целиком
+        # поверх (с фоном внутри, чтобы закрыть линии заднего).
+        back = (cx - side + shift * 2, cy - side - shift, cx + side + shift * 2, cy + side - shift)
+        front = (cx - side - shift, cy - side + shift, cx + side - shift, cy + side + shift)
+        draw.rounded_rectangle(back, radius=_px(2) * factor, outline=fg, width=line)
+        draw.rounded_rectangle(front, radius=_px(2) * factor, outline=fg, width=line, fill=hover_bg or bg)
+    elif kind == "close":
+        cap_line(cx - half, cy - half, cx + half, cy + half)
+        cap_line(cx - half, cy + half, cx + half, cy - half)
+    elif kind == "grip":
+        dot = max(1, _px(1)) * factor
+        step = _px(4) * factor
+        for row in range(3):
+            for col in range(3 - row):
+                x = width - step * (col + 1) + step // 2
+                y = height - step * (row + 1) + step // 2
+                draw.ellipse((x - dot, y - dot, x + dot, y + dot), fill=fg)
+    return image.resize((width // factor, height // factor), Image.LANCZOS)
+
+
+class TitleBar(tk.Frame):
+    """Собственная строка заголовка вместо системной (раздел 10.33):
+    название, перетаскивание окна и кнопки свернуть/развернуть/закрыть в
+    стиле приложения. `window` — окно, которым она управляет (`App` или
+    диалог); `controls` — какие кнопки показывать."""
+
+    def __init__(
+        self,
+        master: tk.Misc,
+        app: "App",
+        window: tk.Misc,
+        title: str,
+        *,
+        theme: str = "light",
+        controls: tuple[str, ...] = ("min", "max", "close"),
+        show_title: bool = True,
+    ) -> None:
+        super().__init__(master, height=_px(_CHROME_BAR_HEIGHT), borderwidth=0, highlightthickness=0)
+        self.pack_propagate(False)
+        self._app = app
+        self._window = window
+        self._theme = theme
+        self._maximized = False
+        self._drag_offset: tuple[int, int] | None = None
+        self._buttons: dict[str, tk.Label] = {}
+
+        self._title_label = tk.Label(
+            self, text=title if show_title else "", font=("", 9), anchor="w", borderwidth=0
+        )
+        self._title_label.pack(side="left", padx=(_px(16), 0), fill="y")
+
+        commands = {
+            "min": app._minimize,
+            "max": app._toggle_maximize,
+            "close": getattr(window, "_on_close", window.destroy),
+        }
+        for kind in reversed(controls):
+            label = tk.Label(self, borderwidth=0, cursor="arrow")
+            label.pack(side="right", fill="y")
+            label.bind("<Enter>", lambda _e, k=kind: self._set_button(k, True))
+            label.bind("<Leave>", lambda _e, k=kind: self._set_button(k, False))
+            label.bind("<ButtonRelease-1>", lambda e, k=kind: self._click(k, e, commands[k]))
+            self._buttons[kind] = label
+
+        for widget in (self, self._title_label):
+            widget.bind("<ButtonPress-1>", self._drag_start)
+            widget.bind("<B1-Motion>", self._drag_move)
+            widget.bind("<ButtonRelease-1>", self._drag_end)
+        if "max" in controls:
+            for widget in (self, self._title_label):
+                widget.bind("<Double-Button-1>", lambda _e: app._toggle_maximize())
+
+        self.set_theme(theme)
+
+    # --- внешний вид -------------------------------------------------
+
+    def _glyph(self, kind: str, hover: bool) -> tk.PhotoImage:
+        theme = _CHROME_THEMES[self._theme]
+        shown = "restore" if kind == "max" and self._maximized else kind
+        fg = theme["fg"]
+        hover_bg = None
+        if hover:
+            hover_bg = _CHROME_CLOSE_HOVER if kind == "close" else theme["hover"]
+            if kind == "close":
+                fg = "#ffffff"
+        return self._app._chrome_image(shown, fg, theme["bg"], hover_bg)
+
+    def _set_button(self, kind: str, hover: bool) -> None:
+        self._buttons[kind].configure(image=self._glyph(kind, hover))
+
+    def set_theme(self, theme: str) -> None:
+        self._theme = theme
+        colors = _CHROME_THEMES[theme]
+        self.configure(background=colors["bg"])
+        self._title_label.configure(background=colors["bg"], foreground=colors["title"])
+        for kind, label in self._buttons.items():
+            label.configure(background=colors["bg"])
+            self._set_button(kind, False)
+
+    def set_maximized(self, maximized: bool) -> None:
+        self._maximized = maximized
+        if "max" in self._buttons:
+            self._set_button("max", False)
+
+    # --- поведение ---------------------------------------------------
+
+    def _click(self, kind: str, event: tk.Event, command: Callable[[], None]) -> None:
+        # Срабатываем только если отпустили кнопку над ней же — как у
+        # системных кнопок (можно "передумать", отведя курсор).
+        label = self._buttons[kind]
+        if 0 <= event.x < label.winfo_width() and 0 <= event.y < label.winfo_height():
+            command()
+
+    def _drag_start(self, event: tk.Event) -> None:
+        if self._app._is_maximized(self._window):
+            self._drag_offset = None
+            return
+        self._drag_offset = (event.x_root - self._window.winfo_x(), event.y_root - self._window.winfo_y())
+
+    def _drag_move(self, event: tk.Event) -> None:
+        if self._drag_offset is None:
+            return
+        x = event.x_root - self._drag_offset[0]
+        y = event.y_root - self._drag_offset[1]
+        self._window.geometry(f"+{x}+{y}")
+
+    def _drag_end(self, _event: tk.Event) -> None:
+        self._drag_offset = None
+
 
 class App(ttk.Window):
     """Главное окно приложения.
@@ -377,12 +563,205 @@ class App(ttk.Window):
         self._unlock_frame = self._build_unlock_frame()
         self._main_frame = self._build_main_frame()
 
+        # Собственная строка заголовка вместо системной (раздел 10.33) —
+        # ДО pack() экранов: она должна встать над ними. `MENEDGER_NATIVE_
+        # FRAME=1` оставляет системную рамку (запасной вариант, если
+        # безрамочное окно на какой-то системе поведёт себя плохо).
+        self._native_frame = bool(os.environ.get("MENEDGER_NATIVE_FRAME"))
+        self._chrome_images: dict[tuple, tk.PhotoImage] = {}
+        self._maximized = False
+        self._minimized = False
+        self._saved_geometry: str | None = None
+        self._titlebar: TitleBar | None = None
+        self._grip: tk.Label | None = None
+        if not self._native_frame:
+            self._install_chrome()
+
         self._unlock_frame.pack(fill="both", expand=True)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         if os.environ.get("MENEDGER_DEBUG"):
             self.after(800, lambda: self._debug_report_images("старт"))
+
+    # ------------------------------------------------------------------
+    # Собственная рамка окна (раздел 10.33)
+    # ------------------------------------------------------------------
+
+    def _chrome_image(self, kind: str, fg: str, bg: str, hover_bg: str | None) -> tk.PhotoImage:
+        key = (kind, fg, bg, hover_bg, _UI_SCALE)
+        if key not in self._chrome_images:
+            self._chrome_images[key] = self._tk_image(_chrome_glyph(kind, fg, bg, hover_bg))
+        return self._chrome_images[key]
+
+    def _work_area(self) -> tuple[int, int, int, int]:
+        """Рабочая область экрана (x, y, ширина, высота) — на Windows без
+        панели задач, на остальных ОС весь экран."""
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                rect = wintypes.RECT()
+                if ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+                    return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+            except Exception:
+                pass
+        return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+
+    def _is_maximized(self, window: tk.Misc) -> bool:
+        return window is self and self._maximized
+
+    def _install_chrome(self) -> None:
+        self.overrideredirect(True)
+        self._titlebar = TitleBar(self, self, self, APP_TITLE, theme="dark")
+        self._titlebar.pack(side="top", fill="x")
+
+        # Безрамочное окно некому растягивать — маленький "уголок" справа
+        # внизу (в поле карточки, поверх фона страницы), как у многих
+        # безрамочных приложений.
+        self._grip = tk.Label(self, borderwidth=0)
+        try:
+            self._grip.configure(cursor="size_nw_se" if sys.platform == "win32" else "bottom_right_corner")
+        except tk.TclError:
+            pass
+        self._grip.place(relx=1.0, rely=1.0, anchor="se")
+        self._grip.bind("<ButtonPress-1>", self._grip_start)
+        self._grip.bind("<B1-Motion>", self._grip_move)
+        self._set_chrome_theme("dark")
+
+        # Без системной рамки ОС не знает, куда поставить окно, — по центру
+        # рабочей области.
+        ax, ay, aw, ah = self._work_area()
+        width, height = min(_px(980), aw), min(_px(640), ah)
+        self.geometry(f"{width}x{height}+{ax + (aw - width) // 2}+{ay + (ah - height) // 2}")
+
+        self.bind("<Map>", self._on_map, add="+")
+        self.after(10, self._apply_taskbar_style)
+        self.after(120, self._focus_window)
+
+    def _set_chrome_theme(self, theme: str) -> None:
+        """Тёмная строка над экраном разблокировки, светлая — над главным
+        (в цвет страницы)."""
+        if self._titlebar is None or self._grip is None:
+            return
+        self._titlebar.set_theme(theme)
+        colors = _CHROME_THEMES[theme]
+        self._grip.configure(
+            background=colors["bg"], image=self._chrome_image("grip", colors["title"], colors["bg"], None)
+        )
+
+    def _focus_window(self) -> None:
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def _apply_taskbar_style(self) -> None:
+        """Windows: окно без рамки по умолчанию пропадает с панели задач и
+        из Alt+Tab. `WS_EX_APPWINDOW` возвращает его туда; чтобы стиль
+        подхватился, окно нужно один раз скрыть и показать."""
+        if sys.platform != "win32" or self._native_frame:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.GetParent.restype = wintypes.HWND
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetWindowLongW.restype = ctypes.c_long
+            user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.SetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            hwnd = user32.GetParent(self.winfo_id())
+            style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
+            style = (style & ~0x00000080) | 0x00040000  # -WS_EX_TOOLWINDOW, +WS_EX_APPWINDOW
+            user32.SetWindowLongW(hwnd, -20, style)
+            self.withdraw()
+            self.after(10, self.deiconify)
+        except Exception:
+            pass
+
+    def _minimize(self) -> None:
+        """У окна с `overrideredirect(True)` `iconify()` не работает, поэтому
+        на время сворачивания возвращаем системную рамку; обратно — в
+        `_on_map`, когда окно снова показано."""
+        if self._native_frame:
+            self.iconify()
+            return
+        self._saved_geometry = self.geometry()
+        self._minimized = True
+        self.overrideredirect(False)
+        # withdraw() перед iconify(): без него (проверено под openbox) окно,
+        # у которого только что сняли override-redirect, остаётся на экране,
+        # а iconify() молча игнорируется — WM ещё не "подхватил" окно.
+        self.withdraw()
+        self.update_idletasks()
+        self.iconify()
+
+    def _on_map(self, event: tk.Event) -> None:
+        if event.widget is self and self._minimized:
+            self._minimized = False
+            self.after(10, self._restore_chrome)
+
+    def _restore_chrome(self) -> None:
+        self.overrideredirect(True)
+        if self._saved_geometry:
+            self.geometry(self._saved_geometry)
+        self._apply_taskbar_style()
+        self.after(150, self._focus_window)
+
+    def _toggle_maximize(self) -> None:
+        if self._native_frame:
+            return
+        if self._maximized:
+            if self._saved_geometry:
+                self.geometry(self._saved_geometry)
+        else:
+            self._saved_geometry = self.geometry()
+            ax, ay, aw, ah = self._work_area()
+            self.geometry(f"{aw}x{ah}+{ax}+{ay}")
+        self._maximized = not self._maximized
+        if self._titlebar is not None:
+            self._titlebar.set_maximized(self._maximized)
+        if self._grip is not None:
+            if self._maximized:
+                self._grip.place_forget()
+            else:
+                self._grip.place(relx=1.0, rely=1.0, anchor="se")
+
+    def _grip_start(self, event: tk.Event) -> None:
+        self._grip_origin = (event.x_root, event.y_root, self.winfo_width(), self.winfo_height())
+
+    def _grip_move(self, event: tk.Event) -> None:
+        x0, y0, width, height = self._grip_origin
+        new_w = max(_px(760), width + event.x_root - x0)
+        new_h = max(_px(460), height + event.y_root - y0)
+        self.geometry(f"{new_w}x{new_h}")
+
+    def _dialog_chrome(self, dialog: tk.Toplevel, title: str, *, theme: str = "light", show_title: bool = True) -> None:
+        """Та же рамка для диалогов: строка заголовка с одной кнопкой
+        "закрыть", тонкая граница и Escape. Вызывается СРАЗУ после
+        `super().__init__`, до построения содержимого — чтобы строка
+        оказалась сверху."""
+        if self._native_frame:
+            return
+        dialog.overrideredirect(True)
+        dialog.configure(
+            highlightthickness=1, highlightbackground=_CHROME_BORDER, highlightcolor=_CHROME_BORDER
+        )
+        bar = TitleBar(dialog, self, dialog, title, theme=theme, controls=("close",), show_title=show_title)
+        bar.pack(side="top", fill="x")
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+
+        def focus() -> None:
+            try:
+                dialog.focus_force()
+            except tk.TclError:
+                pass
+
+        dialog.after(80, focus)
 
     def _debug_report_images(self, label: str) -> None:
         """Диагностика картинок (раздел 10.30), включается переменной
@@ -1545,6 +1924,7 @@ class App(ttk.Window):
     def _show_main(self) -> None:
         self._unlock_frame.pack_forget()
         self._main_frame.pack(fill="both", expand=True)
+        self._set_chrome_theme("light")
         self._refresh_tree()
         if os.environ.get("MENEDGER_DEBUG"):
             self.after(500, lambda: self._debug_report_images("главный экран"))
@@ -1730,6 +2110,7 @@ class App(ttk.Window):
         self.vault_path = None
         self._main_frame.pack_forget()
         self._unlock_frame.pack(fill="both", expand=True)
+        self._set_chrome_theme("dark")
 
     def _on_close(self) -> None:
         self.destroy()
@@ -1740,6 +2121,7 @@ class EntryDialog(ttk.Toplevel):
 
     def __init__(self, parent: App, title: str) -> None:
         super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, title)
         self.transient(parent)
         self.result: tuple[str, str, str] | None = None
 
@@ -1842,6 +2224,7 @@ class CreateVaultDialog(ttk.Toplevel):
 
     def __init__(self, parent: App) -> None:
         super().__init__(title="Новое хранилище", master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, "Новое хранилище")
         self.transient(parent)
         self.result: str | None = None
         pending_backdrops: list[Callable[[], None]] = []
@@ -2091,6 +2474,7 @@ class ViewEntryDialog(ttk.Toplevel):
     def __init__(self, parent: App, entry: dict) -> None:
         title = f"Запись — {entry['site']}"
         super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, title, theme="dark", show_title=False)
         self._parent = parent
         self._entry = entry
         self.transient(parent)
@@ -2105,7 +2489,7 @@ class ViewEntryDialog(ttk.Toplevel):
         header = ttk.Frame(self, padding=(_px(20), _px(14)))
         header.pack(fill="x")
         pending_backdrops.append(
-            parent._rounded_backdrop(header, _SIDEBAR_BG, corners=(True, True, False, False), surface="#ffffff")
+            parent._rounded_backdrop(header, _SIDEBAR_BG, corners=(False, False, False, False), surface="#ffffff")
         )
         if hasattr(parent, "_icon_image_small"):
             ttk.Label(header, image=parent._icon_image_small, style="Sidebar.TLabel").pack(
@@ -2234,6 +2618,7 @@ class AuditDialog(ttk.Toplevel):
 
     def __init__(self, parent: App, report: AdvisorReport) -> None:
         super().__init__(title="Советник по безопасности", master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, "Советник по безопасности")
         self.transient(parent)
 
         content = ttk.Frame(self, padding=_px(24))
@@ -2454,6 +2839,7 @@ class GeneratorDialog(ttk.Toplevel):
 
     def __init__(self, parent: App, on_copy) -> None:
         super().__init__(title="Генератор паролей", master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, "Генератор паролей")
         self.transient(parent)
         self._on_copy = on_copy
 
