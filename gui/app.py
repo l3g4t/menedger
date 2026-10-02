@@ -20,7 +20,10 @@ gui.app — главное окно менеджера паролей.
 
 from __future__ import annotations
 
+import base64
+import io
 import os
+import sys
 import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime
@@ -67,6 +70,10 @@ CLIPBOARD_CLEAR_DELAY_MS = 20_000
 # .ico, см. CLAUDE.md, раздел 11.2) — это два независимых места, и оба
 # указывают на один и тот же исходный рисунок.
 ICON_PATH = Path(__file__).resolve().parent / "icon.png"
+# На Windows иконка заголовка/панели задач ставится через `.ico` (раздел
+# 10.30): `wm iconphoto` после `wm iconbitmap(default=...)` от ttkbootstrap
+# не перекрывает его, и в заголовке оставалось перо ttkbootstrap.
+ICON_ICO_PATH = Path(__file__).resolve().parent / "icon.ico"
 
 # Схематичные (line-art) иконки для кнопок — см. CLAUDE.md, раздел 10.1:
 # цветные emoji (🔒🗑🎲...) заменены на собственный монохромный набор,
@@ -290,15 +297,18 @@ class App(ttk.Window):
             size=(980, 640),
             minsize=(760, 460),
             high_dpi=True,
+            iconphoto=self._window_icon_arg(),
         )
         self._init_ui_scale()
 
         if ICON_PATH.exists():
-            # Через Pillow, а не `tk.PhotoImage(file=...)`: все остальные
-            # картинки приложения идут тем же путём (раздел 10.29).
+            # Масштабирование — через Pillow, но в Tk картинка попадает как
+            # родной `tk.PhotoImage` из PNG-данных (`_tk_image`, раздел
+            # 10.30), а не `ImageTk.PhotoImage`: именно так иконки кнопок
+            # были видны на Windows.
             with Image.open(ICON_PATH) as source:
                 icon_source = source.convert("RGBA")
-            self._icon_image = ImageTk.PhotoImage(icon_source)
+            self._icon_image = self._tk_image(icon_source)
             self.iconphoto(True, self._icon_image)
             # Уменьшенные версии для сайдбара (32px) и карточки на экране
             # разблокировки (64px) — subsample(n) делит ровно, 256/8=32,
@@ -306,10 +316,10 @@ class App(ttk.Window):
             # теперь всё равно используется для скруглённых кнопок, см.
             # раздел 10.5), но `subsample()` — на одну строку короче и
             # даёт точный результат именно для целых делителей, как тут.
-            self._icon_image_small = ImageTk.PhotoImage(
+            self._icon_image_small = self._tk_image(
                 icon_source.resize((_px(32), _px(32)), Image.LANCZOS)
             )
-            self._icon_image_medium = ImageTk.PhotoImage(
+            self._icon_image_medium = self._tk_image(
                 icon_source.resize((_px(64), _px(64)), Image.LANCZOS)
             )
 
@@ -334,7 +344,7 @@ class App(ttk.Window):
         # каждый тест): второй тест падал с "ttkbootstrap supports a
         # single application root window", потому что кнопка получала
         # image от PhotoImage первого, уже уничтоженного окна.
-        self._icons: dict[tuple[str, str], ImageTk.PhotoImage] = {}
+        self._icons: dict[tuple[str, str], tk.PhotoImage] = {}
         # Тот же приём, для аватаров списка записей (`_site_avatar`,
         # раздел 10.12) — тоже на экземпляр, а не на модуль, по той же
         # причине (см. комментарий выше про self._icons).
@@ -359,6 +369,77 @@ class App(ttk.Window):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        if os.environ.get("MENEDGER_DEBUG"):
+            self.after(800, lambda: self._debug_report_images("старт"))
+
+    def _debug_report_images(self, label: str) -> None:
+        """Диагностика картинок (раздел 10.30), включается переменной
+        `MENEDGER_DEBUG=1`: печатает в консоль, какие виджеты имеют
+        `image`, существует ли эта картинка в Tk и какого она размера."""
+        print(f"=== MENEDGER_DEBUG [{label}] ===", file=sys.stderr)
+        print(
+            f"python {sys.version.split()[0]}, Tk {self.tk.call('info', 'patchlevel')}, "
+            f"scaling {self.tk.call('tk', 'scaling')}, _UI_SCALE {_UI_SCALE}",
+            file=sys.stderr,
+        )
+        icons = sorted(p.name for p in ICONS_DIR.glob("*.png")) if ICONS_DIR.exists() else []
+        print(f"ICONS_DIR={ICONS_DIR} exists={ICONS_DIR.exists()} files={len(icons)}", file=sys.stderr)
+        print(f"кэш иконок: {sorted(self._icons)}", file=sys.stderr)
+        existing = set(self.tk.splitlist(self.tk.call("image", "names")))
+        found = bad = 0
+
+        def walk(widget: tk.Misc) -> None:
+            nonlocal found, bad
+            try:
+                raw = widget.cget("image")
+            except tk.TclError:
+                raw = ""
+            image_name = str(raw[0]) if isinstance(raw, (tuple, list)) and raw else str(raw)
+            if image_name in ("()", "[]"):
+                image_name = ""
+            if image_name:
+                found += 1
+                ok = image_name in existing
+                width = height = "?"
+                if ok:
+                    width = self.tk.call("image", "width", image_name)
+                    height = self.tk.call("image", "height", image_name)
+                if not ok or str(width) in ("0", "1"):
+                    bad += 1
+                try:
+                    text = widget.cget("text")
+                except tk.TclError:
+                    text = ""
+                print(
+                    f"  {widget.winfo_class():10} text={text!r:18} image={image_name} "
+                    f"exists={ok} size={width}x{height} mapped={widget.winfo_ismapped()}",
+                    file=sys.stderr,
+                )
+            for child in widget.winfo_children():
+                walk(child)
+
+        walk(self)
+        print(f"виджетов с image: {found}, подозрительных: {bad}", file=sys.stderr)
+
+    def _tk_image(self, image: Image.Image) -> tk.PhotoImage:
+        """PIL-картинка -> родной `tk.PhotoImage` через PNG-данные (раздел
+        10.30). Не `ImageTk.PhotoImage`: пользователь на Windows видел
+        иконки кнопок только у `tk.PhotoImage`, загруженных из PNG."""
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return tk.PhotoImage(master=self, data=base64.b64encode(buffer.getvalue()))
+
+    @staticmethod
+    def _window_icon_arg() -> str | None:
+        """Что передать ttkbootstrap как `iconphoto` (раздел 10.30): на
+        Windows — путь к нашему `.ico` (ttkbootstrap применит его через
+        `wm_iconbitmap(default=...)`, и диалоги его унаследуют); на
+        остальных ОС `None` — ничего не трогать, иконку ставит наш
+        `iconphoto(True, ...)` ниже."""
+        if sys.platform == "win32" and ICON_ICO_PATH.exists():
+            return str(ICON_ICO_PATH)
+        return None
+
     def _init_ui_scale(self) -> None:
         """Определить `_UI_SCALE` по масштабированию Tk (раздел 10.29).
         `MENEDGER_UI_SCALE` — отладочное переопределение (например `1.5`),
@@ -374,7 +455,7 @@ class App(ttk.Window):
         self.geometry(f"{_px(980)}x{_px(640)}")
         self.minsize(_px(760), _px(460))
 
-    def _button_icon(self, name: str, variant: str) -> ImageTk.PhotoImage | None:
+    def _button_icon(self, name: str, variant: str) -> tk.PhotoImage | None:
         """Вернуть кэшированный tk.PhotoImage для gui/icons/<name>_<variant>.png.
 
         Названо НЕ `_icon` — ttkbootstrap.Window сам уже использует
@@ -400,7 +481,7 @@ class App(ttk.Window):
                 icon = source.convert("RGBA")
             if _UI_SCALE != 1.0:
                 icon = icon.resize((_px(icon.width), _px(icon.height)), Image.LANCZOS)
-            self._icons[key] = ImageTk.PhotoImage(icon)
+            self._icons[key] = self._tk_image(icon)
         return self._icons[key]
 
     def _icon_kwargs(self, name: str, variant: str) -> dict:
@@ -1453,6 +1534,8 @@ class App(ttk.Window):
         self._unlock_frame.pack_forget()
         self._main_frame.pack(fill="both", expand=True)
         self._refresh_tree()
+        if os.environ.get("MENEDGER_DEBUG"):
+            self.after(500, lambda: self._debug_report_images("главный экран"))
 
     def _on_show_all_entries(self) -> None:
         """Пункт навигации "Все записи" в сайдбаре (раздел 10.8) —

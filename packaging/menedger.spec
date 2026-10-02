@@ -56,6 +56,7 @@ project_root = Path(SPECPATH).resolve().parent
 # его просто не окажется и окно останется без иконки (без ошибки — файл
 # при отсутствии просто не подключается, см. ICON_PATH.exists() в app.py).
 datas.append((str(project_root / "gui" / "icon.png"), "gui"))
+datas.append((str(project_root / "gui" / "icon.ico"), "gui"))
 
 # gui/icons/*.png — схематичные монохромные иконки кнопок (см. CLAUDE.md,
 # раздел 10.1) — по той же причине, что и gui/icon.png выше: app.py читает
