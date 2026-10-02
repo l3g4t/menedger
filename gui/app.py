@@ -686,7 +686,7 @@ class App(ttk.Window):
             if drawn_size and drawn_size[0] == (width, height):
                 return
             drawn_size[:] = [(width, height)]
-            factor = 2
+            factor = 4
             big = Image.new("RGB", (width * factor, height * factor), surface)
             draw = ImageDraw.Draw(big)
             draw.rounded_rectangle(
@@ -713,6 +713,38 @@ class App(ttk.Window):
         if dynamic:
             return None
         return redraw
+
+    def _rounded_field(
+        self,
+        parent: tk.Misc,
+        variable: tk.StringVar,
+        *,
+        show: str = "",
+        width: int = 20,
+    ) -> tuple[ttk.Frame, ttk.Entry]:
+        """Поле ввода в скруглённой "плитке" (раздел 10.28): фрейм с
+        подложкой `_rounded_backdrop` + `Entry` со стилем
+        `NeutralField.TEntry` (раздел 10.17). Возвращает `(box, entry)` —
+        вызывающий код сам размещает `box` через `pack`/`grid`, а с
+        `entry` работает как обычно (`focus_set`, `bind`, `configure`).
+        `dynamic=True`: подложка перерисовывается по `<Configure>`, поэтому
+        не нужен список отложенных перерисовок, как у диалогов с
+        фиксированной вёрсткой."""
+        box = ttk.Frame(parent, padding=(12, 8))
+        self._rounded_backdrop(
+            box,
+            _NEUTRAL_FILL,
+            corners=(True, True, True, True),
+            surface="#ffffff",
+            radius=_ROUNDED_RADIUS,
+            border_color=_NEUTRAL_BORDER,
+            border_width=1,
+            dynamic=True,
+        )
+        entry = ttk.Entry(box, textvariable=variable, show=show, width=width)
+        entry.configure(style="NeutralField.TEntry")
+        entry.pack(fill="both", expand=True)
+        return box, entry
 
     @staticmethod
     def _styled(widget: ttk.Button, style_name: str) -> ttk.Button:
@@ -988,9 +1020,8 @@ class App(ttk.Window):
         path_row = ttk.Frame(card)
         path_row.pack(fill="x", pady=(2, 12))
         self._path_var = tk.StringVar(value=str(DEFAULT_VAULT_PATH))
-        ttk.Entry(path_row, textvariable=self._path_var, width=26).pack(
-            side="left", fill="x", expand=True, padx=(0, 8)
-        )
+        path_box, _path_entry = self._rounded_field(path_row, self._path_var, width=26)
+        path_box.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self._styled(
             ttk.Button(path_row, text="Выберите файл", command=self._on_browse),
             self._neutral_style(),
@@ -1005,8 +1036,8 @@ class App(ttk.Window):
         # Кнопка-"глаз" рядом (см. _on_toggle_password_visibility) даёт
         # пользователю возможность сверить, что он ввёл, не расширяя это
         # доверие на любого, кто просто смотрит на экран через плечо.
-        password_entry = ttk.Entry(pw_row, textvariable=self._password_var, show="*")
-        password_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        password_box, password_entry = self._rounded_field(pw_row, self._password_var, show="*")
+        password_box.pack(side="left", fill="x", expand=True, padx=(0, 8))
         password_entry.bind("<Return>", lambda _event: self._on_unlock())
         self._password_entry = password_entry
         self._password_visible = False
@@ -1567,8 +1598,8 @@ class EntryDialog(ttk.Toplevel):
         )
         for row, (label, var, show) in enumerate(fields):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            entry = ttk.Entry(form, textvariable=var, show=show)
-            entry.grid(row=row, column=1, sticky="ew", pady=4, padx=(8, 0))
+            box, entry = parent._rounded_field(form, var, show=show, width=28)
+            box.grid(row=row, column=1, sticky="ew", pady=4, padx=(8, 0))
             if row == 0:
                 entry.focus_set()
         form.columnconfigure(1, weight=1)
