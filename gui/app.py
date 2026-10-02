@@ -64,16 +64,28 @@ APP_TITLE = "Хранилище тайн"
 # доступном любому другому процессу в системе.
 CLIPBOARD_CLEAR_DELAY_MS = 20_000
 
+def _gui_resource_dir() -> Path:
+    """Папка с ресурсами GUI (иконки). В обычном запуске это папка этого
+    файла; в PyInstaller-сборке `__file__` точки входа указывает в корень
+    распаковки (`_MEIPASS`), а ресурсы лежат в `_MEIPASS/gui` (раздел
+    10.31) — из-за этого в `.exe` пропадали ВСЕ иконки."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / "gui"
+    return Path(__file__).resolve().parent
+
+
+_RESOURCE_DIR = _gui_resource_dir()
+
 # Иконка окна (PNG, читается через tk.PhotoImage — Tcl/Tk 8.6+ понимает
 # PNG нативно, без Pillow). Значок исполняемого файла на Windows задаётся
 # отдельно, через parameter icon= в packaging/menedger.spec (там нужен
 # .ico, см. CLAUDE.md, раздел 11.2) — это два независимых места, и оба
 # указывают на один и тот же исходный рисунок.
-ICON_PATH = Path(__file__).resolve().parent / "icon.png"
+ICON_PATH = _RESOURCE_DIR / "icon.png"
 # На Windows иконка заголовка/панели задач ставится через `.ico` (раздел
 # 10.30): `wm iconphoto` после `wm iconbitmap(default=...)` от ttkbootstrap
 # не перекрывает его, и в заголовке оставалось перо ttkbootstrap.
-ICON_ICO_PATH = Path(__file__).resolve().parent / "icon.ico"
+ICON_ICO_PATH = _RESOURCE_DIR / "icon.ico"
 
 # Схематичные (line-art) иконки для кнопок — см. CLAUDE.md, раздел 10.1:
 # цветные emoji (🔒🗑🎲...) заменены на собственный монохромный набор,
@@ -86,7 +98,7 @@ ICON_ICO_PATH = Path(__file__).resolve().parent / "icon.ico"
 # — тёмный (светлый/жёлтый/голубой фон или белый фон-аутлайн). Значения
 # подобраны прямым замером ttk.Style().lookup(style, "foreground") для
 # каждого bootstyle в этой теме, не угадыванием.
-ICONS_DIR = Path(__file__).resolve().parent / "icons"
+ICONS_DIR = _RESOURCE_DIR / "icons"
 
 # Цвета для чередующихся строк в списке записей (см. _refresh_tree) —
 # раздел 10.12 сделал их заметно светлее прежних (#f2f3f5 → #f7f8fa):

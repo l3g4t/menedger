@@ -19,6 +19,7 @@ getpass.getpass()/input() в tests/test_cli.py. Сама крипто- и
 вызывает то же самое ядро корректно", а не саму бизнес-логику заново.
 """
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -330,3 +331,17 @@ def test_audit_dialog_close_button_is_not_squeezed_to_zero(app, monkeypatch):
     generator._on_copy_click()
     assert len(copied) == 1
     generator.destroy()
+
+
+def test_resource_dir_in_normal_run_is_gui_package_dir():
+    assert guiapp._gui_resource_dir() == Path(guiapp.__file__).resolve().parent
+    assert (guiapp.ICONS_DIR / "plus_dark.png").exists()
+
+
+def test_resource_dir_in_frozen_build_points_to_meipass_gui(monkeypatch, tmp_path):
+    # PyInstaller: `__file__` точки входа лежит в корне `_MEIPASS`, а
+    # ресурсы — в `_MEIPASS/gui` (раздел 10.31); раньше из-за этого в
+    # собранном .exe пропадали все иконки.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert guiapp._gui_resource_dir() == tmp_path / "gui"
