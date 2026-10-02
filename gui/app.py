@@ -20,6 +20,7 @@ gui.app — главное окно менеджера паролей.
 
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime
@@ -141,6 +142,21 @@ _ACCENT = "#2f6fed"
 
 _ROUNDED_RADIUS = 10  # px скругления угла у кнопок (см. _rounded_image)
 
+# Коэффициент масштаба интерфейса (раздел 10.29): 1.0 при 96 DPI, 1.5 при
+# масштабе Windows 150% и т.д. Выставляется ОДИН раз в `App.__init__`,
+# сразу после создания окна (до построения любых виджетов). Шрифты Tk
+# масштабируются сами (они в пунктах), а размеры в пикселях — отступы,
+# фиксированные размеры, наша собственная растровая графика — нет, поэтому
+# все они проходят через `_px()`.
+_UI_SCALE = 1.0
+
+
+def _px(value: float) -> int:
+    """Пересчитать "логические" пиксели (как при 96 DPI) в физические."""
+    if not value:
+        return 0
+    return max(1, round(value * _UI_SCALE))
+
 # Фиксированный размер полей МАСТЕР-ПАРОЛЬ/ПОДТВЕРЖДЕНИЕ в
 # `CreateVaultDialog` (раздел 10.19) — по запросу пользователя заметно
 # меньше, чем ширина остальных рядов диалога (заголовок, шкала
@@ -223,6 +239,19 @@ def _mix(color: str, other: str, amount: float) -> str:
     )
 
 
+
+def _avatar_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """Шрифт для буквы в аватаре. Встроенный шрифт Pillow не содержит
+    кириллицу (вместо "ц" рисовался квадратик — раздел 10.29), поэтому
+    сначала пробуем системные шрифты с кириллицей."""
+    for name in ("segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "Arial Bold.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default(size=size)
+
+
 class App(ttk.Window):
     """Главное окно приложения.
 
@@ -260,11 +289,16 @@ class App(ttk.Window):
             themename=THEME_NAME,
             size=(980, 640),
             minsize=(760, 460),
-            high_dpi=False,
+            high_dpi=True,
         )
+        self._init_ui_scale()
 
         if ICON_PATH.exists():
-            self._icon_image = tk.PhotoImage(file=str(ICON_PATH))
+            # Через Pillow, а не `tk.PhotoImage(file=...)`: все остальные
+            # картинки приложения идут тем же путём (раздел 10.29).
+            with Image.open(ICON_PATH) as source:
+                icon_source = source.convert("RGBA")
+            self._icon_image = ImageTk.PhotoImage(icon_source)
             self.iconphoto(True, self._icon_image)
             # Уменьшенные версии для сайдбара (32px) и карточки на экране
             # разблокировки (64px) — subsample(n) делит ровно, 256/8=32,
@@ -272,8 +306,12 @@ class App(ttk.Window):
             # теперь всё равно используется для скруглённых кнопок, см.
             # раздел 10.5), но `subsample()` — на одну строку короче и
             # даёт точный результат именно для целых делителей, как тут.
-            self._icon_image_small = self._icon_image.subsample(8, 8)
-            self._icon_image_medium = self._icon_image.subsample(4, 4)
+            self._icon_image_small = ImageTk.PhotoImage(
+                icon_source.resize((_px(32), _px(32)), Image.LANCZOS)
+            )
+            self._icon_image_medium = ImageTk.PhotoImage(
+                icon_source.resize((_px(64), _px(64)), Image.LANCZOS)
+            )
 
         # Кэш скруглённых изображений-фонов кнопок (см. _rounded_button_style
         # ниже) — как и self._icons, живёт на экземпляре, а не на модуле:
@@ -296,7 +334,7 @@ class App(ttk.Window):
         # каждый тест): второй тест падал с "ttkbootstrap supports a
         # single application root window", потому что кнопка получала
         # image от PhotoImage первого, уже уничтоженного окна.
-        self._icons: dict[tuple[str, str], tk.PhotoImage] = {}
+        self._icons: dict[tuple[str, str], ImageTk.PhotoImage] = {}
         # Тот же приём, для аватаров списка записей (`_site_avatar`,
         # раздел 10.12) — тоже на экземпляр, а не на модуль, по той же
         # причине (см. комментарий выше про self._icons).
@@ -321,7 +359,22 @@ class App(ttk.Window):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _button_icon(self, name: str, variant: str) -> tk.PhotoImage | None:
+    def _init_ui_scale(self) -> None:
+        """Определить `_UI_SCALE` по масштабированию Tk (раздел 10.29).
+        `MENEDGER_UI_SCALE` — отладочное переопределение (например `1.5`),
+        чтобы проверять HiDPI-вёрстку на машине без HiDPI-экрана."""
+        global _UI_SCALE
+        override = os.environ.get("MENEDGER_UI_SCALE")
+        if override:
+            scale = float(override)
+            self.tk.call("tk", "scaling", scale * 96 / 72)
+        else:
+            scale = float(self.tk.call("tk", "scaling")) / (96 / 72)
+        _UI_SCALE = min(max(scale, 1.0), 3.0)
+        self.geometry(f"{_px(980)}x{_px(640)}")
+        self.minsize(_px(760), _px(460))
+
+    def _button_icon(self, name: str, variant: str) -> ImageTk.PhotoImage | None:
         """Вернуть кэшированный tk.PhotoImage для gui/icons/<name>_<variant>.png.
 
         Названо НЕ `_icon` — ttkbootstrap.Window сам уже использует
@@ -343,7 +396,11 @@ class App(ttk.Window):
             path = ICONS_DIR / f"{name}_{variant}.png"
             if not path.exists():
                 return None
-            self._icons[key] = tk.PhotoImage(file=str(path))
+            with Image.open(path) as source:
+                icon = source.convert("RGBA")
+            if _UI_SCALE != 1.0:
+                icon = icon.resize((_px(icon.width), _px(icon.height)), Image.LANCZOS)
+            self._icons[key] = ImageTk.PhotoImage(icon)
         return self._icons[key]
 
     def _icon_kwargs(self, name: str, variant: str) -> dict:
@@ -381,11 +438,11 @@ class App(ttk.Window):
         color = _AVATAR_PALETTE[sum(map(ord, site)) % len(_AVATAR_PALETTE)]
         cache_key = (letter, color)
         if cache_key not in self._avatar_images:
-            size, factor = 28, 4
+            size, factor = _px(28), 4
             big = Image.new("RGBA", (size * factor, size * factor), (0, 0, 0, 0))
             draw = ImageDraw.Draw(big)
             draw.ellipse([0, 0, size * factor - 1, size * factor - 1], fill=color)
-            font = ImageFont.load_default(size=size * factor // 2)
+            font = _avatar_font(size * factor // 2)
             bbox = draw.textbbox((0, 0), letter, font=font)
             text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
             draw.text(
@@ -405,7 +462,7 @@ class App(ttk.Window):
         буквы и с прозрачным (`RGBA`) фоном вне круга, вставляется в
         обычный `tk.Label(image=...)`, а не в `Treeview`."""
         if color not in self._advisor_markers:
-            size, factor = 9, 8
+            size, factor = _px(9), 8
             big = Image.new("RGBA", (size * factor, size * factor), (0, 0, 0, 0))
             ImageDraw.Draw(big).ellipse([0, 0, size * factor - 1, size * factor - 1], fill=color)
             small = big.resize((size, size), Image.LANCZOS)
@@ -448,11 +505,13 @@ class App(ttk.Window):
         не возникает.
         """
         factor = 4
+        size = _px(size)
+        border_width = _px(border_width)
         big = Image.new("RGB", (size * factor, size * factor), surface)
         draw = ImageDraw.Draw(big)
         draw.rounded_rectangle(
             [0, 0, size * factor - 1, size * factor - 1],
-            radius=_ROUNDED_RADIUS * factor,
+            radius=_px(_ROUNDED_RADIUS) * factor,
             fill=fill,
             outline=border_color,
             width=border_width * factor,
@@ -470,7 +529,7 @@ class App(ttk.Window):
         *,
         border_color: str | None = None,
         anchor: str = "center",
-        padding: tuple[int, int] = (14, 8),
+        padding: tuple[int, int] | None = None,
         surface: str = "#ffffff",
     ) -> str:
         """Создать (при первом обращении) и вернуть имя ttk-стиля
@@ -502,6 +561,8 @@ class App(ttk.Window):
         """
         if style_name in self._rounded_style_names:
             return style_name
+        if padding is None:
+            padding = (_px(14), _px(8))
 
         # Направление смешивания для hover зависит от того, светлый фон
         # или тёмный: у светлых (нейтральных/акцентных) кнопок наведение
@@ -535,7 +596,7 @@ class App(ttk.Window):
             normal_img,
             ("pressed", pressed_img),
             ("active", hover_img),
-            border=_ROUNDED_RADIUS,
+            border=_px(_ROUNDED_RADIUS),
             sticky="nsew",
         )
         style.layout(
@@ -680,6 +741,9 @@ class App(ttk.Window):
 
         drawn_size: list[tuple[int, int]] = []
 
+        radius_px = _px(radius)
+        border_px = _px(border_width)
+
         def redraw(_event: object = None) -> None:
             width = max(frame.winfo_width(), 1)
             height = max(frame.winfo_height(), 1)
@@ -691,10 +755,10 @@ class App(ttk.Window):
             draw = ImageDraw.Draw(big)
             draw.rounded_rectangle(
                 [0, 0, width * factor - 1, height * factor - 1],
-                radius=radius * factor,
+                radius=radius_px * factor,
                 fill=fill,
                 outline=border_color,
-                width=border_width * factor,
+                width=border_px * factor,
                 corners=corners,
             )
             small = big.resize((width, height), Image.LANCZOS)
@@ -730,7 +794,7 @@ class App(ttk.Window):
         `dynamic=True`: подложка перерисовывается по `<Configure>`, поэтому
         не нужен список отложенных перерисовок, как у диалогов с
         фиксированной вёрсткой."""
-        box = ttk.Frame(parent, padding=(12, 8))
+        box = ttk.Frame(parent, padding=(_px(12), _px(8)))
         self._rounded_backdrop(
             box,
             _NEUTRAL_FILL,
@@ -792,25 +856,25 @@ class App(ttk.Window):
         ttk.Label(header, text=label_text, font=("", 10, "bold"), foreground=_NEUTRAL_TEXT).pack(
             side="left"
         )
-        badge = ttk.Label(header, font=("", 9, "bold"), padding=(8, 3))
+        badge = ttk.Label(header, font=("", 9, "bold"), padding=(_px(8), _px(3)))
         badge.pack(side="right")
 
         segments_row = ttk.Frame(parent)
-        segments_row.pack(fill="x", pady=(8, 0))
+        segments_row.pack(fill="x", pady=(_px(8), 0))
         segments: list[tk.Frame] = []
         for i in range(5):
-            segment = tk.Frame(segments_row, height=6, bg=_NEUTRAL_BORDER)
-            segment.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else 4, 0))
+            segment = tk.Frame(segments_row, height=_px(6), bg=_NEUTRAL_BORDER)
+            segment.pack(side="left", fill="x", expand=True, padx=(0 if i == 0 else _px(4), 0))
             segments.append(segment)
 
         caption = ttk.Label(
             parent,
             foreground=_SEARCH_PLACEHOLDER_COLOR,
             font=("", 9),
-            wraplength=320,
+            wraplength=_px(320),
             justify="left",
         )
-        caption.pack(fill="x", anchor="w", pady=(8, 0))
+        caption.pack(fill="x", anchor="w", pady=(_px(8), 0))
 
         def update(password: str) -> None:
             if not password:
@@ -949,7 +1013,7 @@ class App(ttk.Window):
         # акцентный цвет выделения (`_TREE_SELECTED_BG`) вместо
         # стандартного серого/синего цвета выделения темы, чтобы список
         # не выглядел как обычная таблица-эксель.
-        style.configure("Flat.Treeview", rowheight=40, font=("", 10), borderwidth=0)
+        style.configure("Flat.Treeview", rowheight=_px(40), font=("", 10), borderwidth=0)
         style.map(
             "Flat.Treeview",
             background=[("selected", _TREE_SELECTED_BG)],
@@ -993,7 +1057,7 @@ class App(ttk.Window):
         center = ttk.Frame(outer, style="UnlockBg.TFrame")
         center.pack(expand=True)
 
-        card = ttk.Frame(center, padding=(40, 36), borderwidth=1, relief="solid")
+        card = ttk.Frame(center, padding=(_px(40), _px(36)), borderwidth=1, relief="solid")
         card.pack()
 
         def field_label(parent: ttk.Frame, text: str) -> ttk.Label:
@@ -1003,7 +1067,7 @@ class App(ttk.Window):
             return ttk.Label(parent, text=text.upper(), font=("", 8, "bold"), bootstyle="secondary")
 
         if hasattr(self, "_icon_image_medium"):
-            ttk.Label(card, image=self._icon_image_medium).pack(pady=(0, 12))
+            ttk.Label(card, image=self._icon_image_medium).pack(pady=(0, _px(12)))
 
         # Без bootstyle="primary" — на референсе заголовок тёмный (обычный
         # цвет текста темы), а не синий; синий на экране разблокировки
@@ -1014,14 +1078,14 @@ class App(ttk.Window):
             text="Введите мастер-пароль, чтобы открыть хранилище",
             bootstyle="secondary",
             justify="center",
-        ).pack(pady=(2, 20))
+        ).pack(pady=(_px(2), _px(20)))
 
         field_label(card, "Файл хранилища").pack(fill="x", anchor="w")
         path_row = ttk.Frame(card)
-        path_row.pack(fill="x", pady=(2, 12))
+        path_row.pack(fill="x", pady=(_px(2), _px(12)))
         self._path_var = tk.StringVar(value=str(DEFAULT_VAULT_PATH))
         path_box, _path_entry = self._rounded_field(path_row, self._path_var, width=26)
-        path_box.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        path_box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
         self._styled(
             ttk.Button(path_row, text="Выберите файл", command=self._on_browse),
             self._neutral_style(),
@@ -1029,7 +1093,7 @@ class App(ttk.Window):
 
         field_label(card, "Мастер-пароль").pack(fill="x", anchor="w")
         pw_row = ttk.Frame(card)
-        pw_row.pack(fill="x", pady=(2, 4))
+        pw_row.pack(fill="x", pady=(_px(2), _px(4)))
         self._password_var = tk.StringVar()
         # show="*" — тот же смысл, что и getpass.getpass() в CLI (см.
         # vault/cli.py): вводимые символы не должны быть видны на экране.
@@ -1037,7 +1101,7 @@ class App(ttk.Window):
         # пользователю возможность сверить, что он ввёл, не расширяя это
         # доверие на любого, кто просто смотрит на экран через плечо.
         password_box, password_entry = self._rounded_field(pw_row, self._password_var, show="*")
-        password_box.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        password_box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
         password_entry.bind("<Return>", lambda _event: self._on_unlock())
         self._password_entry = password_entry
         self._password_visible = False
@@ -1052,12 +1116,12 @@ class App(ttk.Window):
                 _NEUTRAL_FILL,
                 _NEUTRAL_TEXT,
                 border_color=_NEUTRAL_BORDER,
-                padding=(8, 6),
+                padding=(_px(8), _px(6)),
             ),
         ).pack(side="left")
 
         self._unlock_status = ttk.Label(card, text="", bootstyle="danger")
-        self._unlock_status.pack(fill="x", pady=(4, 8))
+        self._unlock_status.pack(fill="x", pady=(_px(4), _px(8)))
 
         self._styled(
             ttk.Button(
@@ -1067,14 +1131,14 @@ class App(ttk.Window):
                 **self._icon_kwargs("unlock", "white"),
             ),
             self._accent_style(),
-        ).pack(fill="x", pady=(4, 16))
+        ).pack(fill="x", pady=(_px(4), _px(16)))
 
         divider_row = ttk.Frame(card)
-        divider_row.pack(fill="x", pady=(0, 12))
+        divider_row.pack(fill="x", pady=(0, _px(12)))
         ttk.Separator(divider_row).pack(side="left", fill="x", expand=True)
         ttk.Label(
             divider_row, text="НЕТ ХРАНИЛИЩА?", font=("", 8, "bold"), bootstyle="secondary"
-        ).pack(side="left", padx=8)
+        ).pack(side="left", padx=_px(8))
         ttk.Separator(divider_row).pack(side="left", fill="x", expand=True)
 
         self._styled(
@@ -1185,7 +1249,7 @@ class App(ttk.Window):
         page = ttk.Frame(self, style="Page.TFrame")
 
         card_wrap = ttk.Frame(page, style="Page.TFrame")
-        card_wrap.pack(fill="both", expand=True, padx=_CARD_MARGIN, pady=_CARD_MARGIN)
+        card_wrap.pack(fill="both", expand=True, padx=_px(_CARD_MARGIN), pady=_px(_CARD_MARGIN))
 
         # Один фрейм на панель, а не "внешний под скругление + внутренний
         # под цвет", как было раньше (раздел 10.8) — вложенный
@@ -1196,17 +1260,17 @@ class App(ttk.Window):
         # достаточно не залезать в сами угловые радиусы — обеспечивается
         # обычным `padding=`, которое у ttk.Frame и так уже отступает
         # контент от края независимо от способа заливки фона).
-        sidebar = ttk.Frame(card_wrap, style="Sidebar.TFrame", padding=(16, 20))
+        sidebar = ttk.Frame(card_wrap, style="Sidebar.TFrame", padding=(_px(16), _px(20)))
         sidebar.pack(side="left", fill="y")
         self._rounded_backdrop(
             sidebar, _SIDEBAR_BG, corners=(True, False, False, True), dynamic=True
         )
 
         brand_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
-        brand_row.pack(fill="x", pady=(0, 24))
+        brand_row.pack(fill="x", pady=(0, _px(24)))
         if hasattr(self, "_icon_image_small"):
             ttk.Label(brand_row, image=self._icon_image_small, style="Sidebar.TLabel").pack(
-                side="left", padx=(0, 10)
+                side="left", padx=(0, _px(10))
             )
         ttk.Label(
             brand_row, text=APP_TITLE, style="Sidebar.TLabel", font=("", 13, "bold")
@@ -1232,7 +1296,7 @@ class App(ttk.Window):
                 anchor="w",
                 surface=_SIDEBAR_BG,
             ),
-        ).pack(fill="x", pady=2)
+        ).pack(fill="x", pady=_px(2))
 
         sidebar_nav_style = self._rounded_button_style(
             "Rounded.SidebarNav", _SIDEBAR_BG, _SIDEBAR_TEXT, anchor="w", surface=_SIDEBAR_BG
@@ -1246,7 +1310,7 @@ class App(ttk.Window):
                     sidebar, text=text, command=command, **self._icon_kwargs(icon_name, "white")
                 ),
                 sidebar_nav_style,
-            ).pack(fill="x", pady=2)
+            ).pack(fill="x", pady=_px(2))
 
         self._styled(
             ttk.Button(
@@ -1263,7 +1327,7 @@ class App(ttk.Window):
             ),
         ).pack(side="bottom", fill="x")
 
-        content = ttk.Frame(card_wrap, padding=20)
+        content = ttk.Frame(card_wrap, padding=_px(20))
         content.pack(side="left", fill="both", expand=True)
         self._rounded_backdrop(content, "#ffffff", corners=(False, True, True, False), dynamic=True)
 
@@ -1288,7 +1352,7 @@ class App(ttk.Window):
                     toolbar_row, text=text, command=command, **self._icon_kwargs(icon_name, "dark")
                 ),
                 self._neutral_style(),
-            ).pack(side="left", padx=(0, 6))
+            ).pack(side="left", padx=(0, _px(6)))
 
         # Скруглённая "плитка" вокруг поля поиска — тот же приём, что и
         # у read-only полей в ViewEntryDialog (раздел 10.9): `_rounded_
@@ -1296,8 +1360,8 @@ class App(ttk.Window):
         # а небольшой отступ (`padding`) внутри рамки не даёт собственной
         # (прямоугольной) рамке `Entry` вылезти за скруглённые углы
         # подложки.
-        search_row = ttk.Frame(content, padding=(6, 4))
-        search_row.pack(fill="x", pady=(12, 8))
+        search_row = ttk.Frame(content, padding=(_px(6), _px(4)))
+        search_row.pack(fill="x", pady=(_px(12), _px(8)))
         self._rounded_backdrop(
             search_row,
             _NEUTRAL_FILL,
@@ -1321,7 +1385,7 @@ class App(ttk.Window):
         # ошибка провисела незамеченной несколько разделов).
         search_entry.configure(style="NeutralField.TEntry")
         search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
-        search_entry.pack(fill="x", ipady=4)
+        search_entry.pack(fill="x", ipady=_px(4))
         self._search_entry = search_entry
 
         def _on_search_focus_in(_event: object) -> None:
@@ -1343,7 +1407,7 @@ class App(ttk.Window):
         # добавляем скруглённую по всем четырём углам подложку СНАРУЖИ, с
         # небольшим отступом, чтобы прямые углы самого `Treeview` не
         # вылезали за скруглённые углы подложки.
-        table_wrap = ttk.Frame(content, padding=6)
+        table_wrap = ttk.Frame(content, padding=_px(6))
         table_wrap.pack(fill="both", expand=True)
         self._rounded_backdrop(
             table_wrap,
@@ -1369,11 +1433,11 @@ class App(ttk.Window):
         )
         self._tree.configure(style="Flat.Treeview")
         self._tree.heading("#0", text="")
-        self._tree.column("#0", width=44, stretch=False, anchor="center")
+        self._tree.column("#0", width=_px(44), stretch=False, anchor="center")
         self._tree.heading("site", text="Сайт")
         self._tree.heading("username", text="Логин")
-        self._tree.column("site", width=280)
-        self._tree.column("username", width=220)
+        self._tree.column("site", width=_px(280))
+        self._tree.column("username", width=_px(220))
         self._tree.tag_configure("evenrow", background=_TREE_ROW_COLORS["evenrow"])
         self._tree.tag_configure("oddrow", background=_TREE_ROW_COLORS["oddrow"])
         self._tree.pack(fill="both", expand=True)
@@ -1584,7 +1648,7 @@ class EntryDialog(ttk.Toplevel):
         self.transient(parent)
         self.result: tuple[str, str, str] | None = None
 
-        form = ttk.Frame(self, padding=16)
+        form = ttk.Frame(self, padding=_px(16))
         form.pack(fill="both", expand=True)
 
         self._site_var = tk.StringVar()
@@ -1597,9 +1661,9 @@ class EntryDialog(ttk.Toplevel):
             ("Пароль:", self._password_var, "*"),
         )
         for row, (label, var, show) in enumerate(fields):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=_px(4))
             box, entry = parent._rounded_field(form, var, show=show, width=28)
-            box.grid(row=row, column=1, sticky="ew", pady=4, padx=(8, 0))
+            box.grid(row=row, column=1, sticky="ew", pady=_px(4), padx=(_px(8), 0))
             if row == 0:
                 entry.focus_set()
         form.columnconfigure(1, weight=1)
@@ -1612,7 +1676,7 @@ class EntryDialog(ttk.Toplevel):
                 **parent._icon_kwargs("dice", "dark"),
             ),
             parent._neutral_style(),
-        ).grid(row=len(fields), column=1, sticky="e", pady=(4, 0))
+        ).grid(row=len(fields), column=1, sticky="e", pady=(_px(4), 0))
 
         # Оценщик надёжности (assistant.generator.explain_password) —
         # перенесён сюда из отдельного GeneratorDialog: важно видеть
@@ -1622,11 +1686,11 @@ class EntryDialog(ttk.Toplevel):
         # и когда набран вручную, и когда подставлен "Сгенерировать".
         self._strength_var = tk.StringVar()
         ttk.Label(
-            form, textvariable=self._strength_var, wraplength=320, bootstyle="secondary"
-        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            form, textvariable=self._strength_var, wraplength=_px(320), bootstyle="secondary"
+        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(_px(6), 0))
         self._password_var.trace_add("write", self._update_strength)
 
-        buttons = ttk.Frame(self, padding=(16, 0, 16, 16))
+        buttons = ttk.Frame(self, padding=(_px(16), 0, _px(16), _px(16)))
         buttons.pack(fill="x")
         parent._styled(
             ttk.Button(buttons, text="Отмена", command=self.destroy),
@@ -1640,7 +1704,7 @@ class EntryDialog(ttk.Toplevel):
                 **parent._icon_kwargs("save", "white"),
             ),
             parent._accent_style(),
-        ).pack(side="right", padx=(0, 8))
+        ).pack(side="right", padx=(0, _px(8)))
 
         self.place_window_center()
         self.grab_set()
@@ -1687,7 +1751,7 @@ class CreateVaultDialog(ttk.Toplevel):
         self.result: str | None = None
         pending_backdrops: list[Callable[[], None]] = []
 
-        content = ttk.Frame(self, padding=24)
+        content = ttk.Frame(self, padding=_px(24))
         content.pack(fill="both", expand=True)
 
         # --- Заголовок: иконка приложения + название + подпись ---
@@ -1703,7 +1767,7 @@ class CreateVaultDialog(ttk.Toplevel):
         header = ttk.Frame(content)
         header.pack(fill="x")
         if hasattr(parent, "_icon_image_medium"):
-            ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, 12))
+            ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, _px(12)))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="both", expand=True)
         ttk.Label(title_stack, text="Новое хранилище", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(
@@ -1719,7 +1783,7 @@ class CreateVaultDialog(ttk.Toplevel):
         # --- Поле мастер-пароля + кнопка-"глаз" (тот же приём, что и на
         # экране разблокировки, раздел 10.7) ---
         ttk.Label(content, text="МАСТЕР-ПАРОЛЬ", font=("", 8, "bold"), bootstyle="secondary").pack(
-            fill="x", anchor="w", pady=(18, 2)
+            fill="x", anchor="w", pady=(_px(18), _px(2))
         )
         self._password_var = tk.StringVar()
         # Поля мастер-пароля/подтверждения заведомо ýже и ниже, чем
@@ -1741,7 +1805,7 @@ class CreateVaultDialog(ttk.Toplevel):
         pw_container = ttk.Frame(content)
         pw_container.pack(anchor="w")
         pw_box = ttk.Frame(
-            pw_container, padding=(10, 6), width=_MASTER_FIELD_WIDTH, height=_MASTER_FIELD_HEIGHT
+            pw_container, padding=(_px(10), _px(6)), width=_px(_MASTER_FIELD_WIDTH), height=_px(_MASTER_FIELD_HEIGHT)
         )
         pw_box.pack_propagate(False)
         pw_box.pack(side="left")
@@ -1777,10 +1841,10 @@ class CreateVaultDialog(ttk.Toplevel):
         # (9-patch) фон, поэтому корректно заполняет любой заданный
         # размер, не только свой "естественный" под текст/иконку.
         eye_button_box = ttk.Frame(
-            pw_container, width=_MASTER_FIELD_HEIGHT, height=_MASTER_FIELD_HEIGHT
+            pw_container, width=_px(_MASTER_FIELD_HEIGHT), height=_px(_MASTER_FIELD_HEIGHT)
         )
         eye_button_box.pack_propagate(False)
-        eye_button_box.pack(side="left", padx=(8, 0))
+        eye_button_box.pack(side="left", padx=(_px(8), 0))
         # Отдельный стиль ("Rounded.IconToggleSquare"), а НЕ "Rounded.
         # IconToggle" — тот занят другими кнопками-"глазами" приложения
         # (экран разблокировки и т.п.) с их собственным `padding=(8, 6)`,
@@ -1815,7 +1879,7 @@ class CreateVaultDialog(ttk.Toplevel):
 
         # --- Живая оценка надёжности мастер-пароля ---
         strength_section = ttk.Frame(content)
-        strength_section.pack(fill="x", pady=(12, 0))
+        strength_section.pack(fill="x", pady=(_px(12), 0))
         self._update_strength = parent._build_strength_meter(strength_section)
         self._password_var.trace_add(
             "write", lambda *_args: self._update_strength(self._password_var.get())
@@ -1823,11 +1887,11 @@ class CreateVaultDialog(ttk.Toplevel):
 
         # --- Подтверждение ---
         ttk.Label(content, text="ПОДТВЕРЖДЕНИЕ", font=("", 8, "bold"), bootstyle="secondary").pack(
-            fill="x", anchor="w", pady=(18, 2)
+            fill="x", anchor="w", pady=(_px(18), _px(2))
         )
         self._confirm_var = tk.StringVar()
         confirm_box = ttk.Frame(
-            content, padding=(10, 6), width=_MASTER_FIELD_WIDTH, height=_MASTER_FIELD_HEIGHT
+            content, padding=(_px(10), _px(6)), width=_px(_MASTER_FIELD_WIDTH), height=_px(_MASTER_FIELD_HEIGHT)
         )
         confirm_box.pack_propagate(False)
         confirm_box.pack(anchor="w")
@@ -1848,11 +1912,11 @@ class CreateVaultDialog(ttk.Toplevel):
         confirm_entry.bind("<Return>", lambda _event: self._on_submit())
 
         self._status_label = ttk.Label(
-            content, text="", bootstyle="danger", wraplength=320, justify="left"
+            content, text="", bootstyle="danger", wraplength=_px(320), justify="left"
         )
-        self._status_label.pack(fill="x", pady=(10, 0))
+        self._status_label.pack(fill="x", pady=(_px(10), 0))
 
-        buttons = ttk.Frame(self, padding=(24, 0, 24, 24))
+        buttons = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
         buttons.pack(fill="x")
         # "Создать" (с иконкой) и "Отмена" (без) сами по себе имели бы
         # разную ширину — по запросу пользователя обе кнопки заведены
@@ -1870,7 +1934,7 @@ class CreateVaultDialog(ttk.Toplevel):
                 **parent._icon_kwargs("plus", "white"),
             ),
             parent._accent_style(),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ).grid(row=0, column=0, sticky="ew", padx=(0, _px(8)))
         parent._styled(
             ttk.Button(buttons, text="Отмена", command=self.destroy),
             parent._neutral_style(),
@@ -1943,18 +2007,18 @@ class ViewEntryDialog(ttk.Toplevel):
         # объяснение бага в докстринге `_rounded_backdrop`).
         pending_backdrops: list[Callable[[], None]] = []
 
-        header = ttk.Frame(self, padding=(20, 14))
+        header = ttk.Frame(self, padding=(_px(20), _px(14)))
         header.pack(fill="x")
         pending_backdrops.append(
             parent._rounded_backdrop(header, _SIDEBAR_BG, corners=(True, True, False, False), surface="#ffffff")
         )
         if hasattr(parent, "_icon_image_small"):
             ttk.Label(header, image=parent._icon_image_small, style="Sidebar.TLabel").pack(
-                side="left", padx=(0, 10)
+                side="left", padx=(0, _px(10))
             )
         ttk.Label(header, text=title, style="Sidebar.TLabel", font=("", 12, "bold")).pack(side="left")
 
-        body = ttk.Frame(self, padding=20)
+        body = ttk.Frame(self, padding=_px(20))
         body.pack(fill="both", expand=True)
         pending_backdrops.append(
             parent._rounded_backdrop(body, "#ffffff", corners=(False, False, True, True), surface="#ffffff")
@@ -1965,16 +2029,16 @@ class ViewEntryDialog(ttk.Toplevel):
             _NEUTRAL_FILL,
             _NEUTRAL_TEXT,
             border_color=_NEUTRAL_BORDER,
-            padding=(8, 6),
+            padding=(_px(8), _px(6)),
         )
 
         def field_row(label_text: str, value: str) -> tuple[ttk.Label, ttk.Frame]:
             ttk.Label(body, text=label_text.upper(), font=("", 8, "bold"), bootstyle="secondary").pack(
-                fill="x", anchor="w", pady=(10, 2)
+                fill="x", anchor="w", pady=(_px(10), _px(2))
             )
             row = ttk.Frame(body)
             row.pack(fill="x")
-            box = ttk.Frame(row, padding=(10, 8))
+            box = ttk.Frame(row, padding=(_px(10), _px(8)))
             box.pack(side="left", fill="x", expand=True)
             pending_backdrops.append(
                 parent._rounded_backdrop(
@@ -1995,7 +2059,7 @@ class ViewEntryDialog(ttk.Toplevel):
             parent._styled(
                 ttk.Button(row, command=command, **parent._icon_kwargs(icon_name, "dark")),
                 icon_button_style,
-            ).pack(side="left", padx=(6, 0))
+            ).pack(side="left", padx=(_px(6), 0))
 
         field_row("Сайт", entry["site"])
 
@@ -2018,7 +2082,7 @@ class ViewEntryDialog(ttk.Toplevel):
         created_at = datetime.strptime(entry["created_at"], CREATED_AT_FORMAT)
         field_row("Создан / изменён", created_at.strftime("%d.%m.%Y"))
 
-        buttons = ttk.Frame(self, padding=(20, 0, 20, 20))
+        buttons = ttk.Frame(self, padding=(_px(20), 0, _px(20), _px(20)))
         buttons.pack(fill="x")
         parent._styled(
             ttk.Button(buttons, text="Закрыть", command=self.destroy),
@@ -2077,15 +2141,15 @@ class AuditDialog(ttk.Toplevel):
         super().__init__(title="Советник по безопасности", master=parent, resizable=(False, False), iconphoto=None)
         self.transient(parent)
 
-        content = ttk.Frame(self, padding=24)
+        content = ttk.Frame(self, padding=_px(24))
         content.pack(fill="both", expand=True)
 
         # --- Заголовок: иконка-бейдж + название + подпись (тот же
         # приём, что и в GeneratorDialog/CreateVaultDialog) ---
         header = ttk.Frame(content)
         header.pack(fill="x")
-        badge = tk.Frame(header, width=42, height=42, bd=0, highlightthickness=0)
-        badge.pack(side="left", padx=(0, 12))
+        badge = tk.Frame(header, width=_px(42), height=_px(42), bd=0, highlightthickness=0)
+        badge.pack(side="left", padx=(0, _px(12)))
         badge_image = parent._rounded_image(42, _ACCENT, "#ffffff")
         tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
             x=0, y=0, relwidth=1, relheight=1
@@ -2111,7 +2175,7 @@ class AuditDialog(ttk.Toplevel):
             # Тот же смысл, что и "Явных проблем не найдено." в
             # текстовом отчёте CLI (assistant.advisor.format_report) —
             # только оформлено как часть карточки, а не голая строка.
-            empty_box = ttk.Frame(content, padding=(0, 28))
+            empty_box = ttk.Frame(content, padding=(0, _px(28)))
             empty_box.pack(fill="both", expand=True)
             ttk.Label(
                 empty_box, text="Явных проблем не найдено", font=("", 12, "bold"), justify="center"
@@ -2122,7 +2186,7 @@ class AuditDialog(ttk.Toplevel):
                 foreground=_SEARCH_PLACEHOLDER_COLOR,
                 font=("", 9),
                 justify="center",
-            ).pack(pady=(4, 0))
+            ).pack(pady=(_px(4), 0))
         else:
             # --- Бейджи-счётчики по категориям (раздел 10.24) —
             # намеренно "Категория: N" без склонения числительного
@@ -2133,7 +2197,7 @@ class AuditDialog(ttk.Toplevel):
             # "устаревший" разные), не оправданная для трёх бейджей в
             # одном диалоге (раздел 7 — не усложнять сверх задачи).
             badges_row = ttk.Frame(content)
-            badges_row.pack(fill="x", pady=(18, 0))
+            badges_row.pack(fill="x", pady=(_px(18), 0))
 
             def add_chip(count: int, label: str, color: str) -> None:
                 if count == 0:
@@ -2144,8 +2208,8 @@ class AuditDialog(ttk.Toplevel):
                     background=_mix(color, "#ffffff", 0.85),
                     foreground=color,
                     font=("", 9, "bold"),
-                    padding=(10, 4),
-                ).pack(side="left", padx=(0, 8))
+                    padding=(_px(10), _px(4)),
+                ).pack(side="left", padx=(0, _px(8)))
 
             add_chip(len(report.reused_groups), "Повторы", _ADVISOR_REUSED_COLOR)
             add_chip(len(report.weak_entries), "Слабые", _ADVISOR_WEAK_COLOR)
@@ -2163,9 +2227,9 @@ class AuditDialog(ttk.Toplevel):
             # быть длиннее экрана; раньше это же делал `ScrolledText`
             # автоматически.
             feed_wrap = ttk.Frame(content)
-            feed_wrap.pack(fill="both", expand=True, pady=(16, 0))
+            feed_wrap.pack(fill="both", expand=True, pady=(_px(16), 0))
             feed_canvas = tk.Canvas(
-                feed_wrap, width=420, height=320, highlightthickness=0, bd=0, background="#ffffff"
+                feed_wrap, width=_px(420), height=_px(320), highlightthickness=0, bd=0, background="#ffffff"
             )
             feed_scroll = ttk.Scrollbar(feed_wrap, orient="vertical", command=feed_canvas.yview)
             feed_canvas.configure(yscrollcommand=feed_scroll.set)
@@ -2209,7 +2273,7 @@ class AuditDialog(ttk.Toplevel):
                     text=text.upper(),
                     font=("", 8, "bold"),
                     foreground=_SEARCH_PLACEHOLDER_COLOR,
-                ).pack(fill="x", anchor="w", pady=(0 if is_first_section else 14, 6))
+                ).pack(fill="x", anchor="w", pady=(0 if is_first_section else _px(14), _px(6)))
                 is_first_section = False
 
             def add_feed_row(color: str, build_body) -> None:
@@ -2217,11 +2281,11 @@ class AuditDialog(ttk.Toplevel):
                 row.pack(fill="x")
                 tk.Label(
                     row, image=parent._advisor_marker(color), bd=0, highlightthickness=0
-                ).pack(side="left", padx=(2, 10), pady=(6, 0))
+                ).pack(side="left", padx=(_px(2), _px(10)), pady=(_px(6), 0))
                 body = ttk.Frame(row)
                 body.pack(side="left", fill="x", expand=True)
                 build_body(body)
-                ttk.Separator(feed_frame).pack(fill="x", pady=(8, 8))
+                ttk.Separator(feed_frame).pack(fill="x", pady=(_px(8), _px(8)))
 
             def add_issue_row(color: str, site: str, username: str, detail: str) -> None:
                 def build(body: ttk.Frame) -> None:
@@ -2232,8 +2296,8 @@ class AuditDialog(ttk.Toplevel):
                         line1, text=f"  {username}", foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
                     ).pack(side="left")
                     ttk.Label(
-                        body, text=detail, font=("", 9), wraplength=340, justify="left"
-                    ).pack(anchor="w", pady=(2, 0))
+                        body, text=detail, font=("", 9), wraplength=_px(340), justify="left"
+                    ).pack(anchor="w", pady=(_px(2), 0))
 
                 add_feed_row(color, build)
 
@@ -2245,9 +2309,9 @@ class AuditDialog(ttk.Toplevel):
                         text=f"тот же пароль: {', '.join(group[1:])}",
                         foreground=_SEARCH_PLACEHOLDER_COLOR,
                         font=("", 9),
-                        wraplength=340,
+                        wraplength=_px(340),
                         justify="left",
-                    ).pack(anchor="w", pady=(2, 0))
+                    ).pack(anchor="w", pady=(_px(2), 0))
 
                 add_feed_row(color, build)
 
@@ -2270,7 +2334,7 @@ class AuditDialog(ttk.Toplevel):
                         _ADVISOR_OLD_COLOR, issue.site, issue.username, "; ".join(issue.reasons)
                     )
 
-        footer = ttk.Frame(self, padding=(24, 0, 24, 24))
+        footer = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
         footer.pack(fill="x")
         parent._styled(
             ttk.Button(footer, text="Закрыть", command=self.destroy),
@@ -2317,14 +2381,14 @@ class GeneratorDialog(ttk.Toplevel):
         self._use_digits = tk.BooleanVar(value=True)
         self._use_symbols = tk.BooleanVar(value=True)
 
-        content = ttk.Frame(self, padding=24)
+        content = ttk.Frame(self, padding=_px(24))
         content.pack(fill="both", expand=True)
 
         # --- Заголовок: иконка-бейдж + название + подпись ---
         header = ttk.Frame(content)
         header.pack(fill="x")
-        badge = tk.Frame(header, width=42, height=42, bd=0, highlightthickness=0)
-        badge.pack(side="left", padx=(0, 12))
+        badge = tk.Frame(header, width=_px(42), height=_px(42), bd=0, highlightthickness=0)
+        badge.pack(side="left", padx=(0, _px(12)))
         badge_image = parent._rounded_image(42, _ACCENT, "#ffffff")
         tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
             x=0, y=0, relwidth=1, relheight=1
@@ -2347,8 +2411,8 @@ class GeneratorDialog(ttk.Toplevel):
         ).pack(anchor="w")
 
         # --- Сгенерированный пароль ---
-        password_box = ttk.Frame(content, padding=(14, 12))
-        password_box.pack(fill="x", pady=(18, 0))
+        password_box = ttk.Frame(content, padding=(_px(14), _px(12)))
+        password_box.pack(fill="x", pady=(_px(18), 0))
         pending_backdrops.append(
             parent._rounded_backdrop(
                 password_box,
@@ -2375,21 +2439,21 @@ class GeneratorDialog(ttk.Toplevel):
             _NEUTRAL_FILL,
             _NEUTRAL_TEXT,
             border_color=_NEUTRAL_BORDER,
-            padding=(8, 6),
+            padding=(_px(8), _px(6)),
         )
         parent._styled(
             ttk.Button(password_box, command=self._on_copy_click, **parent._icon_kwargs("copy", "dark")),
             icon_button_style,
-        ).pack(side="left", padx=(8, 0))
+        ).pack(side="left", padx=(_px(8), 0))
 
         # --- Надёжность: подпись + бейдж + сегментированная шкала ---
         # Разметка вынесена в App._build_strength_meter (раздел 10.18) —
         # тот же виджет использует CreateVaultDialog для мастер-пароля.
         strength_section = ttk.Frame(content)
-        strength_section.pack(fill="x", pady=(18, 0))
+        strength_section.pack(fill="x", pady=(_px(18), 0))
         self._update_strength = parent._build_strength_meter(strength_section)
 
-        ttk.Separator(content).pack(fill="x", pady=18)
+        ttk.Separator(content).pack(fill="x", pady=_px(18))
 
         # --- Длина: подпись + бейдж со значением + слайдер ---
         length_section = ttk.Frame(content)
@@ -2405,16 +2469,16 @@ class GeneratorDialog(ttk.Toplevel):
             background=_NEUTRAL_FILL,
             foreground=_ACCENT,
             font=("", 9, "bold"),
-            padding=(8, 3),
+            padding=(_px(8), _px(3)),
         )
         self._length_badge.pack(side="right")
         length_scale = ttk.Scale(
             length_section, from_=8, to=64, orient="horizontal", command=self._on_length_change
         )
         length_scale.set(DEFAULT_GENERATED_LENGTH)
-        length_scale.pack(fill="x", pady=(10, 0))
+        length_scale.pack(fill="x", pady=(_px(10), 0))
 
-        ttk.Separator(content).pack(fill="x", pady=18)
+        ttk.Separator(content).pack(fill="x", pady=_px(18))
 
         # --- Наборы символов: иконка-чип + подпись + переключатель ---
         toggles = (
@@ -2425,7 +2489,7 @@ class GeneratorDialog(ttk.Toplevel):
         )
         for chip_text, label_text, var in toggles:
             row = ttk.Frame(content)
-            row.pack(fill="x", pady=5)
+            row.pack(fill="x", pady=_px(5))
             ttk.Label(
                 row,
                 text=chip_text,
@@ -2434,10 +2498,10 @@ class GeneratorDialog(ttk.Toplevel):
                 background=_NEUTRAL_FILL,
                 foreground=_NEUTRAL_TEXT,
                 font=("Consolas", 9, "bold"),
-                padding=(0, 6),
+                padding=(0, _px(6)),
             ).pack(side="left")
             ttk.Label(row, text=label_text, foreground=_NEUTRAL_TEXT, font=("", 10)).pack(
-                side="left", padx=(10, 0)
+                side="left", padx=(_px(10), 0)
             )
             # bootstyle="round-toggle" — современный переключатель вместо
             # классического квадратного чекбокса; command сразу
@@ -2450,7 +2514,7 @@ class GeneratorDialog(ttk.Toplevel):
             )
 
         # --- Действия ---
-        buttons = ttk.Frame(self, padding=(24, 0, 24, 24))
+        buttons = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
         buttons.pack(fill="x")
         parent._styled(
             ttk.Button(buttons, command=self._on_generate, **parent._icon_kwargs("dice", "dark")),
@@ -2464,7 +2528,7 @@ class GeneratorDialog(ttk.Toplevel):
                 **parent._icon_kwargs("copy", "dark"),
             ),
             parent._neutral_style(),
-        ).pack(side="left", padx=(8, 0))
+        ).pack(side="left", padx=(_px(8), 0))
         parent._styled(
             ttk.Button(
                 buttons,
@@ -2473,7 +2537,7 @@ class GeneratorDialog(ttk.Toplevel):
                 **parent._icon_kwargs("save", "white"),
             ),
             parent._accent_style(),
-        ).pack(side="right", padx=(16, 0))
+        ).pack(side="right", padx=(_px(16), 0))
 
         self._on_generate()
         self.update_idletasks()
