@@ -391,3 +391,57 @@ def test_dialog_gets_close_only_titlebar(app):
         assert set(bars[0]._buttons) == {"close"}
     finally:
         dialog.destroy()
+
+
+# --- Быстрая отрисовка скруглённых подложек (раздел 10.34) -----------------
+
+
+def _reference_rounded(width, height, fill, surface, radius, corners, border_color, border_px):
+    from PIL import Image, ImageDraw
+
+    f = 4
+    big = Image.new("RGB", (width * f, height * f), surface)
+    ImageDraw.Draw(big).rounded_rectangle(
+        [0, 0, width * f - 1, height * f - 1],
+        radius=radius * f,
+        fill=fill,
+        outline=border_color,
+        width=border_px * f,
+        corners=corners,
+    )
+    return big.resize((width, height), Image.LANCZOS)
+
+
+@pytest.mark.parametrize("corners", [(True,) * 4, (True, False, False, True), (False,) * 4])
+@pytest.mark.parametrize("size", [(300, 200), (1100, 900), (97, 400)])
+def test_fast_rounded_render_matches_full_supersampled_render(corners, size):
+    from PIL import ImageChops
+
+    for radius, border_px, border_color in ((20, 0, None), (10, 1, "#dfe4ee")):
+        fast = guiapp._render_rounded_rect(*size, "#eef1f8", "#ffffff", radius, corners, border_color, border_px)
+        slow = _reference_rounded(*size, "#eef1f8", "#ffffff", radius, corners, border_color, border_px)
+        assert fast.size == slow.size
+        extrema = ImageChops.difference(fast, slow).getextrema()
+        assert max(high for _low, high in extrema) <= 2
+
+
+def test_backdrop_redraw_is_coalesced_during_resize(app):
+    # Серия <Configure> при растягивании окна не должна давать по
+    # перерисовке на каждое событие — иначе интерфейс "виснет" (10.34).
+    calls = []
+    original = guiapp._render_rounded_rect
+
+    def counting(*args, **kwargs):
+        calls.append(args[:2])
+        return original(*args, **kwargs)
+
+    guiapp._render_rounded_rect = counting
+    try:
+        app.update()
+        calls.clear()
+        for step in range(15):
+            app.geometry(f"{900 + step * 7}x{600 + step * 5}")
+        app.update()
+    finally:
+        guiapp._render_rounded_rect = original
+    assert len(calls) < 15 * 4  # раньше: по одной перерисовке на КАЖДОЕ событие каждой панели

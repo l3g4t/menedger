@@ -270,6 +270,66 @@ def _avatar_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
             continue
     return ImageFont.load_default(size=size)
 
+def _render_rounded_rect(
+    width: int,
+    height: int,
+    fill: str,
+    surface: str,
+    radius_px: int,
+    corners: tuple[bool, bool, bool, bool],
+    border_color: str | None,
+    border_px: int,
+) -> Image.Image:
+    """Скруглённый прямоугольник width×height для подложек (раздел 10.34).
+
+    Раньше рисовался целиком в 4-кратном размере и уменьшался `LANCZOS` —
+    для панели главного экрана (на Windows с масштабом 150% это ~1100×900
+    px) выходило ~0,4 с НА КАЖДОЕ изменение размера окна, и при растягивании
+    за уголок или "развернуть" интерфейс выглядел полностью зависшим.
+    Теперь сглаженными (суперсэмплинг 4×) рисуются только четыре угловые
+    ячейки, а прямые рёбра и середина — это одноцветные полосы, которые
+    просто растягиваются (`NEAREST`) и заливаются: стоимость почти не
+    зависит от размера окна, результат пиксель-в-пиксель тот же."""
+
+    def draw_direct(w: int, h: int) -> Image.Image:
+        factor = 4
+        big = Image.new("RGB", (w * factor, h * factor), surface)
+        ImageDraw.Draw(big).rounded_rectangle(
+            [0, 0, w * factor - 1, h * factor - 1],
+            radius=radius_px * factor,
+            fill=fill,
+            outline=border_color,
+            width=border_px * factor,
+            corners=corners,
+        )
+        return big.resize((w, h), Image.LANCZOS)
+
+    cell = radius_px + border_px + 2
+    if width < 2 * cell + 2 or height < 2 * cell + 2:
+        return draw_direct(width, height)
+
+    ref = draw_direct(2 * cell + 1, 2 * cell + 1)
+    result = Image.new("RGB", (width, height), ref.getpixel((cell, cell)))
+    # Углы.
+    result.paste(ref.crop((0, 0, cell, cell)), (0, 0))
+    result.paste(ref.crop((cell + 1, 0, 2 * cell + 1, cell)), (width - cell, 0))
+    result.paste(ref.crop((0, cell + 1, cell, 2 * cell + 1)), (0, height - cell))
+    result.paste(ref.crop((cell + 1, cell + 1, 2 * cell + 1, 2 * cell + 1)), (width - cell, height - cell))
+    # Рёбра: одна центральная строка/столбец ячейки, растянутые вдоль стороны.
+    span_w, span_h = width - 2 * cell, height - 2 * cell
+    result.paste(ref.crop((cell, 0, cell + 1, cell)).resize((span_w, cell), Image.NEAREST), (cell, 0))
+    result.paste(
+        ref.crop((cell, cell + 1, cell + 1, 2 * cell + 1)).resize((span_w, cell), Image.NEAREST),
+        (cell, height - cell),
+    )
+    result.paste(ref.crop((0, cell, cell, cell + 1)).resize((cell, span_h), Image.NEAREST), (0, cell))
+    result.paste(
+        ref.crop((cell + 1, cell, 2 * cell + 1, cell + 1)).resize((cell, span_h), Image.NEAREST),
+        (width - cell, cell),
+    )
+    return result
+
+
 # ----------------------------------------------------------------------
 # Собственная строка заголовка окна (раздел 10.33)
 # ----------------------------------------------------------------------
@@ -1222,18 +1282,9 @@ class App(ttk.Window):
             if drawn_size and drawn_size[0] == (width, height):
                 return
             drawn_size[:] = [(width, height)]
-            factor = 4
-            big = Image.new("RGB", (width * factor, height * factor), surface)
-            draw = ImageDraw.Draw(big)
-            draw.rounded_rectangle(
-                [0, 0, width * factor - 1, height * factor - 1],
-                radius=radius_px * factor,
-                fill=fill,
-                outline=border_color,
-                width=border_px * factor,
-                corners=corners,
+            small = _render_rounded_rect(
+                width, height, fill, surface, radius_px, corners, border_color, border_px
             )
-            small = big.resize((width, height), Image.LANCZOS)
             photo = ImageTk.PhotoImage(small)
             backdrop.configure(image=photo)
             backdrop.photo = photo
@@ -1245,7 +1296,25 @@ class App(ttk.Window):
         # `tk.Label` показывал её центр (плоская заливка без углов и
         # рамки). Перерисовка по событию подхватывает ФИНАЛЬНЫЙ размер
         # независимо от порядка пересчёта геометрии.
-        frame.bind("<Configure>", redraw, add="+")
+        # Серия `<Configure>` (растягивание окна) схлопывается в ОДНУ
+        # перерисовку: размер читается уже в момент её выполнения, а
+        # `after_idle` срабатывает, только когда очередь событий пуста.
+        pending: list[str] = []
+
+        def schedule(_event: object = None) -> None:
+            if pending:
+                return
+
+            def run() -> None:
+                pending.clear()
+                try:
+                    redraw()
+                except tk.TclError:
+                    pass  # виджет уничтожен до срабатывания
+
+            pending.append(frame.after_idle(run))
+
+        frame.bind("<Configure>", schedule, add="+")
         if dynamic:
             return None
         return redraw
