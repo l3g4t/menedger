@@ -445,3 +445,24 @@ def test_backdrop_redraw_is_coalesced_during_resize(app):
     finally:
         guiapp._render_rounded_rect = original
     assert len(calls) < 15 * 4  # раньше: по одной перерисовке на КАЖДОЕ событие каждой панели
+
+
+# --- Диагностика зависаний (раздел 10.35) ----------------------------------
+
+
+def test_debug_tools_write_event_log_and_arm_watchdog(app, tmp_path, monkeypatch):
+    import faulthandler
+
+    monkeypatch.chdir(tmp_path)
+    app._start_debug_tools()
+    try:
+        app.update()
+        app.event_generate("<ButtonPress-1>", x=3, y=3)
+        app.update()
+        app._debug_log.flush()
+        text = (tmp_path / "menedger_debug.log").read_text(encoding="utf-8")
+        assert "=== запуск" in text
+        assert "ButtonPress 1" in text
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+        app._debug_log.close()

@@ -21,6 +21,7 @@ gui.app — главное окно менеджера паролей.
 from __future__ import annotations
 
 import base64
+import faulthandler
 import io
 import os
 import sys
@@ -643,6 +644,7 @@ class App(ttk.Window):
 
         if os.environ.get("MENEDGER_DEBUG"):
             self.after(800, lambda: self._debug_report_images("старт"))
+            self._start_debug_tools()
 
     # ------------------------------------------------------------------
     # Собственная рамка окна (раздел 10.33)
@@ -822,6 +824,59 @@ class App(ttk.Window):
                 pass
 
         dialog.after(80, focus)
+
+    def _start_debug_tools(self) -> None:
+        """Диагностика зависаний (раздел 10.35), включается `MENEDGER_DEBUG=1`.
+
+        Пишет в файл `menedger_debug.log` (рабочая папка, при ошибке — папка
+        временных файлов; у `.exe` без консоли stderr недоступен):
+        - журнал событий: нажатия мыши (какой виджет), фокус, показ/скрытие
+          окна, изменение размера главного окна — с отметкой времени;
+        - "сторожа": если цикл событий не отвечает больше 3 секунд,
+          `faulthandler` сам выгружает стек Python ВСЕХ потоков — это точное
+          место, где застряла программа."""
+        import tempfile
+        import time as _time
+
+        log_path = Path("menedger_debug.log")
+        try:
+            log_file = open(log_path, "a", buffering=1, encoding="utf-8")
+        except OSError:
+            log_path = Path(tempfile.gettempdir()) / "menedger_debug.log"
+            log_file = open(log_path, "a", buffering=1, encoding="utf-8")
+        self._debug_log = log_file
+        started = _time.time()
+
+        def log(message: str) -> None:
+            log_file.write(f"[{_time.time() - started:8.3f}] {message}\n")
+
+        log(f"=== запуск, Python {sys.version.split()[0]}, platform {sys.platform}, "
+            f"UI_SCALE {_UI_SCALE}, native_frame={self._native_frame}")
+        print(f"MENEDGER_DEBUG: журнал пишется в {log_path.resolve()}", file=sys.stderr)
+
+        def describe(event: tk.Event) -> str:
+            widget = event.widget
+            try:
+                return f"{widget.winfo_class()} {widget}"
+            except Exception:
+                return str(widget)
+
+        self.bind_all("<ButtonPress>", lambda e: log(f"ButtonPress {e.num} {describe(e)}"), add="+")
+        self.bind_all("<ButtonRelease>", lambda e: log(f"ButtonRelease {e.num} {describe(e)}"), add="+")
+        self.bind_all("<FocusIn>", lambda e: log(f"FocusIn {describe(e)}"), add="+")
+        self.bind_all("<FocusOut>", lambda e: log(f"FocusOut {describe(e)}"), add="+")
+        for sequence in ("<Map>", "<Unmap>"):
+            self.bind(sequence, lambda e, s=sequence: log(f"{s} {describe(e)}") if e.widget is self else None, add="+")
+        self.bind("<Configure>", lambda e: log(f"Configure root {e.width}x{e.height}") if e.widget is self else None, add="+")
+
+        # Сторож: пока цикл событий жив, каждые 500 мс взводит таймер заново;
+        # если цикл встал — через 3 с таймер срабатывает и пишет стек.
+        def heartbeat() -> None:
+            faulthandler.cancel_dump_traceback_later()
+            faulthandler.dump_traceback_later(3, repeat=True, file=log_file)
+            self.after(500, heartbeat)
+
+        heartbeat()
 
     def _debug_report_images(self, label: str) -> None:
         """Диагностика картинок (раздел 10.30), включается переменной
