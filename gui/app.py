@@ -66,6 +66,12 @@ APP_TITLE = "Хранилище тайн"
 # доступном любому другому процессу в системе.
 CLIPBOARD_CLEAR_DELAY_MS = 20_000
 
+def _debug_enabled(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
+    """Отладочный журнал (раздел 10.35): `MENEDGER_DEBUG=1` или флаг
+    `--debug` (удобно для ярлыка `.exe`, где переменную не задать)."""
+    return bool(env.get("MENEDGER_DEBUG")) or "--debug" in argv
+
+
 def _gui_resource_dir() -> Path:
     """Папка с ресурсами GUI (иконки). В обычном запуске это папка этого
     файла; в PyInstaller-сборке `__file__` точки входа указывает в корень
@@ -664,9 +670,12 @@ class App(ttk.Window):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        if os.environ.get("MENEDGER_DEBUG"):
+        if _debug_enabled(os.environ, sys.argv):
             self.after(800, lambda: self._debug_report_images("старт"))
             self._start_debug_tools()
+            # У .exe без консоли stderr не виден — путь к журналу показываем в
+            # окне, иначе его негде узнать (раздел 10.42).
+            self.after(1200, self._announce_debug_log)
 
     # ------------------------------------------------------------------
     # Собственная рамка окна (раздел 10.33)
@@ -944,6 +953,11 @@ class App(ttk.Window):
 
             dialog.after(250, report)
 
+    def _announce_debug_log(self) -> None:
+        path = getattr(self, "_debug_log_path", None)
+        if path is not None:
+            messagebox.showinfo("Отладка включена", f"Журнал пишется в файл:\n{path.resolve()}", parent=self)
+
     def _dlog(self, message: str) -> None:
         """Строка в `menedger_debug.log` (только при `MENEDGER_DEBUG=1`)."""
         log_file = getattr(self, "_debug_log", None)
@@ -969,13 +983,17 @@ class App(ttk.Window):
         import tempfile
         import time as _time
 
-        log_path = Path("menedger_debug.log")
+        # Рядом с .exe (а не в "текущей папке", которая у запуска двойным
+        # кликом или из ярлыка непредсказуема); из исходников — в рабочей папке.
+        base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
+        log_path = base_dir / "menedger_debug.log"
         try:
             log_file = open(log_path, "a", buffering=1, encoding="utf-8")
         except OSError:
             log_path = Path(tempfile.gettempdir()) / "menedger_debug.log"
             log_file = open(log_path, "a", buffering=1, encoding="utf-8")
         self._debug_log = log_file
+        self._debug_log_path = log_path
         started = self._debug_started = _time.time()
 
         def log(message: str) -> None:
@@ -2183,7 +2201,7 @@ class App(ttk.Window):
         self._main_frame.pack(fill="both", expand=True)
         self._set_chrome_theme("light")
         self._refresh_tree()
-        if os.environ.get("MENEDGER_DEBUG"):
+        if _debug_enabled(os.environ, sys.argv):
             self.after(500, lambda: self._debug_report_images("главный экран"))
 
     def _on_show_all_entries(self) -> None:

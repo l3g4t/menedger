@@ -408,6 +408,18 @@ def test_minimize_falls_back_when_native_path_unavailable(app, monkeypatch):
     app.deiconify()
 
 
+@pytest.mark.parametrize(
+    "env, argv, expected",
+    [
+        ({}, ["app"], False),
+        ({"MENEDGER_DEBUG": "1"}, ["app"], True),
+        ({}, ["app", "--debug"], True),
+    ],
+)
+def test_debug_enabled_policy(env, argv, expected):
+    assert guiapp._debug_enabled(env, argv) is expected
+
+
 def test_native_minimize_is_noop_off_windows(app):
     import sys
 
