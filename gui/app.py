@@ -402,18 +402,24 @@ def _enable_transparent_corners(window: tk.Misc) -> bool:
 
 
 def _corner_mode(env: "os._Environ[str] | dict", argv: list[str]) -> str:
-    """Как скруглять углы окон на Windows (раздел 10.60):
-    `"layered"` — по умолчанию, прозрачный ключевой цвет (`-transparentcolor`,
-    плавные углы, но окно «слоёное»); `"region"` — `SetWindowRgn` (обычное
-    окно, углы без сглаживания): `MENEDGER_REGION_CORNERS=1` или флаг
-    `--region-corners`; `"square"` — прямые углы: `MENEDGER_SQUARE_WINDOWS=1`
-    или `--square-windows`. Флаги нужны для ярлыка `.exe`, где переменную
-    окружения не задать."""
+    """Как скруглять углы окон на Windows (разделы 10.60, 10.63):
+    `"native"` — по умолчанию: углы скругляет сама система (DWM, Windows 11), а
+    там, где это недоступно (Windows 10), — область окна; окно НЕ «слоёное»;
+    `"layered"` — прозрачный ключевой цвет (`-transparentcolor`, плавные углы
+    любого радиуса, но окно «слоёное», и восстановление с панели задач
+    медленнее): `MENEDGER_LAYERED_CORNERS=1` или `--layered-corners`;
+    `"region"` — только область окна (`SetWindowRgn`, края без сглаживания):
+    `MENEDGER_REGION_CORNERS=1` или `--region-corners`; `"square"` — прямые
+    углы: `MENEDGER_SQUARE_WINDOWS=1` или `--square-windows`. Флаги нужны для
+    ярлыка `.exe`, где переменную окружения не задать. Приоритет: square,
+    region, layered, native."""
     if env.get("MENEDGER_SQUARE_WINDOWS") or "--square-windows" in argv:
         return "square"
     if env.get("MENEDGER_REGION_CORNERS") or "--region-corners" in argv:
         return "region"
-    return "layered"
+    if env.get("MENEDGER_LAYERED_CORNERS") or "--layered-corners" in argv:
+        return "layered"
+    return "native"
 
 
 def _win_apis():
@@ -434,6 +440,47 @@ def _win_apis():
         return user32, gdi32
     except Exception:
         return None
+
+
+def _win_dwm_apis():
+    """`(user32, dwmapi)` с описанными типами или None вне Windows."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, dwmapi = ctypes.windll.user32, ctypes.windll.dwmapi
+        user32.GetParent.restype = wintypes.HWND
+        user32.GetParent.argtypes = [wintypes.HWND]
+        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long  # HRESULT
+        dwmapi.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        return user32, dwmapi
+    except Exception:
+        return None
+
+
+def _set_dwm_corners(window: tk.Misc) -> bool:
+    """Windows 11: попросить систему скруглить окно
+    (`DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)`).
+    Углы сглаженные и системные (радиус около 8 px), окно обычное, не «слоёное».
+    Возвращает True, если система приняла (HRESULT == 0); на Windows 10 атрибута
+    нет — возвращается False, и работает запасной путь (область окна)."""
+    apis = _win_dwm_apis()
+    if apis is None:
+        return False
+    user32, dwmapi = apis
+    try:
+        import ctypes
+
+        hwnd = user32.GetParent(window.winfo_id())
+        if not hwnd:
+            return False
+        value = ctypes.c_int(2)  # DWMWCP_ROUND
+        result = dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(value), ctypes.sizeof(value))
+        return result == 0
+    except Exception:
+        return False
 
 
 def _set_window_region(window: tk.Misc, radius: int, rounded: bool = True) -> bool:
@@ -924,27 +971,39 @@ class App(ttk.Window):
         self.geometry(f"{width}x{height}+{x}+{y}")
 
     def _install_region_corners(self, window: tk.Misc, is_maximized: Callable[[], bool] | None = None) -> None:
-        """Режим `region` (раздел 10.60): скруглять окно областью окна и
-        обновлять её при каждом изменении размера (на `<Configure>`, с
-        объединением серии событий в один вызов). Во всех других режимах — ничего."""
-        if self._native_frame or _corner_mode(os.environ, sys.argv) != "region":
+        """Скругление окна средствами системы — режимы `native` (по умолчанию) и
+        `region` (разделы 10.60, 10.63); в остальных режимах ничего не делает.
+        В `native` сначала просим систему (DWM, Windows 11); если не вышло
+        (Windows 10) — область окна. В `region` — сразу область окна, которая
+        пересчитывается при каждом `<Configure>` (с объединением серии событий).
+        Применяется на `<Map>` и `<Configure>`: у окна, построенного скрытым, нет
+        системного описателя, пока его не покажут."""
+        mode = _corner_mode(os.environ, sys.argv)
+        if self._native_frame or mode not in ("native", "region"):
             return
         pending: list[str] = []
+        dwm_ok: list[bool | None] = [None]
 
         def apply() -> None:
             pending.clear()
             try:
+                if mode == "native" and dwm_ok[0] is None:
+                    dwm_ok[0] = _set_dwm_corners(window)
+                    self._dlog(f"углы окна {window}: DWM {'принял' if dwm_ok[0] else 'недоступен — область окна'}")
+                if mode == "native" and dwm_ok[0]:
+                    return
                 _set_window_region(
                     window, _px(_VIEW_WINDOW_RADIUS), rounded=not (is_maximized is not None and is_maximized())
                 )
             except tk.TclError:
                 pass
 
-        def on_configure(event: tk.Event) -> None:
+        def on_event(event: tk.Event) -> None:
             if event.widget is window and not pending:
                 pending.append(window.after_idle(apply))
 
-        window.bind("<Configure>", on_configure, add="+")
+        window.bind("<Configure>", on_event, add="+")
+        window.bind("<Map>", on_event, add="+")
 
     def _install_chrome(self) -> None:
         self.overrideredirect(True)
@@ -1161,8 +1220,7 @@ class App(ttk.Window):
         return (
             sys.platform == "win32"
             and not self._native_frame
-            and not os.environ.get("MENEDGER_NO_HIDE_ON_RESTORE")
-            and "--no-hide-on-restore" not in sys.argv
+            and bool(os.environ.get("MENEDGER_HIDE_ON_RESTORE") or "--hide-on-restore" in sys.argv)
         )
 
     def _is_iconic(self) -> bool:

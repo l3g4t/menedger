@@ -851,6 +851,7 @@ def test_window_is_invisible_while_minimized_and_revealed_after_paint_settles(mo
     if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
     monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    monkeypatch.setenv("MENEDGER_HIDE_ON_RESTORE", "1")
     monkeypatch.setattr(guiapp.App, "_is_iconic", lambda self: iconic[0])
     iconic = [False]
     window = guiapp.App()
@@ -878,6 +879,7 @@ def test_window_is_never_left_invisible_if_paint_never_settles(monkeypatch):
     if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
     monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    monkeypatch.setenv("MENEDGER_HIDE_ON_RESTORE", "1")
     monkeypatch.setattr(guiapp.App, "_is_iconic", lambda self: iconic[0])
     monkeypatch.setattr(guiapp.App, "_REVEAL_MAX_SECONDS", 0.3)
     iconic = [True]
@@ -898,22 +900,28 @@ def test_window_is_never_left_invisible_if_paint_never_settles(monkeypatch):
         window.destroy()
 
 
-def test_hide_on_restore_is_off_outside_windows_and_can_be_disabled(app, monkeypatch):
+def test_hide_on_restore_is_opt_in_and_windows_only(app, monkeypatch):
+    """Раздел 10.63: прозрачность при восстановлении не помогла, поэтому по
+    умолчанию выключена (`-alpha` к тому же делает окно «слоёным»)."""
     assert not app._hide_on_restore_enabled()  # не Windows
     monkeypatch.setattr(guiapp.sys, "platform", "win32")
-    monkeypatch.setenv("MENEDGER_NO_HIDE_ON_RESTORE", "1")
-    assert not app._hide_on_restore_enabled()
+    assert not app._hide_on_restore_enabled()  # Windows, но не просили
+    monkeypatch.setenv("MENEDGER_HIDE_ON_RESTORE", "1")
+    assert app._hide_on_restore_enabled()
 
 
 def test_corner_mode_policy():
-    """Раздел 10.60: режимы скругления углов — по переменным окружения и флагам."""
-    assert guiapp._corner_mode({}, []) == "layered"
+    """Разделы 10.60, 10.63: режимы скругления углов — по окружению и флагам."""
+    assert guiapp._corner_mode({}, []) == "native"  # по умолчанию — не «слоёное» окно
+    assert guiapp._corner_mode({"MENEDGER_LAYERED_CORNERS": "1"}, []) == "layered"
+    assert guiapp._corner_mode({}, ["--layered-corners"]) == "layered"
     assert guiapp._corner_mode({"MENEDGER_SQUARE_WINDOWS": "1"}, []) == "square"
     assert guiapp._corner_mode({}, ["--square-windows"]) == "square"
     assert guiapp._corner_mode({"MENEDGER_REGION_CORNERS": "1"}, []) == "region"
     assert guiapp._corner_mode({}, ["--region-corners"]) == "region"
-    # «прямые углы» сильнее остальных режимов
+    # приоритет: прямые углы > область > слоёное > по умолчанию
     assert guiapp._corner_mode({"MENEDGER_SQUARE_WINDOWS": "1"}, ["--region-corners"]) == "square"
+    assert guiapp._corner_mode({}, ["--region-corners", "--layered-corners"]) == "region"
 
 
 class _FakeWinApis:
@@ -949,6 +957,58 @@ def test_set_window_region_creates_round_region_for_current_size_or_clears_it(ap
     # развёрнутое окно — область снимается (None)
     assert guiapp._set_window_region(app, 14, rounded=False) is True
     assert [c for c in fake.calls if c[0] == "SetWindowRgn"][-1] == ("SetWindowRgn", 4242, None, True)
+
+
+class _FakeDwmApis(_FakeWinApis):
+    def __init__(self, result=0):
+        super().__init__()
+        self.result = result
+        self.dwmapi = self
+
+    def DwmSetWindowAttribute(self, hwnd, attribute, value, size):  # noqa: N802
+        self.calls.append(("DwmSetWindowAttribute", hwnd, attribute, value._obj.value, size))
+        return self.result
+
+
+def test_set_dwm_corners_asks_system_for_round_corners(app, monkeypatch):
+    fake = _FakeDwmApis(result=0)
+    monkeypatch.setattr(guiapp, "_win_dwm_apis", lambda: (fake.user32, fake.dwmapi))
+    assert guiapp._set_dwm_corners(app) is True
+    call = [c for c in fake.calls if c[0] == "DwmSetWindowAttribute"][-1]
+    assert call == ("DwmSetWindowAttribute", 4242, 33, 2, 4)  # CORNER_PREFERENCE = ROUND
+    fake_fail = _FakeDwmApis(result=-2147024809)  # Windows 10: E_INVALIDARG
+    monkeypatch.setattr(guiapp, "_win_dwm_apis", lambda: (fake_fail.user32, fake_fail.dwmapi))
+    assert guiapp._set_dwm_corners(app) is False
+    monkeypatch.setattr(guiapp, "_win_dwm_apis", lambda: None)
+    assert guiapp._set_dwm_corners(app) is False  # не Windows
+
+
+@pytest.mark.parametrize("dwm_result, expect_region", [(0, False), (-2147024809, True)])
+def test_native_corner_mode_uses_dwm_and_falls_back_to_region(monkeypatch, dwm_result, expect_region):
+    """По умолчанию окно не «слоёное»: система скругляет сама (Windows 11), а если
+    нет (Windows 10) — область окна. Никакого ключевого цвета и накладок."""
+    if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    fake = _FakeDwmApis(result=dwm_result)
+    monkeypatch.setattr(guiapp, "_win_dwm_apis", lambda: (fake.user32, fake.dwmapi))
+    monkeypatch.setattr(guiapp, "_win_apis", lambda: (fake.user32, fake.gdi32))
+    monkeypatch.setattr(guiapp, "_corner_mode", lambda env, argv: "native")
+    monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    window = guiapp.App()
+    try:
+        for _ in range(4):
+            window.update()
+        assert window._window_corners is None  # накладок-углов нет
+        assert any(c[0] == "DwmSetWindowAttribute" for c in fake.calls)
+        has_region = any(c[0] == "SetWindowRgn" for c in fake.calls)
+        assert has_region == expect_region
+        dialog = guiapp.GeneratorDialog(window, lambda password: None)
+        for _ in range(4):
+            dialog.update()
+        assert dialog._corner_overlay is None
+        dialog.destroy()
+    finally:
+        window.destroy()
 
 
 def test_set_window_region_is_noop_without_windows_apis(app, monkeypatch):
