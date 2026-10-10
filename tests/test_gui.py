@@ -700,3 +700,17 @@ def test_unlock_screen_buttons_match_field_height(app):
     for entry in entries:
         assert entry.master.winfo_height() == expected  # плитка поля
 
+
+def test_unlock_card_has_rounded_backdrop_matching_its_size(app):
+    """Раздел 10.47: белая карточка экрана разблокировки — скруглённая подложка
+    ровно по размеру карточки (а не рамка-прямоугольник)."""
+    app.update()
+    app.update_idletasks()
+    app.update()
+    card = app._unlock_card
+    backdrops = [w for w in card.winfo_children() if hasattr(w, "photo")]
+    assert len(backdrops) == 1
+    photo = backdrops[0].photo
+    assert (photo.width(), photo.height()) == (card.winfo_width(), card.winfo_height())
+    assert str(card.cget("relief")) != "solid"
+

@@ -1957,8 +1957,21 @@ class App(ttk.Window):
         center = ttk.Frame(outer, style="UnlockBg.TFrame")
         center.pack(expand=True)
 
-        card = ttk.Frame(center, padding=(_px(40), _px(36)), borderwidth=1, relief="solid")
+        # Белая карточка со скруглёнными углами (раздел 10.47): вместо рамки
+        # `relief="solid"` (прямоугольник) — скруглённая подложка поверх тёмного
+        # фона. Отступы содержимого (40/36 px) больше радиуса, поэтому дети
+        # карточки в углы не заходят.
+        card = ttk.Frame(center, padding=(_px(40), _px(36)))
         card.pack()
+        self._rounded_backdrop(
+            card,
+            "#ffffff",
+            corners=(True, True, True, True),
+            surface=_SIDEBAR_BG,
+            radius=_CARD_RADIUS,
+            dynamic=True,
+        )
+        self._unlock_card = card
 
         def field_label(parent: ttk.Frame, text: str) -> ttk.Label:
             # Мелкая заглавная подпись НАД полем — как на референсе
