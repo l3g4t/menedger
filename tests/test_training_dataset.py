@@ -6,7 +6,7 @@ from training.prepare_dataset import build_examples
 
 def test_dataset_size_and_shape():
     examples = build_examples()
-    assert 60 <= len(examples) <= 200
+    assert 60 <= len(examples) <= 260  # база знаний выросла (раздел 9.5)
     for example in examples:
         roles = [m["role"] for m in example["messages"]]
         assert roles == ["system", "user", "assistant"]
@@ -32,3 +32,8 @@ def test_user_questions_are_already_redacted_like_at_runtime():
 def test_answers_are_short_enough_for_a_tiny_model():
     for example in build_examples():
         assert len(example["messages"][2]["content"]) <= 450
+
+
+def test_answers_true_only_for_the_knowledge_base_are_not_taught_to_a_model():
+    for example in build_examples():
+        assert "я не нейросеть" not in example["messages"][2]["content"].lower()

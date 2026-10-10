@@ -123,7 +123,7 @@ def test_offline_password_advice_follows_course_slides():
     assert "3l1t3" in leet
     # Замены букв сами по себе не считаем защитой — честно, а не «да, помогает».
     subst = offline_answer("Стоит ли заменять буквы цифрами?", ctx)
-    assert "28 бит" in subst and "слабы" in subst
+    assert "28 бит" in subst and "известны атакующим" in subst
     assert "rockyou.txt" in offline_answer("Что такое rockyou?", ctx)
     assert "мнемоник" in offline_answer("Что такое мнемоническая техника?", ctx).lower()
     phrase = offline_answer("Что лучше: пароль или парольная фраза?", ctx)
@@ -146,6 +146,8 @@ def test_offline_password_advice_answers_are_short():
 def test_offline_default_help_and_plural():
     assert "Спросите" in offline_answer("абвгд", None)
     assert "2 записи" in offline_answer("абвгд", AssistantContext(total_entries=2))
+    # Не по теме — честное «не знаю», а не случайный ответ из базы.
+    assert "Точного ответа" in offline_answer("Какая погода завтра?", None)
 
 
 # --- обёртка над llama-cpp-python (подменяем движок) -------------------------

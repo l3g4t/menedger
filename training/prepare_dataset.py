@@ -5,8 +5,9 @@ training/prepare_dataset.py — сборка обучающего набора �
 Запуск из корня проекта:  python -m training.prepare_dataset
 
 Что делает:
-  1. читает вручную написанные пары «вопрос → ответ» из
-     `training/data/general_qa.json` (ЭТОТ файл правите вы);
+  1. берёт общие пары «вопрос → ответ» из базы знаний помощника
+     `assistant/faq.py` (ЭТОТ файл правите вы: один источник и для чата
+     без модели, и для обучения);
   2. генерирует примеры «состояние хранилища → совет» из шаблонов ниже
      (контексты случайные, но с фиксированным seed — результат
      воспроизводим);
@@ -27,9 +28,13 @@ import json
 import random
 from pathlib import Path
 
+from assistant.faq import FAQ
 from assistant.prompt import AssistantContext, redact_secrets, system_message
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
+# Записи базы, которые верны только для помощника-без-модели: дообученной
+# модели их учить нельзя («я не нейросеть» было бы неправдой).
+TRAINING_EXCLUDE = frozenset({"assistant-what"})
 SEED = 20260101
 
 SITES = [
@@ -190,9 +195,9 @@ def build_examples() -> list[dict]:
     rng = random.Random(SEED)
     examples: list[dict] = []
 
-    general = json.loads((DATA_DIR / "general_qa.json").read_text(encoding="utf-8"))
-    for item in general:
-        examples.append(_example(_pick_ctx(rng), item["q"], item["a"]))
+    for entry in FAQ:
+        if entry.id not in TRAINING_EXCLUDE:
+            examples.append(_example(_pick_ctx(rng), entry.questions[0], entry.answer))
 
     for _ in range(26):
         ctx = _pick_ctx(rng)
@@ -212,8 +217,8 @@ def write_review(examples: list[dict], path: Path) -> None:
     lines = [
         "# Обучающие примеры (для проверки глазами)",
         "",
-        f"Всего: {len(examples)}. Источник: `training/prepare_dataset.py` и `training/data/general_qa.json`.",
-        "Правьте общие ответы в `general_qa.json` и шаблоны в `prepare_dataset.py`, затем запустите скрипт заново.",
+        f"Всего: {len(examples)}. Источник: `training/prepare_dataset.py` и база знаний `assistant/faq.py`.",
+        "Правьте общие ответы в `assistant/faq.py` и шаблоны в `prepare_dataset.py`, затем запустите скрипт заново.",
         "",
     ]
     for number, example in enumerate(examples, 1):
