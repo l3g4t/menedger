@@ -824,6 +824,89 @@ def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
         window.destroy()
 
 
+def test_corner_mode_policy():
+    """Раздел 10.60: режимы скругления углов — по переменным окружения и флагам."""
+    assert guiapp._corner_mode({}, []) == "layered"
+    assert guiapp._corner_mode({"MENEDGER_SQUARE_WINDOWS": "1"}, []) == "square"
+    assert guiapp._corner_mode({}, ["--square-windows"]) == "square"
+    assert guiapp._corner_mode({"MENEDGER_REGION_CORNERS": "1"}, []) == "region"
+    assert guiapp._corner_mode({}, ["--region-corners"]) == "region"
+    # «прямые углы» сильнее остальных режимов
+    assert guiapp._corner_mode({"MENEDGER_SQUARE_WINDOWS": "1"}, ["--region-corners"]) == "square"
+
+
+class _FakeWinApis:
+    """Подмена user32/gdi32: записываем вызовы, ничего не делаем."""
+
+    def __init__(self):
+        self.calls = []
+        self.user32 = self
+        self.gdi32 = self
+
+    def GetParent(self, window_id):  # noqa: N802
+        self.calls.append(("GetParent", window_id))
+        return 4242
+
+    def CreateRoundRectRgn(self, *args):  # noqa: N802
+        self.calls.append(("CreateRoundRectRgn", args))
+        return "REGION"
+
+    def SetWindowRgn(self, hwnd, region, redraw):  # noqa: N802
+        self.calls.append(("SetWindowRgn", hwnd, region, redraw))
+        return 1
+
+
+def test_set_window_region_creates_round_region_for_current_size_or_clears_it(app, monkeypatch):
+    fake = _FakeWinApis()
+    monkeypatch.setattr(guiapp, "_win_apis", lambda: (fake.user32, fake.gdi32))
+    app.update()
+    width, height = app.winfo_width(), app.winfo_height()
+    assert guiapp._set_window_region(app, 14) is True
+    create = [c for c in fake.calls if c[0] == "CreateRoundRectRgn"][-1]
+    assert create[1] == (0, 0, width + 1, height + 1, 28, 28)  # ellipse = 2 * радиус
+    assert [c for c in fake.calls if c[0] == "SetWindowRgn"][-1] == ("SetWindowRgn", 4242, "REGION", True)
+    # развёрнутое окно — область снимается (None)
+    assert guiapp._set_window_region(app, 14, rounded=False) is True
+    assert [c for c in fake.calls if c[0] == "SetWindowRgn"][-1] == ("SetWindowRgn", 4242, None, True)
+
+
+def test_set_window_region_is_noop_without_windows_apis(app, monkeypatch):
+    monkeypatch.setattr(guiapp, "_win_apis", lambda: None)
+    assert guiapp._set_window_region(app, 14) is False
+
+
+def test_region_mode_applies_region_to_main_window_and_dialogs_on_resize(monkeypatch):
+    """В режиме `region` нет прозрачного ключевого цвета и накладок, а область
+    окна обновляется при изменении размера — у главного окна и у диалогов."""
+    if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    fake = _FakeWinApis()
+    monkeypatch.setattr(guiapp, "_win_apis", lambda: (fake.user32, fake.gdi32))
+    monkeypatch.setattr(guiapp, "_corner_mode", lambda env, argv: "region")
+    monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    # на не-Windows реальный `-transparentcolor` недоступен, но в режиме region он и не нужен
+    window = guiapp.App()
+    try:
+        window.update()
+        window.update()
+        regions = [c for c in fake.calls if c[0] == "SetWindowRgn"]
+        assert regions, "область окна должна быть задана после показа"
+        assert window._window_corners is None  # накладок-углов нет
+        before = len(regions)
+        window.geometry(f"{window.winfo_width() + 40}x{window.winfo_height() + 20}")
+        window.update()
+        window.update()
+        assert len([c for c in fake.calls if c[0] == "SetWindowRgn"]) > before  # обновилась при ресайзе
+        dialog = guiapp.GeneratorDialog(window, lambda password: None)
+        dialog.update()
+        dialog.update()
+        assert dialog._corner_overlay is None
+        assert [c for c in fake.calls if c[0] == "CreateRoundRectRgn"][-1][1][2] >= dialog.winfo_width()
+        dialog.destroy()
+    finally:
+        window.destroy()
+
+
 def test_close_button_keeps_gap_from_rounded_corner(monkeypatch):
     """Раздел 10.49: у окна со скруглёнными углами подсветка кнопки закрытия
     не заходит в угол — у правой кнопки есть зазор справа."""

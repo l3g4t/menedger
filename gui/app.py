@@ -392,13 +392,75 @@ def _enable_transparent_corners(window: tk.Misc) -> bool:
     """Включить "прозрачность" ключевого цвета у окна (только Windows:
     `-transparentcolor` на других ОС не поддерживается). Возвращает True,
     если углы окна можно скруглять. Отключается `MENEDGER_SQUARE_WINDOWS=1`."""
-    if sys.platform != "win32" or os.environ.get("MENEDGER_SQUARE_WINDOWS"):
+    if sys.platform != "win32" or _corner_mode(os.environ, sys.argv) != "layered":
         return False
     try:
         window.attributes("-transparentcolor", _WINDOW_KEY_COLOR)
     except tk.TclError:
         return False
     return True
+
+
+def _corner_mode(env: "os._Environ[str] | dict", argv: list[str]) -> str:
+    """Как скруглять углы окон на Windows (раздел 10.60):
+    `"layered"` — по умолчанию, прозрачный ключевой цвет (`-transparentcolor`,
+    плавные углы, но окно «слоёное»); `"region"` — `SetWindowRgn` (обычное
+    окно, углы без сглаживания): `MENEDGER_REGION_CORNERS=1` или флаг
+    `--region-corners`; `"square"` — прямые углы: `MENEDGER_SQUARE_WINDOWS=1`
+    или `--square-windows`. Флаги нужны для ярлыка `.exe`, где переменную
+    окружения не задать."""
+    if env.get("MENEDGER_SQUARE_WINDOWS") or "--square-windows" in argv:
+        return "square"
+    if env.get("MENEDGER_REGION_CORNERS") or "--region-corners" in argv:
+        return "region"
+    return "layered"
+
+
+def _win_apis():
+    """`(user32, gdi32)` с описанными типами аргументов или None вне Windows."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+        user32.GetParent.restype = wintypes.HWND
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.SetWindowRgn.restype = ctypes.c_int
+        user32.SetWindowRgn.argtypes = [wintypes.HWND, wintypes.HRGN, wintypes.BOOL]
+        gdi32.CreateRoundRectRgn.restype = wintypes.HRGN
+        gdi32.CreateRoundRectRgn.argtypes = [ctypes.c_int] * 6
+        return user32, gdi32
+    except Exception:
+        return None
+
+
+def _set_window_region(window: tk.Misc, radius: int, rounded: bool = True) -> bool:
+    """Скруглить окно через область окна (`SetWindowRgn` + `CreateRoundRectRgn`):
+    это обычное, НЕ «слоёное» окно, поэтому Windows восстанавливает его с панели
+    задач без перерисовки с нуля. Цена — края дуги без сглаживания. `rounded=
+    False` снимает область (развёрнутое окно). Размер берётся из самого окна,
+    поэтому вызывать нужно при каждом изменении размера."""
+    apis = _win_apis()
+    if apis is None:
+        return False
+    user32, gdi32 = apis
+    try:
+        hwnd = user32.GetParent(window.winfo_id())
+        if not hwnd:
+            return False
+        region = None
+        if rounded and radius > 0:
+            width, height = window.winfo_width(), window.winfo_height()
+            if width < 2 * radius or height < 2 * radius:
+                return False
+            # +1: правый и нижний край области не включаются в неё
+            region = gdi32.CreateRoundRectRgn(0, 0, width + 1, height + 1, 2 * radius, 2 * radius)
+        user32.SetWindowRgn(hwnd, region, True)  # владение областью переходит системе
+        return True
+    except Exception:
+        return False
 
 
 def _recenter_glyph(icon: Image.Image) -> Image.Image:
@@ -859,6 +921,29 @@ class App(ttk.Window):
         self.minsize(*min_size)
         self.geometry(f"{width}x{height}+{x}+{y}")
 
+    def _install_region_corners(self, window: tk.Misc, is_maximized: Callable[[], bool] | None = None) -> None:
+        """Режим `region` (раздел 10.60): скруглять окно областью окна и
+        обновлять её при каждом изменении размера (на `<Configure>`, с
+        объединением серии событий в один вызов). Во всех других режимах — ничего."""
+        if self._native_frame or _corner_mode(os.environ, sys.argv) != "region":
+            return
+        pending: list[str] = []
+
+        def apply() -> None:
+            pending.clear()
+            try:
+                _set_window_region(
+                    window, _px(_VIEW_WINDOW_RADIUS), rounded=not (is_maximized is not None and is_maximized())
+                )
+            except tk.TclError:
+                pass
+
+        def on_configure(event: tk.Event) -> None:
+            if event.widget is window and not pending:
+                pending.append(window.after_idle(apply))
+
+        window.bind("<Configure>", on_configure, add="+")
+
     def _install_chrome(self) -> None:
         self.overrideredirect(True)
         # Скруглённые углы главного окна (раздел 10.49) — только Windows.
@@ -901,6 +986,7 @@ class App(ttk.Window):
         width, height = min(_px(980), aw), min(_px(640), ah)
         self.geometry(f"{width}x{height}+{ax + (aw - width) // 2}+{ay + (ah - height) // 2}")
 
+        self._install_region_corners(self, lambda: self._maximized)
         self.bind("<Map>", self._on_map, add="+")
         self.after(10, self._apply_taskbar_style)
         self.after(120, self._focus_window)
@@ -1150,6 +1236,7 @@ class App(ttk.Window):
             dialog.configure(
                 highlightthickness=1, highlightbackground=_CHROME_BORDER, highlightcolor=_CHROME_BORDER
             )
+        self._install_region_corners(dialog)
         if bar:
             title_bar = TitleBar(
                 dialog,
