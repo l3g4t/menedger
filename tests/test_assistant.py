@@ -127,7 +127,7 @@ def test_offline_password_advice_follows_course_slides():
     assert "rockyou.txt" in offline_answer("Что такое rockyou?", ctx)
     assert "мнемоник" in offline_answer("Что такое мнемоническая техника?", ctx).lower()
     phrase = offline_answer("Что лучше: пароль или парольная фраза?", ctx)
-    assert "44 бит" in phrase and "28 бит" in phrase
+    assert "correct horse battery staple" in phrase and "генератор" in phrase
 
 
 def test_offline_password_advice_answers_are_short():
