@@ -189,7 +189,10 @@ _MASTER_FIELD_HEIGHT = 38  # px
 # ними — одна и та же, чтобы ряд читался как единая группа (раздел 10.42).
 _VIEW_FIELD_HEIGHT = 36  # px
 _VIEW_CONTENT_WIDTH = 330  # px — ширина тела диалога (без нижних кнопок её задавать нечем)
-_VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (раздел 10.45)
+_VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (разделы 10.45–10.46)
+# Экран разблокировки (раздел 10.46): высота полей ввода и ВСЕХ кнопок на
+# нём одна — иначе кнопка рядом с полем выше/ниже него.
+_UNLOCK_CONTROL_HEIGHT = 42  # px
 # Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
 # этого цвета окно не рисует. Яркий и нигде больше в интерфейсе не встречается.
 _WINDOW_KEY_COLOR = "#fe00fe"
@@ -961,6 +964,7 @@ class App(ttk.Window):
         show_title: bool = True,
         bar: bool = True,
         border: bool = True,
+        rounded: bool = True,
     ) -> None:
         """Та же рамка для диалогов: строка заголовка с одной кнопкой
         "закрыть", тонкая граница и Escape. Вызывается СРАЗУ после
@@ -969,6 +973,13 @@ class App(ttk.Window):
         if self._native_frame:
             return
         dialog.overrideredirect(True)
+        # Скруглённые углы окна (раздел 10.46) — только Windows; сами накладки
+        # ставит `_round_dialog_corners` в конце построения диалога.
+        dialog._corner_overlay = None
+        dialog._corner_top_color = _CHROME_THEMES[theme]["bg"]
+        if rounded and _enable_transparent_corners(dialog):
+            dialog.configure(background=_WINDOW_KEY_COLOR)
+            dialog._corner_overlay = []
         if border:
             dialog.configure(
                 highlightthickness=1, highlightbackground=_CHROME_BORDER, highlightcolor=_CHROME_BORDER
@@ -1027,6 +1038,42 @@ class App(ttk.Window):
                     pass
 
             dialog.after(250, report)
+
+    def _round_dialog_corners(self, dialog: tk.Toplevel) -> None:
+        """Скруглить углы окна диалога (раздел 10.46). Вызывается В КОНЦЕ
+        `__init__` диалога — накладки должны лежать ПОВЕРХ всех виджетов.
+
+        Окно прямоугольное, поэтому в каждый угол кладётся маленькая
+        картинка-накладка `tk.Label`: вне дуги — ключевой цвет (его Windows
+        не рисует, `-transparentcolor`), внутри дуги — цвет того, что под
+        ней (у верхних углов — фон строки заголовка, у нижних — белый фон
+        тела), плюс дуга рамки. Подходит, пока угловая область однородна —
+        у этих диалогов так и есть (отступы больше радиуса). Без поддержки
+        прозрачности (не Windows) ничего не делает."""
+        overlays = getattr(dialog, "_corner_overlay", None)
+        if overlays is None:
+            return
+        for label in overlays:
+            label.destroy()
+        overlays.clear()
+        radius = _px(_VIEW_WINDOW_RADIUS)
+        cell = radius + 4
+        placements = (
+            ("nw", 0.0, 0.0, dialog._corner_top_color, (0, 0)),
+            ("ne", 1.0, 0.0, dialog._corner_top_color, (cell, 0)),
+            ("sw", 0.0, 1.0, "#ffffff", (0, cell)),
+            ("se", 1.0, 1.0, "#ffffff", (cell, cell)),
+        )
+        for anchor, relx, rely, base, (qx, qy) in placements:
+            shape = _render_keyed_rounded_rect(
+                2 * cell, 2 * cell, base, _WINDOW_KEY_COLOR, radius, (True, True, True, True), _CHROME_BORDER, 1
+            )
+            photo = ImageTk.PhotoImage(shape.crop((qx, qy, qx + cell, qy + cell)))
+            label = tk.Label(dialog, image=photo, bd=0, highlightthickness=0)
+            label.photo = photo
+            label.place(relx=relx, rely=rely, anchor=anchor, bordermode="outside")
+            label.lift()
+            overlays.append(label)
 
     def _dlog(self, message: str) -> None:
         """Строка в `menedger_debug.log` (только при `MENEDGER_DEBUG=1`)."""
@@ -1445,28 +1492,39 @@ class App(ttk.Window):
         self._rounded_style_names.add(style_name)
         return style_name
 
-    def _neutral_style(self, **kwargs) -> str:
+    def _neutral_style(self, *, flat: bool = False, **kwargs) -> str:
         """Нейтральный скруглённый стиль референса "Разделённая панель"
         (раздел 10.4/10.6) — светлая заливка + едва заметная рамка,
         тёмный текст; используется для всех кнопок, которые в референсе
         НЕ несут собственного смыслового цвета (Добавить, Удалить,
         Обзор..., Отмена, Закрыть и т.п. — там роль различителя играет
         иконка, а не цвет кнопки, см. `gui/icons/`, раздел 10.3)."""
+        if flat:
+            # Кнопка фиксированной высоты (раздел 10.46): без отступа
+            # image-элемента (иначе содержимое прижимается к левому-верхнему
+            # углу) и с вертикальным padding 0 — высоту задаёт контейнер.
+            kwargs.setdefault("element_padding", 0)
+            kwargs.setdefault("padding", (_px(14), 0))
         return self._rounded_button_style(
-            "Rounded.Neutral",
+            "Rounded.NeutralFlat" if flat else "Rounded.Neutral",
             _NEUTRAL_FILL,
             _NEUTRAL_TEXT,
             border_color=_NEUTRAL_BORDER,
             **kwargs,
         )
 
-    def _accent_style(self, **kwargs) -> str:
+    def _accent_style(self, *, flat: bool = False, **kwargs) -> str:
         """Единственный акцентный (синий) стиль референса — только для
         главного действия экрана/диалога: Открыть, Копировать пароль,
         Сохранить, Сгенерировать. Остальные кнопки того же экрана —
         нейтральные (`_neutral_style`), чтобы акцент не терялся среди
         одинаково ярких кнопок."""
-        return self._rounded_button_style("Rounded.Accent", _ACCENT, "#ffffff", **kwargs)
+        if flat:
+            kwargs.setdefault("element_padding", 0)
+            kwargs.setdefault("padding", (_px(14), 0))
+        return self._rounded_button_style(
+            "Rounded.AccentFlat" if flat else "Rounded.Accent", _ACCENT, "#ffffff", **kwargs
+        )
 
     def _rounded_backdrop(
         self,
@@ -1617,6 +1675,7 @@ class App(ttk.Window):
         *,
         show: str = "",
         width: int = 20,
+        height: int | None = None,
     ) -> tuple[ttk.Frame, ttk.Entry]:
         """Поле ввода в скруглённой "плитке" (раздел 10.28): фрейм с
         подложкой `_rounded_backdrop` + `Entry` со стилем
@@ -1626,7 +1685,13 @@ class App(ttk.Window):
         `dynamic=True`: подложка перерисовывается по `<Configure>`, поэтому
         не нужен список отложенных перерисовок, как у диалогов с
         фиксированной вёрсткой."""
-        box = ttk.Frame(parent, padding=(_px(12), _px(8)))
+        if height is None:
+            box = ttk.Frame(parent, padding=(_px(12), _px(8)))
+        else:
+            # Фиксированная высота (раздел 10.46): поле и кнопки рядом с ним
+            # одной высоты; текст по центру по вертикали.
+            box = ttk.Frame(parent, padding=(_px(12), 0), height=_px(height))
+            box.pack_propagate(False)
         self._rounded_backdrop(
             box,
             _NEUTRAL_FILL,
@@ -1639,7 +1704,10 @@ class App(ttk.Window):
         )
         entry = ttk.Entry(box, textvariable=variable, show=show, width=width)
         entry.configure(style="NeutralField.TEntry")
-        entry.pack(fill="both", expand=True)
+        if height is None:
+            entry.pack(fill="both", expand=True)
+        else:
+            entry.pack(fill="x", expand=True)
         return box, entry
 
     @staticmethod
@@ -1916,12 +1984,21 @@ class App(ttk.Window):
         path_row = ttk.Frame(card)
         path_row.pack(fill="x", pady=(_px(2), _px(12)))
         self._path_var = tk.StringVar(value=str(DEFAULT_VAULT_PATH))
-        path_box, _path_entry = self._rounded_field(path_row, self._path_var, width=26)
+        control_height = _px(_UNLOCK_CONTROL_HEIGHT)
+        path_box, _path_entry = self._rounded_field(
+            path_row, self._path_var, width=26, height=_UNLOCK_CONTROL_HEIGHT
+        )
         path_box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
-        self._styled(
-            ttk.Button(path_row, text="Выберите файл", command=self._on_browse),
-            self._neutral_style(),
-        ).pack(side="left")
+        browse_cell = ttk.Frame(path_row, height=control_height)
+        browse_cell.pack_propagate(False)
+        browse_cell.pack(side="left")
+        browse_button = self._styled(
+            ttk.Button(browse_cell, text="Выберите файл", command=self._on_browse),
+            self._neutral_style(flat=True),
+        )
+        browse_button.pack(fill="both", expand=True)
+        # Ширина ячейки — по тексту кнопки (высота задана выше).
+        browse_cell.configure(width=browse_button.winfo_reqwidth())
 
         field_label(card, "Мастер-пароль").pack(fill="x", anchor="w")
         pw_row = ttk.Frame(card)
@@ -1932,38 +2009,47 @@ class App(ttk.Window):
         # Кнопка-"глаз" рядом (см. _on_toggle_password_visibility) даёт
         # пользователю возможность сверить, что он ввёл, не расширяя это
         # доверие на любого, кто просто смотрит на экран через плечо.
-        password_box, password_entry = self._rounded_field(pw_row, self._password_var, show="*")
+        password_box, password_entry = self._rounded_field(
+            pw_row, self._password_var, show="*", height=_UNLOCK_CONTROL_HEIGHT
+        )
         password_box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
         password_entry.bind("<Return>", lambda _event: self._on_unlock())
         self._password_entry = password_entry
         self._password_visible = False
+        eye_cell = ttk.Frame(pw_row, width=control_height, height=control_height)
+        eye_cell.pack_propagate(False)
+        eye_cell.pack(side="left")
         self._styled(
             ttk.Button(
-                pw_row,
+                eye_cell,
                 command=self._on_toggle_password_visibility,
-                **self._icon_kwargs("eye", "dark"),
+                **{**self._icon_kwargs("eye", "dark", center=True), "compound": "image"},
             ),
             self._rounded_button_style(
-                "Rounded.IconToggle",
+                "Rounded.IconToggleSquare",
                 _NEUTRAL_FILL,
                 _NEUTRAL_TEXT,
                 border_color=_NEUTRAL_BORDER,
-                padding=(_px(8), _px(6)),
+                padding=(0, 0),
+                element_padding=0,
             ),
-        ).pack(side="left")
+        ).pack(fill="both", expand=True)
 
         self._unlock_status = ttk.Label(card, text="", bootstyle="danger")
         self._unlock_status.pack(fill="x", pady=(_px(4), _px(8)))
 
+        unlock_cell = ttk.Frame(card, height=control_height)
+        unlock_cell.pack_propagate(False)
+        unlock_cell.pack(fill="x", pady=(_px(4), _px(16)))
         self._styled(
             ttk.Button(
-                card,
+                unlock_cell,
                 text="Разблокировать",
                 command=self._on_unlock,
                 **self._icon_kwargs("unlock", "white"),
             ),
-            self._accent_style(),
-        ).pack(fill="x", pady=(_px(4), _px(16)))
+            self._accent_style(flat=True),
+        ).pack(fill="both", expand=True)
 
         divider_row = ttk.Frame(card)
         divider_row.pack(fill="x", pady=(0, _px(12)))
@@ -1973,15 +2059,18 @@ class App(ttk.Window):
         ).pack(side="left", padx=_px(8))
         ttk.Separator(divider_row).pack(side="left", fill="x", expand=True)
 
+        create_cell = ttk.Frame(card, height=control_height)
+        create_cell.pack_propagate(False)
+        create_cell.pack(fill="x")
         self._styled(
             ttk.Button(
-                card,
+                create_cell,
                 text="Создать новое хранилище",
                 command=self._on_create,
                 **self._icon_kwargs("plus", "dark"),
             ),
-            self._neutral_style(),
-        ).pack(fill="x")
+            self._neutral_style(flat=True),
+        ).pack(fill="both", expand=True)
 
         return outer
 
@@ -2543,6 +2632,7 @@ class EntryDialog(ttk.Toplevel):
             parent._accent_style(),
         ).pack(side="right", padx=(0, _px(8)))
 
+        parent._round_dialog_corners(self)
         self.place_window_center()
         self.grab_set()
 
@@ -2783,6 +2873,7 @@ class CreateVaultDialog(ttk.Toplevel):
         self.update_idletasks()
         for redraw in pending_backdrops:
             redraw()
+        parent._round_dialog_corners(self)
         self.place_window_center()
         self.grab_set()
 
@@ -2839,7 +2930,7 @@ class ViewEntryDialog(ttk.Toplevel):
         # (`-transparentcolor`), только с собственной рамкой. Иначе — как раньше.
         rounded = (not parent._native_frame) and _enable_transparent_corners(self)
         key = _WINDOW_KEY_COLOR if rounded else None
-        parent._dialog_chrome(self, title, theme="dark", bar=False, border=not rounded)
+        parent._dialog_chrome(self, title, theme="dark", bar=False, border=not rounded, rounded=False)
         if rounded:
             # Всё, что не закрыто шапкой/телом, — прозрачно, а не серый квадрат.
             self.configure(background=_WINDOW_KEY_COLOR)
@@ -3233,6 +3324,7 @@ class AuditDialog(ttk.Toplevel):
             parent._neutral_style(),
         ).pack(side="right")
 
+        parent._round_dialog_corners(self)
         self.place_window_center()
         self.grab_set()
 
@@ -3437,6 +3529,7 @@ class GeneratorDialog(ttk.Toplevel):
         for redraw in pending_backdrops:
             redraw()
 
+        parent._round_dialog_corners(self)
         self.place_window_center()
         self.grab_set()
 

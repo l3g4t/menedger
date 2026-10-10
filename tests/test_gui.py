@@ -652,3 +652,51 @@ def test_view_dialog_icon_buttons_are_image_only_and_square(app):
     finally:
         dialog.destroy()
 
+
+def test_other_dialogs_get_rounded_corner_overlays(app, monkeypatch):
+    """Раздел 10.46: при поддержке прозрачных углов у остальных диалогов
+    фон окна — ключевой цвет и в углах лежат 4 накладки."""
+    if app._native_frame:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda window: True)
+    from assistant.advisor import AdvisorReport
+
+    dialogs = [
+        guiapp.EntryDialog(app, "Новая запись"),
+        guiapp.CreateVaultDialog(app),
+        guiapp.AuditDialog(app, AdvisorReport()),
+        guiapp.GeneratorDialog(app, lambda password: None),
+    ]
+    try:
+        for dialog in dialogs:
+            dialog.update()
+            assert dialog.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
+            assert len(dialog._corner_overlay) == 4
+    finally:
+        for dialog in dialogs:
+            dialog.destroy()
+
+
+def test_other_dialogs_have_no_overlays_without_transparency_support(app):
+    if app._native_frame or guiapp.sys.platform == "win32":
+        pytest.skip("только не-Windows с собственной рамкой")
+    dialog = guiapp.EntryDialog(app, "Новая запись")
+    dialog.update()
+    try:
+        assert dialog._corner_overlay is None
+    finally:
+        dialog.destroy()
+
+
+def test_unlock_screen_buttons_match_field_height(app):
+    """Раздел 10.46: поля ввода и ВСЕ кнопки экрана разблокировки одной высоты."""
+    app.update()
+    expected = guiapp._px(guiapp._UNLOCK_CONTROL_HEIGHT)
+    buttons = _find_widgets_by_class(app._unlock_frame, "TButton")
+    assert len(buttons) == 4  # выбрать файл, глаз, разблокировать, создать
+    assert {b.winfo_height() for b in buttons} == {expected}
+    entries = _find_widgets_by_class(app._unlock_frame, "TEntry")
+    assert entries
+    for entry in entries:
+        assert entry.master.winfo_height() == expected  # плитка поля
+
