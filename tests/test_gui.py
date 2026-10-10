@@ -1751,6 +1751,19 @@ def test_problems_dialog_each_reason_is_its_own_pill(app):
         walk(dialog._feed)
         assert "содержит название сайта" in texts and "низкая оценка энтропии" in texts  # раздельно
         assert "тот же пароль: mail.ru (al)" in texts
+        # Раздел 10.72: текст «таблеток» не цветной (не красный/оранжевый/жёлтый).
+        pills = []
+
+        def collect(widget):
+            for child in widget.winfo_children():
+                if child.winfo_class() == "Label" and child.cget("text") in texts and child.cget("wraplength"):
+                    pills.append(child)
+                collect(child)
+
+        collect(dialog._feed)
+        assert pills
+        for pill in pills:
+            assert pill.cget("fg") == guiapp._NEUTRAL_TEXT and pill.cget("bg") == "#ffffff"
     finally:
         dialog.destroy()
 

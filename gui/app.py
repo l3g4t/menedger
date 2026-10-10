@@ -4269,8 +4269,8 @@ class AuditDialog(ttk.Toplevel):
                 tk.Label(
                     frame,
                     text=text,
-                    bg=_mix(color, "#ffffff", 0.82),
-                    fg=_mix(color, "#000000", 0.25),
+                    bg="#ffffff",
+                    fg=_NEUTRAL_TEXT,
                     font=("", 9),
                     padx=_px(8),
                     pady=_px(3),
