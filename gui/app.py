@@ -1163,6 +1163,10 @@ class App(ttk.Window):
             # однородная область внутри дуги не трогается. Квадрат красил бы
             # внутреннюю часть угла цветом строки заголовка и срезал бы всё,
             # что туда заходит (подсветку кнопки закрытия — раздел 10.49).
+            # Подряд идущие строки с одинаковым содержимым (прямой участок
+            # рамки у края) склеиваются в одну картинку — виджетов в разы
+            # меньше, а окно строится заметно быстрее (раздел 10.55).
+            runs: list[list] = []
             for row in range(cell):
                 xs = [x for x in range(cell) if piece.getpixel((x, row)) != base_rgb]
                 if not xs:
@@ -1171,13 +1175,23 @@ class App(ttk.Window):
                     left, right = min(xs), cell
                 else:
                     left, right = 0, max(xs) + 1
-                photo = ImageTk.PhotoImage(piece.crop((left, row, right, row + 1)))
+                strip = piece.crop((left, row, right, row + 1))
+                if runs and runs[-1][3] == row and runs[-1][0] == left and runs[-1][4] == strip.tobytes():
+                    runs[-1][3] = row + 1
+                    runs[-1][5] = runs[-1][5] + 1
+                    continue
+                runs.append([left, right, row, row + 1, strip.tobytes(), 1])
+            for left, right, first, _end, _data, count in runs:
+                strip = piece.crop((left, first, right, first + 1))
+                if count > 1:
+                    strip = strip.resize((right - left, count), Image.NEAREST)
+                photo = ImageTk.PhotoImage(strip)
                 label = tk.Label(window, image=photo, bd=0, highlightthickness=0)
                 label.photo = photo
                 label.place(
                     relx=1.0 if on_right else 0.0,
                     rely=1.0 if on_bottom else 0.0,
-                    y=(row - cell) if on_bottom else row,
+                    y=(first - cell) if on_bottom else first,
                     anchor="ne" if on_right else "nw",
                     bordermode="outside",
                 )
@@ -3644,6 +3658,9 @@ class GeneratorDialog(ttk.Toplevel):
 
     def __init__(self, parent: App, on_copy) -> None:
         super().__init__(title="Генератор паролей", master=parent, resizable=(False, False), iconphoto=None)
+        # Строим скрытым и показываем готовым — иначе на Windows видно, как
+        # окно дорисовывается по частям (раздел 10.55).
+        self.withdraw()
         parent._dialog_chrome(self, "Генератор паролей")
         self.transient(parent)
         self._on_copy = on_copy
@@ -3847,9 +3864,9 @@ class GeneratorDialog(ttk.Toplevel):
         parent._round_dialog_corners(self)
         self.place_window_center()
         parent._keep_dialog_in_work_area(self)
-        # Накладки углов пересоздаются после первого показа окна (раздел
-        # 10.54) — на случай, если Windows изменила порядок окон/размер.
-        self.bind("<Map>", lambda _e: parent._round_dialog_corners(self), add="+")
+        # Окно показывается только теперь, целиком готовым (раздел 10.55).
+        self.deiconify()
+        self.update_idletasks()
         self.grab_set()
 
     def _on_length_change(self, value: str) -> None:

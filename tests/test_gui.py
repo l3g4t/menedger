@@ -931,3 +931,17 @@ def test_generator_dialog_rounded_corners_and_stays_in_work_area(app, monkeypatc
     assert generator.winfo_x() >= left and generator.winfo_y() >= top
     assert generator.winfo_height() <= height
     generator.destroy()
+
+
+def test_generator_dialog_is_shown_ready_and_corner_overlays_are_merged(app, monkeypatch):
+    """Раздел 10.55: диалог строится скрытым и показывается готовым;
+    одинаковые строки накладок углов склеены (виджетов меньше, чем строк)."""
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda w: True)
+    generator = guiapp.GeneratorDialog(app, on_copy=lambda _text: None)
+    generator.update()
+    assert generator.state() == "normal"
+    assert generator.winfo_viewable()
+    radius_rows = guiapp._px(guiapp._VIEW_WINDOW_RADIUS) + 4
+    assert len(generator._corner_overlay) < 4 * radius_rows
+    generator.destroy()
