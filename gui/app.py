@@ -4328,8 +4328,13 @@ class AssistantDialog(ttk.Toplevel):
         """Шапка на канвасе: градиент (тёмно-синий -> синий -> фиолетовый), иконка
         приложения, название и строка статуса с цветной точкой. Пункты канваса
         прозрачны, поэтому текст лежит прямо на градиенте."""
+        # Отступы вокруг шапки-карточки должны быть БЕЛЫМИ: фон самого окна —
+        # ключевой цвет прозрачности (скруглённые углы окна, раздел 10.46), и всё,
+        # что не закрыто виджетом, на Windows стало бы дырой до рабочего стола.
+        holder = tk.Frame(self, background="#ffffff", bd=0, highlightthickness=0)
+        holder.pack(fill="x")
         self._header = tk.Canvas(
-            self, height=_px(self._HEADER_HEIGHT), highlightthickness=0, bd=0, background="#ffffff"
+            holder, height=_px(self._HEADER_HEIGHT), highlightthickness=0, bd=0, background="#ffffff"
         )
         self._header.pack(fill="x", padx=_px(20), pady=(_px(14), 0))
         self._header_width = 0

@@ -20,6 +20,7 @@ getpass.getpass()/input() в tests/test_cli.py. Сама крипто- и
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -681,6 +682,50 @@ def test_other_dialogs_get_rounded_corner_overlays(app, monkeypatch):
             dialog.update()
             assert dialog.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
             assert len(dialog._corner_overlay) >= 4  # тонкие строки-накладки в 4 углах
+    finally:
+        for dialog in dialogs:
+            dialog.destroy()
+
+
+def test_dialogs_show_key_color_only_in_rounded_corners(app, monkeypatch, tmp_path):
+    """Фон окна при скруглённых углах — ключевой цвет, который Windows не рисует.
+    Любой отступ, не закрытый виджетом, стал бы ДЫРОЙ до рабочего стола (так было
+    с шапкой помощника). Проверяем по реальным пикселям: ключевой цвет — только в
+    четырёх углах (накладки считаются отдельным тестом выше)."""
+    if app._native_frame:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    ImageGrab = pytest.importorskip("PIL.ImageGrab")
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda window: True)
+    real_create_dialog = guiapp.CreateVaultDialog  # _create_vault подменяет класс фейком
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(guiapp, "CreateVaultDialog", real_create_dialog)
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
+    from assistant.advisor import AdvisorReport
+
+    key = tuple(int(guiapp._WINDOW_KEY_COLOR[i : i + 2], 16) for i in (1, 3, 5))
+    radius = guiapp._px(guiapp._VIEW_WINDOW_RADIUS)
+    allowed = 4 * (radius + 4) ** 2  # четыре квадрата угла с запасом
+    dialogs = [
+        guiapp.AssistantDialog(app),
+        guiapp.EntryDialog(app, "Новая запись"),
+        guiapp.CreateVaultDialog(app),
+        guiapp.AuditDialog(app, AdvisorReport()),
+        guiapp.GeneratorDialog(app, lambda password: None),
+    ]
+    try:
+        for dialog in dialogs:
+            dialog.update()
+            dialog.update_idletasks()
+            x, y = dialog.winfo_rootx(), dialog.winfo_rooty()
+            w, h = dialog.winfo_width(), dialog.winfo_height()
+            try:
+                shot = ImageGrab.grab(bbox=(x, y, x + w, y + h), xdisplay=os.environ.get("DISPLAY"))
+            except Exception:
+                pytest.skip("снимок экрана недоступен")
+            count = sum(1 for pixel in shot.convert("RGB").get_flattened_data() if pixel == key) if hasattr(
+                shot, "get_flattened_data"
+            ) else sum(1 for pixel in shot.convert("RGB").getdata() if pixel == key)
+            assert count <= allowed, f"{type(dialog).__name__}: {count} px ключевого цвета вне углов"
     finally:
         for dialog in dialogs:
             dialog.destroy()
