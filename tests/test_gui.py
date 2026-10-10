@@ -945,3 +945,50 @@ def test_generator_dialog_is_shown_ready_and_corner_overlays_are_merged(app, mon
     radius_rows = guiapp._px(guiapp._VIEW_WINDOW_RADIUS) + 4
     assert len(generator._corner_overlay) < 4 * radius_rows
     generator.destroy()
+
+
+def _entries(widget):
+    return _find_widgets_by_class(widget, "TEntry")
+
+
+def test_ctrl_v_with_russian_layout_pastes_into_entry(app, monkeypatch):
+    """Раздел 10.56: «Ctrl+м» (русская раскладка) работает как Ctrl+V."""
+    _create_vault(app, monkeypatch)
+    app.clipboard_clear()
+    app.clipboard_append("Secret123!")
+    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog.update()
+    entry = _entries(dialog)[0]
+    entry.focus_force()
+
+    class FakeEvent:
+        keysym = "Cyrillic_em"
+        keycode = 0
+        widget = entry
+
+    assert app._on_control_key(FakeEvent()) == "break"
+    dialog.update()
+    assert entry.get() == "Secret123!"
+
+    FakeEvent.keysym = "v"  # латинская — стандартная обработка Tk, не трогаем
+    assert app._on_control_key(FakeEvent()) is None
+    dialog.destroy()
+
+
+def test_entry_context_menu_has_paste_entry(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    shown = []
+    monkeypatch.setattr(guiapp.tk.Menu, "tk_popup", lambda self, x, y: shown.append(self))
+    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog.update()
+    entry = _entries(dialog)[0]
+
+    class FakeEvent:
+        widget = entry
+        x_root = 10
+        y_root = 10
+
+    assert app._show_edit_menu(FakeEvent()) == "break"
+    labels = [shown[0].entrycget(i, "label") for i in range(shown[0].index("end") + 1)]
+    assert "Вставить" in labels and "Копировать" in labels
+    dialog.destroy()

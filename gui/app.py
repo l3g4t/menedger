@@ -703,6 +703,7 @@ class App(ttk.Window):
         self._rounded_style_names: set[str] = set()
 
         self._setup_custom_styles()
+        self._install_text_editing_shortcuts()
 
         # Кэш иконок кнопок (см. _icon/_icon_kwargs ниже) — ОБЯЗАТЕЛЬНО
         # на экземпляр окна, а не на уровень модуля: tk.PhotoImage
@@ -1362,6 +1363,61 @@ class App(ttk.Window):
         if sys.platform == "win32" and ICON_ICO_PATH.exists():
             return str(ICON_ICO_PATH)
         return None
+
+    # Ctrl+<буква> при русской раскладке: Tk сопоставляет сочетания по
+    # keysym текущей раскладки, и «Ctrl+м» не запускает вставку (раздел
+    # 10.56). Сопоставляем кириллические keysym с виртуальными событиями.
+    _CYRILLIC_CONTROL_KEYS = {
+        "Cyrillic_em": "<<Paste>>",  # V
+        "Cyrillic_es": "<<Copy>>",  # C
+        "Cyrillic_che": "<<Cut>>",  # X
+        "Cyrillic_ef": "<<SelectAll>>",  # A
+        "Cyrillic_EM": "<<Paste>>",
+        "Cyrillic_ES": "<<Copy>>",
+        "Cyrillic_CHE": "<<Cut>>",
+        "Cyrillic_EF": "<<SelectAll>>",
+    }
+
+    def _install_text_editing_shortcuts(self) -> None:
+        """Ctrl+C/V/X/A при русской раскладке и контекстное меню (правая
+        кнопка) у всех полей ввода приложения (раздел 10.56)."""
+        self.bind_all("<Control-KeyPress>", self._on_control_key, add="+")
+        for widget_class in ("TEntry", "Entry"):
+            self.bind_class(widget_class, "<Button-3>", self._show_edit_menu, add="+")
+
+    def _on_control_key(self, event: tk.Event) -> str | None:
+        virtual = self._CYRILLIC_CONTROL_KEYS.get(event.keysym)
+        if virtual is None and sys.platform == "win32" and event.keysym not in ("v", "V", "c", "C", "x", "X", "a", "A"):
+            # Запасной путь на Windows: виртуальные коды клавиш V/C/X/A не
+            # зависят от раскладки (86/67/88/65), а keysym может быть любым.
+            virtual = {86: "<<Paste>>", 67: "<<Copy>>", 88: "<<Cut>>", 65: "<<SelectAll>>"}.get(event.keycode)
+        widget = event.widget
+        if virtual is None or not hasattr(widget, "event_generate"):
+            return None
+        try:
+            if widget.winfo_class() not in ("TEntry", "Entry"):
+                return None
+            widget.event_generate(virtual)
+        except tk.TclError:
+            return None
+        return "break"
+
+    def _show_edit_menu(self, event: tk.Event) -> str:
+        widget = event.widget
+        widget.focus_set()
+        menu = tk.Menu(widget, tearoff=0)
+        for label, virtual in (
+            ("Вырезать", "<<Cut>>"),
+            ("Копировать", "<<Copy>>"),
+            ("Вставить", "<<Paste>>"),
+            ("Выделить всё", "<<SelectAll>>"),
+        ):
+            menu.add_command(label=label, command=lambda v=virtual: widget.event_generate(v))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _init_ui_scale(self) -> None:
         """Определить `_UI_SCALE` по масштабированию Tk (раздел 10.29).
