@@ -1064,6 +1064,35 @@ def test_assistant_dialog_answers_hides_secrets_and_clears_on_lock(app, monkeypa
     assert app._assistant_history == []
 
 
+def test_round_image_corners_cuts_corners_but_keeps_center():
+    from PIL import Image
+
+    image = Image.new("RGB", (120, 60), (10, 20, 30))
+    out = guiapp._round_image_corners(image, 16, "#ffffff")
+    assert out.size == image.size
+    assert out.getpixel((0, 0)) == (255, 255, 255)  # угол срезан
+    assert out.getpixel((119, 59)) == (255, 255, 255)
+    assert out.getpixel((60, 30)) == (10, 20, 30)  # середина не тронута
+    # радиус больше половины стороны не должен ронять Pillow
+    guiapp._round_image_corners(Image.new("RGB", (30, 10), (0, 0, 0)), 999, "#ffffff")
+
+
+def test_assistant_dialog_header_and_chat_panel_are_rounded(app, monkeypatch, tmp_path):
+    """Шапка — картинка со срезанными углами (за дугой белый фон), а лента чата
+    лежит на скруглённой подложке с отступом больше 0,3 радиуса."""
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
+    dialog = guiapp.AssistantDialog(app)
+    dialog.update()
+    from PIL import ImageTk  # noqa: F401
+
+    assert dialog._header.cget("background") == "#ffffff"
+    assert dialog._chat_card.winfo_width() > 100
+    radius = guiapp._px(guiapp._CHAT_CARD_RADIUS)
+    assert guiapp._px(guiapp._CHAT_CARD_PADDING) >= 0.29 * radius
+    dialog.destroy()
+
+
 def test_assistant_dialog_ignores_empty_question_and_double_send(app, monkeypatch, tmp_path):
     _create_vault(app, monkeypatch)
     monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")

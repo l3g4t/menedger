@@ -4056,6 +4056,24 @@ _CHAT_TIME = "#8a96b3"
 _CHAT_BOT_BORDER = "#d9e1f5"
 
 
+_CHAT_CARD_RADIUS = 16  # скругление шапки и ленты чата, px
+_CHAT_CARD_PADDING = 8  # отступ ленты от края скруглённой подложки, px
+
+
+def _round_image_corners(image: Image.Image, radius: int, surface: str) -> Image.Image:
+    """Скруглить ВСЕ углы картинки: за дугой — цвет `surface` (без прозрачности,
+    урок раздела 10.5). Маска рисуется с 4-кратным суперсэмплингом."""
+    width, height = image.size
+    radius = max(0, min(radius, width // 2 - 1, height // 2 - 1))
+    factor = 4
+    mask = Image.new("L", (width * factor, height * factor), 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, width * factor - 1, height * factor - 1), radius=radius * factor, fill=255
+    )
+    mask = mask.resize((width, height), Image.LANCZOS)
+    return Image.composite(image, Image.new("RGB", (width, height), surface), mask)
+
+
 def _gradient_image(
     width: int, height: int, stops: list[tuple[float, str]], *, mix_x: float = 1.0, mix_y: float = 0.0
 ) -> Image.Image:
@@ -4200,14 +4218,24 @@ class AssistantDialog(ttk.Toplevel):
         content.pack(fill="both", expand=True)
 
         # Лента сообщений: канвас с внутренним фреймом (как в AuditDialog).
-        chat_frame = tk.Frame(
-            content,
-            background=_CHAT_BG,
-            highlightthickness=1,
-            highlightbackground=_CHAT_BOT_BORDER,
-            highlightcolor=_CHAT_BOT_BORDER,
+        # Лента лежит на скруглённой подложке (`_rounded_backdrop`): отступ
+        # вокруг самой ленты больше 0,3 радиуса, поэтому её прямые углы не
+        # выходят за дугу.
+        chat_card = ttk.Frame(content, padding=_px(_CHAT_CARD_PADDING))
+        chat_card.pack(fill="both", expand=True)
+        parent._rounded_backdrop(
+            chat_card,
+            _CHAT_BG,
+            (True, True, True, True),
+            surface="#ffffff",
+            radius=_px(_CHAT_CARD_RADIUS),
+            border_color=_CHAT_BOT_BORDER,
+            border_width=1,
+            dynamic=True,
         )
+        chat_frame = tk.Frame(chat_card, background=_CHAT_BG, highlightthickness=0, bd=0)
         chat_frame.pack(fill="both", expand=True)
+        self._chat_card = chat_card
         self._canvas = tk.Canvas(
             chat_frame, width=_px(560), height=_px(280), highlightthickness=0, bd=0, background=_CHAT_BG
         )
@@ -4301,9 +4329,9 @@ class AssistantDialog(ttk.Toplevel):
         приложения, название и строка статуса с цветной точкой. Пункты канваса
         прозрачны, поэтому текст лежит прямо на градиенте."""
         self._header = tk.Canvas(
-            self, height=_px(self._HEADER_HEIGHT), highlightthickness=0, bd=0, background=_SIDEBAR_BG
+            self, height=_px(self._HEADER_HEIGHT), highlightthickness=0, bd=0, background="#ffffff"
         )
-        self._header.pack(fill="x")
+        self._header.pack(fill="x", padx=_px(20), pady=(_px(14), 0))
         self._header_width = 0
         self._header.bind("<Configure>", lambda e: self._draw_header(e.width))
 
@@ -4317,6 +4345,7 @@ class AssistantDialog(ttk.Toplevel):
         image = _gradient_image(
             width, height, [(0.0, _SIDEBAR_BG), (0.55, "#2f6fed"), (1.0, _CHAT_VIOLET)], mix_x=0.55, mix_y=0.45
         )
+        image = _round_image_corners(image.convert("RGB"), _px(_CHAT_CARD_RADIUS), "#ffffff")
         self._header_photo = ImageTk.PhotoImage(image)
         canvas.create_image(0, 0, anchor="nw", image=self._header_photo)
         x = _px(22)
