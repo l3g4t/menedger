@@ -25,6 +25,7 @@ import faulthandler
 import io
 import os
 import sys
+import time
 import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime
@@ -761,6 +762,12 @@ class App(ttk.Window):
             style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
             style = (style & ~0x00000080) | 0x00040000  # -WS_EX_TOOLWINDOW, +WS_EX_APPWINDOW
             user32.SetWindowLongW(hwnd, -20, style)
+            # Гипотеза (раздел 10.41): без WS_MINIMIZEBOX/WS_SYSMENU у окна без
+            # заголовка Windows не анимирует сворачивание/восстановление
+            # (рисует каркас-контур и пустое окно). Внешне стиль ничего не
+            # добавляет — у окна нет заголовка.
+            base = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+            user32.SetWindowLongW(hwnd, -16, base | 0x00020000 | 0x00080000)
             self.withdraw()
             self.after(10, self.deiconify)
         except Exception:
@@ -810,8 +817,11 @@ class App(ttk.Window):
             if not hwnd:
                 return False
             user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
-            return bool(user32.IsIconic(hwnd))
-        except Exception:
+            iconic = bool(user32.IsIconic(hwnd))
+            self._dlog(f"native minimize: IsIconic={iconic}")
+            return iconic
+        except Exception as error:
+            self._dlog(f"native minimize failed: {error!r}")
             return False
 
     def _on_map(self, event: tk.Event) -> None:
@@ -934,6 +944,18 @@ class App(ttk.Window):
 
             dialog.after(250, report)
 
+    def _dlog(self, message: str) -> None:
+        """Строка в `menedger_debug.log` (только при `MENEDGER_DEBUG=1`)."""
+        log_file = getattr(self, "_debug_log", None)
+        if log_file is None:
+            return
+        import time as _time
+
+        try:
+            log_file.write(f"[{_time.time() - self._debug_started:8.3f}] {message}\n")
+        except (OSError, ValueError):
+            pass
+
     def _start_debug_tools(self) -> None:
         """Диагностика зависаний (раздел 10.35), включается `MENEDGER_DEBUG=1`.
 
@@ -954,7 +976,7 @@ class App(ttk.Window):
             log_path = Path(tempfile.gettempdir()) / "menedger_debug.log"
             log_file = open(log_path, "a", buffering=1, encoding="utf-8")
         self._debug_log = log_file
-        started = _time.time()
+        started = self._debug_started = _time.time()
 
         def log(message: str) -> None:
             log_file.write(f"[{_time.time() - started:8.3f}] {message}\n")
@@ -1446,12 +1468,14 @@ class App(ttk.Window):
             if drawn_size and drawn_size[0] == (width, height):
                 return
             drawn_size[:] = [(width, height)]
+            started = time.perf_counter()
             small = _render_rounded_rect(
                 width, height, fill, surface, radius_px, corners, border_color, border_px
             )
             photo = ImageTk.PhotoImage(small)
             backdrop.configure(image=photo)
             backdrop.photo = photo
+            self._dlog(f"backdrop {width}x{height} {1000 * (time.perf_counter() - started):.0f} ms")
 
         # Всегда слушаем реальный `<Configure>` фрейма, даже у диалогов
         # (раздел 10.27): одноразовая перерисовка по `winfo_width()` в
