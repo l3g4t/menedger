@@ -466,3 +466,22 @@ def test_debug_tools_write_event_log_and_arm_watchdog(app, tmp_path, monkeypatch
     finally:
         faulthandler.cancel_dump_traceback_later()
         app._debug_log.close()
+
+
+# --- Выбор рамки окна (раздел 10.36) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "platform, env, argv, expected",
+    [
+        ("win32", {}, ["app"], True),  # Windows: по умолчанию системная
+        ("win32", {"MENEDGER_CUSTOM_FRAME": "1"}, ["app"], False),
+        ("win32", {}, ["app", "--custom-frame"], False),
+        ("linux", {}, ["app"], False),  # остальные ОС: своя рамка
+        ("linux", {"MENEDGER_NATIVE_FRAME": "1"}, ["app"], True),
+        # NATIVE приоритетнее CUSTOM — запасной выход всегда работает.
+        ("win32", {"MENEDGER_NATIVE_FRAME": "1", "MENEDGER_CUSTOM_FRAME": "1"}, ["app"], True),
+    ],
+)
+def test_use_native_frame_policy(platform, env, argv, expected):
+    assert guiapp._use_native_frame(platform, env, argv) is expected

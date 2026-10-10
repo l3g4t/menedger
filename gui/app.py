@@ -331,6 +331,23 @@ def _render_rounded_rect(
     return result
 
 
+def _use_native_frame(platform: str, env: "os._Environ[str] | dict", argv: list[str]) -> bool:
+    """Нужна ли системная рамка окна (раздел 10.36).
+
+    На Windows безрамочный режим (раздел 10.33) вызывал полное зависание
+    главного экрана при клике, а с системной рамкой зависаний нет
+    (проверено пользователем), поэтому там собственная рамка — только по
+    явному запросу (`MENEDGER_CUSTOM_FRAME=1` или флаг `--custom-frame`),
+    пока причину не найдём. На остальных ОС — собственная рамка по
+    умолчанию. `MENEDGER_NATIVE_FRAME=1` принудительно включает системную
+    рамку везде и приоритетнее всего."""
+    if env.get("MENEDGER_NATIVE_FRAME"):
+        return True
+    if env.get("MENEDGER_CUSTOM_FRAME") or "--custom-frame" in argv:
+        return False
+    return platform == "win32"
+
+
 # ----------------------------------------------------------------------
 # Собственная строка заголовка окна (раздел 10.33)
 # ----------------------------------------------------------------------
@@ -628,7 +645,7 @@ class App(ttk.Window):
         # ДО pack() экранов: она должна встать над ними. `MENEDGER_NATIVE_
         # FRAME=1` оставляет системную рамку (запасной вариант, если
         # безрамочное окно на какой-то системе поведёт себя плохо).
-        self._native_frame = bool(os.environ.get("MENEDGER_NATIVE_FRAME"))
+        self._native_frame = _use_native_frame(sys.platform, os.environ, sys.argv)
         self._chrome_images: dict[tuple, tk.PhotoImage] = {}
         self._maximized = False
         self._minimized = False
@@ -865,7 +882,7 @@ class App(ttk.Window):
         self.bind_all("<ButtonRelease>", lambda e: log(f"ButtonRelease {e.num} {describe(e)}"), add="+")
         self.bind_all("<FocusIn>", lambda e: log(f"FocusIn {describe(e)}"), add="+")
         self.bind_all("<FocusOut>", lambda e: log(f"FocusOut {describe(e)}"), add="+")
-        for sequence in ("<Map>", "<Unmap>"):
+        for sequence in ("<Map>", "<Unmap>", "<Activate>", "<Deactivate>"):
             self.bind(sequence, lambda e, s=sequence: log(f"{s} {describe(e)}") if e.widget is self else None, add="+")
         self.bind("<Configure>", lambda e: log(f"Configure root {e.width}x{e.height}") if e.widget is self else None, add="+")
 
