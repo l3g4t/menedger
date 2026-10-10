@@ -109,6 +109,40 @@ def test_offline_unlocked_false_does_not_invent_facts():
     assert "github" not in answer
 
 
+def test_offline_password_advice_follows_course_slides():
+    """Ответы про «как придумать пароль» опираются на слайды: NIST, L33t,
+    мнемоника, XKCD, rockyou (CLAUDE.md, раздел 9.4)."""
+    ctx = _ctx()
+    how = offline_answer("Как придумать пароль?", ctx)
+    assert "мнемоник" in how and "генератор" in how
+    length = offline_answer("Какой длины должен быть пароль?", ctx)
+    assert "8" in length and "64" in length
+    nist = offline_answer("Какие требования к паролю у NIST?", ctx)
+    assert "8 до 64" in nist and "rockyou" in nist
+    leet = offline_answer("Что такое L33t?", ctx)
+    assert "3l1t3" in leet
+    # Замены букв сами по себе не считаем защитой — честно, а не «да, помогает».
+    subst = offline_answer("Стоит ли заменять буквы цифрами?", ctx)
+    assert "28 бит" in subst and "слабы" in subst
+    assert "rockyou.txt" in offline_answer("Что такое rockyou?", ctx)
+    assert "мнемоник" in offline_answer("Что такое мнемоническая техника?", ctx).lower()
+    phrase = offline_answer("Что лучше: пароль или парольная фраза?", ctx)
+    assert "44 бит" in phrase and "28 бит" in phrase
+
+
+def test_offline_password_advice_answers_are_short():
+    for question in (
+        "Как придумать пароль?",
+        "Какой длины должен быть пароль?",
+        "Какие требования у NIST?",
+        "Что такое leet?",
+        "Что такое rockyou?",
+        "Что такое мнемоника?",
+        "Парольная фраза лучше?",
+    ):
+        assert len(offline_answer(question, None)) <= 450, question
+
+
 def test_offline_default_help_and_plural():
     assert "Спросите" in offline_answer("абвгд", None)
     assert "2 записи" in offline_answer("абвгд", AssistantContext(total_entries=2))
