@@ -873,6 +873,8 @@ class App(ttk.Window):
         self._chrome_theme_name = "dark"
         if not self._native_frame:
             self._install_chrome()
+        else:
+            self._schedule_window_icon(self)
 
         self._unlock_frame.pack(fill="both", expand=True)
         self._apply_screen_size("unlock", center_on_screen=True)
@@ -1109,6 +1111,41 @@ class App(ttk.Window):
             self.after(10, self.deiconify)
         except Exception:
             pass
+
+    def _apply_window_icon(self, window: tk.Misc) -> None:
+        """Windows: явно поставить иконку хранилища окну (главному или диалогу)
+        независимо от типа рамки (раздел 10.65). С системной рамкой иконка в
+        левом верхнем углу заголовка берётся из окна верхнего уровня; здесь она
+        задаётся напрямую `WM_SETICON`, чтобы не зависеть от того, что
+        подставили Tk/ttkbootstrap (у ttkbootstrap по умолчанию — свой значок).
+        Вне Windows ничего не делает."""
+        if sys.platform != "win32":
+            return
+        try:
+            apis = _win_apis()
+            if apis is None:
+                return
+            inner = window.winfo_id()
+            self._set_native_window_icon(apis[0].GetParent(inner), inner)
+        except Exception:
+            pass
+
+    def _schedule_window_icon(self, window: tk.Misc) -> None:
+        """Иконку нельзя ставить, пока у окна нет системного описателя, а Tk при
+        показе окна может перезаписать её своей, поэтому — дважды: сразу после
+        создания и ещё раз чуть позже (раздел 10.65)."""
+        if sys.platform != "win32":
+            return
+
+        def apply() -> None:
+            try:
+                if window.winfo_exists():
+                    self._apply_window_icon(window)
+            except tk.TclError:
+                pass
+
+        window.after(50, apply)
+        window.after(600, apply)
 
     def _set_native_window_icon(self, hwnd: int, inner_hwnd: int) -> None:
         """Windows: иконка окна для панели задач, превью при наведении и
@@ -1362,6 +1399,9 @@ class App(ttk.Window):
         `super().__init__`, до построения содержимого — чтобы строка
         оказалась сверху."""
         if self._native_frame:
+            # Системная рамка: иконка в левом верхнем углу заголовка диалога —
+            # иконка хранилища (раздел 10.65).
+            self._schedule_window_icon(dialog)
             return
         dialog.overrideredirect(True)
         # Скруглённые углы окна (раздел 10.46) — только Windows; сами накладки

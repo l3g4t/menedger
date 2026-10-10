@@ -1324,6 +1324,56 @@ def test_native_window_icon_is_noop_off_windows(app, monkeypatch):
     assert not hasattr(app, "_native_icons")
 
 
+def test_window_icon_is_set_explicitly_for_system_frame_main_window_and_dialogs(app, monkeypatch):
+    """Раздел 10.65: при системной рамке иконка хранилища ставится окну
+    явно (WM_SETICON) — главному и диалогам; вне Windows ничего не происходит."""
+    fake = _FakeWinApis()
+    monkeypatch.setattr(guiapp, "_win_apis", lambda: (fake.user32, fake.gdi32))
+    calls = []
+    monkeypatch.setattr(app, "_set_native_window_icon", lambda hwnd, inner: calls.append((hwnd, inner)))
+
+    # не Windows — тишина
+    monkeypatch.setattr(guiapp.sys, "platform", "linux")
+    app._apply_window_icon(app)
+    assert calls == []
+
+    # Windows — иконка ставится окну верхнего уровня (родитель описателя Tk)
+    monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    app.update()
+    app._apply_window_icon(app)
+    assert calls == [(4242, app.winfo_id())]
+
+    # ошибка в API не роняет окно
+    monkeypatch.setattr(guiapp, "_win_apis", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    app._apply_window_icon(app)
+
+    # системная рамка: диалог просит поставить иконку; своя рамка — не просит
+    scheduled = []
+    monkeypatch.setattr(app, "_schedule_window_icon", lambda w: scheduled.append(w))
+    dialog = guiapp.tk.Toplevel(app)
+    try:
+        app._native_frame = True
+        app._dialog_chrome(dialog, "x")
+        assert scheduled == [dialog]
+        app._native_frame = False
+        app._dialog_chrome(guiapp.tk.Toplevel(app), "y")
+        assert len(scheduled) == 1
+    finally:
+        dialog.destroy()
+
+
+def test_native_frame_app_schedules_window_icon(monkeypatch, tmp_path):
+    monkeypatch.setenv("MENEDGER_NATIVE_FRAME", "1")
+    monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    scheduled = []
+    monkeypatch.setattr(guiapp.App, "_schedule_window_icon", lambda self, w: scheduled.append(w))
+    instance = guiapp.App()
+    try:
+        assert scheduled == [instance]
+    finally:
+        instance.destroy()
+
+
 def _wait_idle(dialog, timeout=5.0):
     import time
 
