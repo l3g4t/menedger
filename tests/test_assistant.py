@@ -194,3 +194,20 @@ def test_model_path_search_order(monkeypatch, tmp_path):
     monkeypatch.setenv(llm.MODEL_ENV, str(tmp_path / "nope.gguf"))
     assert all(isinstance(p, type(explicit)) for p in llm.candidate_model_paths())
     assert llm.candidate_model_paths()[0].name == "nope.gguf"
+
+
+def test_selftest_reports_missing_model(capsys, tmp_path, monkeypatch):
+    from assistant import selftest
+
+    monkeypatch.delenv(llm.MODEL_ENV, raising=False)
+    assert selftest.main([str(tmp_path / "none.gguf")]) == 1
+    out = capsys.readouterr().out
+    assert "Модель недоступна" in out and "файл модели не найден" in out
+
+
+def test_selftest_runs_questions_on_fake_engine(capsys, fake_engine):
+    from assistant import selftest
+
+    assert selftest.main([str(fake_engine)]) == 0
+    out = capsys.readouterr().out
+    assert "ответ модели" in out and "[пароль скрыт]" in out and SECRET_A not in out

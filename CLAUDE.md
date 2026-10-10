@@ -267,7 +267,7 @@ menedger/
 - [x] `tests/test_cli.py` — 23 теста, все проходят
 - [x] `tests/test_strength.py`, `tests/test_advisor.py`, `tests/test_generator.py` — 25 тестов, все проходят
 - [x] `tests/test_gui.py` — 16 тестов (пропускаются, если нет tkinter/дисплея)
-- **Итого: 163 теста (94 гарантированно + 69 GUI при наличии tkinter/дисплея), все проходят.**
+- **Итого: 165 тестов (96 гарантированно + 69 GUI при наличии tkinter/дисплея), все проходят.**
 
 ### Детали CLI (`vault/cli.py`)
 
@@ -606,7 +606,8 @@ training/        — DEV-ONLY (в приложение не входит)
 ├── data/general_qa.json — 46 общих пар «вопрос → ответ» (правит владелец)
 ├── data/dataset.jsonl, data/review.md — результат (112 примеров)
 ├── finetune_colab.py    — LoRA через unsloth в Google Colab (НЕ ПРОВЕРЕН)
-└── README.md
+└── README.md            — пошаговая инструкция: датасет -> Colab -> .gguf -> проверка
+assistant/selftest.py       — python -m assistant.selftest: проверка модели (время, ответы)
 requirements-assistant.txt  — llama-cpp-python==0.3.16 (необязательная)
 requirements-training.txt   — unsloth/trl/datasets (только Colab)
 ```
