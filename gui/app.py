@@ -207,9 +207,7 @@ _UNLOCK_CONTROL_HEIGHT = 42  # px
 # главный экран.
 _UNLOCK_MARGIN_X = 40  # px
 _UNLOCK_MARGIN_Y = 24  # px
-# Ширина 1120, а не 980: в верхний ряд кнопок добавилась «Мастер-пароль»
-# (раздел 10.66), пять кнопок в 980 не помещались (раздел 10.8: тот же урок).
-_MAIN_WINDOW_SIZE = (1120, 640)  # px
+_MAIN_WINDOW_SIZE = (980, 640)  # px
 _MAIN_MIN_SIZE = (760, 460)  # px
 # Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
 # этого цвета окно не рисует. Яркий и нигде больше в интерфейсе не встречается.
@@ -2949,8 +2947,6 @@ class App(ttk.Window):
         for text, command, icon_name in (
             ("Добавить", self._on_add, "plus"),
             ("Удалить", self._on_delete_selected, "trash"),
-            ("Советник", self._on_audit, "shield"),
-            ("Генератор", self._on_generate_standalone, "dice"),
         ):
             self._styled(
                 ttk.Button(
