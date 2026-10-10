@@ -714,3 +714,28 @@ def test_unlock_card_has_rounded_backdrop_matching_its_size(app):
     assert (photo.width(), photo.height()) == (card.winfo_width(), card.winfo_height())
     assert str(card.cget("relief")) != "solid"
 
+
+def test_window_shrinks_around_card_on_unlock_screen(app):
+    """Раздел 10.48: на экране разблокировки окно ужато вокруг карточки (немного
+    тёмного фона), на главном — обычного размера, и обратно после блокировки."""
+    app.update()
+    ax, ay, aw, ah = app._work_area()
+    card = app._unlock_card
+    margin = 2 * guiapp._px(guiapp._UNLOCK_MARGIN_X)
+    unlock_size = (app.winfo_width(), app.winfo_height())
+    assert unlock_size[0] == min(card.winfo_reqwidth() + margin, aw)
+    assert unlock_size[0] < guiapp._px(guiapp._MAIN_WINDOW_SIZE[0])
+
+    app.data = {"entries": []}
+    app._show_main()
+    app.update()
+    assert app.winfo_width() == min(guiapp._px(guiapp._MAIN_WINDOW_SIZE[0]), aw)
+    assert app.minsize() == (
+        min(guiapp._px(guiapp._MAIN_MIN_SIZE[0]), aw),
+        min(guiapp._px(guiapp._MAIN_MIN_SIZE[1]), ah),
+    )
+
+    app._on_lock()
+    app.update()
+    assert (app.winfo_width(), app.winfo_height()) == unlock_size
+

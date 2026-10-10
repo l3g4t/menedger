@@ -193,6 +193,13 @@ _VIEW_WINDOW_RADIUS = 14  # px скругления углов самого ок
 # Экран разблокировки (раздел 10.46): высота полей ввода и ВСЕХ кнопок на
 # нём одна — иначе кнопка рядом с полем выше/ниже него.
 _UNLOCK_CONTROL_HEIGHT = 42  # px
+# Отступы тёмного фона вокруг карточки на экране разблокировки (раздел 10.48):
+# окно на этом экране ужимается вокруг карточки, а не остаётся размером с
+# главный экран.
+_UNLOCK_MARGIN_X = 40  # px
+_UNLOCK_MARGIN_Y = 24  # px
+_MAIN_WINDOW_SIZE = (980, 640)  # px
+_MAIN_MIN_SIZE = (760, 460)  # px
 # Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
 # этого цвета окно не рисует. Яркий и нигде больше в интерфейсе не встречается.
 _WINDOW_KEY_COLOR = "#fe00fe"
@@ -737,6 +744,7 @@ class App(ttk.Window):
             self._install_chrome()
 
         self._unlock_frame.pack(fill="both", expand=True)
+        self._apply_screen_size("unlock", center_on_screen=True)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -771,6 +779,38 @@ class App(ttk.Window):
 
     def _is_maximized(self, window: tk.Misc) -> bool:
         return window is self and self._maximized
+
+    def _apply_screen_size(self, screen: str, *, center_on_screen: bool = False) -> None:
+        """Размер окна под экран (раздел 10.48): на экране разблокировки окно
+        ужато вокруг белой карточки (тёмного фона вокруг — немного), на
+        главном экране — обычного размера. Центр окна сохраняется (при
+        первом показе окно ставится по центру рабочей области). Развёрнутое
+        окно сначала возвращается к обычному размеру."""
+        if self._maximized:
+            self._toggle_maximize()
+        scale = _px
+        if screen == "unlock":
+            self.update_idletasks()
+            card = self._unlock_card
+            bar = 0 if self._native_frame else scale(_CHROME_BAR_HEIGHT)
+            width = card.winfo_reqwidth() + 2 * scale(_UNLOCK_MARGIN_X)
+            height = card.winfo_reqheight() + bar + 2 * scale(_UNLOCK_MARGIN_Y)
+            min_size = (width, height)
+        else:
+            width, height = scale(_MAIN_WINDOW_SIZE[0]), scale(_MAIN_WINDOW_SIZE[1])
+            min_size = (scale(_MAIN_MIN_SIZE[0]), scale(_MAIN_MIN_SIZE[1]))
+        ax, ay, aw, ah = self._work_area()
+        width, height = min(width, aw), min(height, ah)
+        min_size = (min(min_size[0], aw), min(min_size[1], ah))
+        if center_on_screen:
+            center_x, center_y = ax + aw // 2, ay + ah // 2
+        else:
+            center_x = self.winfo_x() + self.winfo_width() // 2
+            center_y = self.winfo_y() + self.winfo_height() // 2
+        x = min(max(center_x - width // 2, ax), ax + aw - width)
+        y = min(max(center_y - height // 2, ay), ay + ah - height)
+        self.minsize(*min_size)
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     def _install_chrome(self) -> None:
         self.overrideredirect(True)
@@ -951,8 +991,9 @@ class App(ttk.Window):
 
     def _grip_move(self, event: tk.Event) -> None:
         x0, y0, width, height = self._grip_origin
-        new_w = max(_px(760), width + event.x_root - x0)
-        new_h = max(_px(460), height + event.y_root - y0)
+        min_w, min_h = self.minsize()
+        new_w = max(min_w, width + event.x_root - x0)
+        new_h = max(min_h, height + event.y_root - y0)
         self.geometry(f"{new_w}x{new_h}")
 
     def _dialog_chrome(
@@ -2048,8 +2089,16 @@ class App(ttk.Window):
             ),
         ).pack(fill="both", expand=True)
 
-        self._unlock_status = ttk.Label(card, text="", bootstyle="danger")
-        self._unlock_status.pack(fill="x", pady=(_px(4), _px(8)))
+        # Место под сообщение об ошибке зарезервировано (две строки): иначе
+        # длинное сообщение раздвигало бы карточку, а вместе с ней — и
+        # окно, которое на этом экране подогнано под карточку (раздел 10.48).
+        status_holder = ttk.Frame(card, height=_px(34))
+        status_holder.pack_propagate(False)
+        status_holder.pack(fill="x", pady=(_px(2), _px(2)))
+        self._unlock_status = ttk.Label(
+            status_holder, text="", bootstyle="danger", wraplength=_px(360), justify="left"
+        )
+        self._unlock_status.pack(fill="x", anchor="n")
 
         unlock_cell = ttk.Frame(card, height=control_height)
         unlock_cell.pack_propagate(False)
@@ -2387,6 +2436,7 @@ class App(ttk.Window):
         self._unlock_frame.pack_forget()
         self._main_frame.pack(fill="both", expand=True)
         self._set_chrome_theme("light")
+        self._apply_screen_size("main")
         self._refresh_tree()
         if os.environ.get("MENEDGER_DEBUG"):
             self.after(500, lambda: self._debug_report_images("главный экран"))
@@ -2573,6 +2623,7 @@ class App(ttk.Window):
         self._main_frame.pack_forget()
         self._unlock_frame.pack(fill="both", expand=True)
         self._set_chrome_theme("dark")
+        self._apply_screen_size("unlock")
 
     def _on_close(self) -> None:
         self.destroy()
