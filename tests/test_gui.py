@@ -1699,3 +1699,90 @@ def test_change_master_button_is_in_the_top_row_and_not_squeezed(app, monkeypatc
     # «Проблемы» (бывший «Советник») и «Генератор» — только в левой панели (разделы 10.67, 10.69).
     for name in ("Проблемы", "Генератор"):
         assert len([b for b in buttons if b.cget("text") == name]) == 1
+
+
+# --- окно «Проблемы» в современном виде (CLAUDE.md, раздел 10.70) ---------------
+
+
+def _sample_report():
+    return AdvisorReport(
+        reused_groups=[["github.com (bob)", "mail.ru (al)"]],
+        weak_entries=[
+            EntryIssue("github.com", "bob", ["входит в список самых часто встречающихся паролей"]),
+            EntryIssue("mail.ru", "al", ["содержит название сайта", "низкая оценка энтропии"]),
+        ],
+        old_entries=[EntryIssue("github.com", "bob", ["не менялся 400 дн."])],
+    )
+
+
+def test_problems_dialog_shows_a_card_per_finding_and_tiles_filter_them(app):
+    dialog = guiapp.AuditDialog(app, _sample_report())
+    try:
+        dialog.update()
+        assert dialog.card_count == 4  # 1 повтор + 2 слабых + 1 устаревший
+        assert {k: t["count"] for k, t in dialog._tiles.items()} == {"reused": 1, "weak": 2, "old": 1}
+
+        dialog._toggle_filter("weak")
+        assert dialog.card_count == 2
+        assert dialog._tiles["weak"]["underline"].cget("bg") == dialog._tiles["weak"]["color"]
+        assert dialog._tiles["reused"]["underline"].cget("bg") == "#ffffff"
+
+        dialog._toggle_filter("old")  # другая плитка — переключение на неё
+        assert dialog.card_count == 1
+
+        dialog._toggle_filter("old")  # повторный щелчок — снова всё
+        assert dialog.card_count == 4
+    finally:
+        dialog.destroy()
+
+
+def test_problems_dialog_each_reason_is_its_own_pill(app):
+    dialog = guiapp.AuditDialog(app, _sample_report())
+    try:
+        dialog.update()
+        texts = []
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if child.winfo_class() == "Label":
+                    texts.append(child.cget("text"))
+                walk(child)
+
+        walk(dialog._feed)
+        assert "содержит название сайта" in texts and "низкая оценка энтропии" in texts  # раздельно
+        assert "тот же пароль: mail.ru (al)" in texts
+    finally:
+        dialog.destroy()
+
+
+def test_problems_dialog_empty_state_and_summary(app):
+    clean = guiapp.AuditDialog(app, AdvisorReport())
+    try:
+        clean.update()
+        assert clean.card_count == 0 and not hasattr(clean, "_feed")  # вместо пустого списка — галочка
+    finally:
+        clean.destroy()
+    dialog = guiapp.AuditDialog(app, _sample_report())
+    try:
+        texts = [w.cget("text") for w in _find_widgets_by_class(dialog, "TLabel") if w.cget("text")]
+        assert "Найдено 4 проблемы" in texts
+    finally:
+        dialog.destroy()
+
+
+def test_problems_dialog_scrollbar_hidden_when_everything_fits(app):
+    dialog = guiapp.AuditDialog(app, AdvisorReport(reused_groups=[["a.com (x)", "b.com (y)"]]))
+    try:
+        dialog.update()
+        dialog.update()
+        assert not dialog._feed_scroll.winfo_ismapped()
+    finally:
+        dialog.destroy()
+    many = AdvisorReport(weak_entries=[EntryIssue(f"s{i}.com", "u", ["слабый"]) for i in range(30)])
+    dialog = guiapp.AuditDialog(app, many)
+    try:
+        dialog.update()
+        dialog.update()
+        assert dialog._feed_scroll.winfo_ismapped()
+    finally:
+        dialog.destroy()

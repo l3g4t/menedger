@@ -43,6 +43,7 @@ from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, AdvisorReport, analyz
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
 from assistant.llm import Assistant
+from assistant.offline import plural as ru_plural
 from assistant.prompt import context_from_report, redact_secrets
 from assistant.strength import estimate_entropy_bits, is_common_password
 from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
@@ -4016,213 +4017,181 @@ class ViewEntryDialog(ttk.Toplevel):
         self._parent._refresh_tree()
 
 
+def _check_badge_image(size: int, color: str) -> Image.Image:
+    """Круг цвета `color` с белой галочкой — для состояния «проблем нет»
+    (4-кратный суперсэмплинг, как у остальной графики приложения)."""
+    scale = 4
+    canvas = size * scale
+    image = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((0, 0, canvas - 1, canvas - 1), fill=color)
+    width = max(2, canvas // 11)
+    points = [(canvas * 0.29, canvas * 0.52), (canvas * 0.44, canvas * 0.67), (canvas * 0.72, canvas * 0.36)]
+    draw.line(points, fill="#ffffff", width=width, joint="curve")
+    for x, y in (points[0], points[2]):
+        draw.ellipse((x - width / 2, y - width / 2, x + width / 2, y + width / 2), fill="#ffffff")
+    return image.resize((size, size), Image.LANCZOS)
+
+
 class AuditDialog(ttk.Toplevel):
-    """Отчёт советника по безопасности (см. assistant.advisor) —
-    переверстан по референсу-варианту C (раздел 10.24): единый
-    прокручиваемый список находок с цветным маркером и заглавной
-    подписью категории перед каждой группой, плюс бейджи-счётчики в
-    шапке — вместо прежнего простого read-only `ScrolledText` с сырым
-    `format_report()`-текстом. Принимает сам `AdvisorReport`, а не уже
-    отформатированную строку: разметке нужны отдельные поля (site/
-    username/reasons), а не единый блок текста."""
+    """Окно «Проблемы» — отчёт `assistant.advisor` (раздел 10.24, переверстано в
+    разделе 10.70 «в современном виде»).
+
+    Вместо плоского списка с точками: сверху три плитки-счётчика (повторы /
+    слабые / устаревшие), которые одновременно служат ФИЛЬТРОМ — щелчок по плитке
+    показывает только эту категорию, повторный щелчок возвращает всё; под
+    выбранной плиткой — цветная полоска. Каждая находка — своя скруглённая карточка:
+    сайт и логин, а причины — цветные «таблетки» (одна причина — одна таблетка), а
+    не строка через точку с запятой. Если проблем нет — крупная зелёная галочка
+    вместо пустого списка. Принимает сам `AdvisorReport`: разметке нужны отдельные
+    поля, а не готовый текст.
+
+    Только отображение: что считать проблемой, решает `assistant.advisor`."""
+
+    CATEGORIES = (
+        ("reused", "Повторы", "Повторно используемые пароли", _ADVISOR_REUSED_COLOR),
+        ("weak", "Слабые", "Слабые пароли", _ADVISOR_WEAK_COLOR),
+        ("old", "Устаревшие", "Устаревшие пароли", _ADVISOR_OLD_COLOR),
+    )
+    FEED_WIDTH = 440  # px, ширина ленты карточек
+    FEED_HEIGHT = 270  # px
 
     def __init__(self, parent: App, report: AdvisorReport) -> None:
         super().__init__(title="Проблемы", master=parent, resizable=(False, False), iconphoto=None)
         parent._dialog_chrome(self, "Проблемы")
         self.transient(parent)
+        self._app = parent
+        self._report = report
+        self._filter: str | None = None  # None — показаны все категории
+        self._card_count = 0
+        self._tiles: dict[str, dict] = {}
+        pending_backdrops: list[Callable[[], None]] = []
+
+        counts = {
+            "reused": len(report.reused_groups),
+            "weak": len(report.weak_entries),
+            "old": len(report.old_entries),
+        }
+        total = sum(counts.values())
 
         content = ttk.Frame(self, padding=_px(24))
         content.pack(fill="both", expand=True)
 
-        # --- Заголовок: иконка-бейдж + название + подпись (тот же
-        # приём, что и в GeneratorDialog/CreateVaultDialog) ---
+        # --- Заголовок: иконка-бейдж, название, итог одной строкой ---
         header = ttk.Frame(content)
         header.pack(fill="x")
         badge = tk.Frame(header, width=_px(42), height=_px(42), bd=0, highlightthickness=0)
         badge.pack(side="left", padx=(0, _px(12)))
         badge_image = parent._rounded_image(42, _ACCENT, "#ffffff")
-        tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
-            x=0, y=0, relwidth=1, relheight=1
-        )
-        shield_icon = parent._button_icon("warning", "white")
-        if shield_icon is not None:
-            tk.Label(badge, image=shield_icon, bd=0, bg=_ACCENT, highlightthickness=0).place(
+        tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(x=0, y=0, relwidth=1, relheight=1)
+        warning_icon = parent._button_icon("warning", "white")
+        if warning_icon is not None:
+            tk.Label(badge, image=warning_icon, bd=0, bg=_ACCENT, highlightthickness=0).place(
                 relx=0.5, rely=0.5, anchor="center"
             )
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="both", expand=True)
-        ttk.Label(
-            title_stack, text="Проблемы", font=("", 14, "bold"), foreground=_SIDEBAR_BG
-        ).pack(anchor="w")
-        ttk.Label(
-            title_stack,
-            text="эвристический анализ, без ИИ и без сети",
-            foreground=_SEARCH_PLACEHOLDER_COLOR,
-            font=("", 9),
-        ).pack(anchor="w")
+        ttk.Label(title_stack, text="Проблемы", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(anchor="w")
+        summary = (
+            "Всё в порядке"
+            if report.is_clean
+            else f"Найдено {total} {ru_plural(total, ('проблема', 'проблемы', 'проблем'))}"
+        )
+        ttk.Label(title_stack, text=summary, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)).pack(anchor="w")
 
         if report.is_clean:
-            # Тот же смысл, что и "Явных проблем не найдено." в
-            # текстовом отчёте CLI (assistant.advisor.format_report) —
-            # только оформлено как часть карточки, а не голая строка.
-            empty_box = ttk.Frame(content, padding=(0, _px(28)))
+            # Пустой список — это не «ничего», а хорошая новость: зелёная галочка.
+            empty_box = ttk.Frame(content, padding=(0, _px(34), 0, _px(26)), width=_px(self.FEED_WIDTH))
             empty_box.pack(fill="both", expand=True)
-            ttk.Label(
-                empty_box, text="Явных проблем не найдено", font=("", 12, "bold"), justify="center"
-            ).pack()
+            self._check_image = parent._tk_image(_check_badge_image(_px(72), "#22a06b"))
+            ttk.Label(empty_box, image=self._check_image).pack()
+            ttk.Label(empty_box, text="Проблем не найдено", font=("", 13, "bold")).pack(pady=(_px(14), 0))
             ttk.Label(
                 empty_box,
-                text="Хранилище прошло эвристическую проверку советника.",
+                text="Повторов, слабых и устаревших паролей в хранилище нет.",
                 foreground=_SEARCH_PLACEHOLDER_COLOR,
                 font=("", 9),
                 justify="center",
+                wraplength=_px(self.FEED_WIDTH - 40),
             ).pack(pady=(_px(4), 0))
         else:
-            # --- Бейджи-счётчики по категориям (раздел 10.24) —
-            # намеренно "Категория: N" без склонения числительного
-            # ("1 повтор"/"2 повтора"/"5 повторов"), а не грамматически
-            # согласованная подпись, как на самом референсе-мокапе:
-            # правильное русское склонение по числу — самостоятельная
-            # маленькая задача (правила для "повтор"/"слабый"/
-            # "устаревший" разные), не оправданная для трёх бейджей в
-            # одном диалоге (раздел 7 — не усложнять сверх задачи).
-            badges_row = ttk.Frame(content)
-            badges_row.pack(fill="x", pady=(_px(18), 0))
+            # --- Плитки-счётчики = фильтры ---
+            tiles_row = ttk.Frame(content)
+            tiles_row.pack(fill="x", pady=(_px(18), 0))
+            for column, (key, caption, _heading, color) in enumerate(self.CATEGORIES):
+                tiles_row.columnconfigure(column, weight=1, uniform="audit_tiles")
+                count = counts[key]
+                tint = _mix(color, "#ffffff", 0.88) if count else _NEUTRAL_FILL
+                accent = color if count else _SEARCH_PLACEHOLDER_COLOR
+                cell = ttk.Frame(tiles_row)
+                cell.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else _px(8), 0))
+                tile = ttk.Frame(cell, padding=(_px(14), _px(10)))
+                tile.pack(fill="x")
+                pending_backdrops.append(
+                    parent._rounded_backdrop(
+                        tile,
+                        tint,
+                        corners=(True, True, True, True),
+                        surface="#ffffff",
+                        radius=_ROUNDED_RADIUS,
+                        border_color=_mix(accent, "#ffffff", 0.7),
+                        border_width=1,
+                    )
+                )
+                number = tk.Label(tile, text=str(count), bg=tint, fg=accent, font=("", 20, "bold"), bd=0)
+                number.pack(anchor="w")
+                label = tk.Label(tile, text=caption, bg=tint, fg=accent, font=("", 9, "bold"), bd=0)
+                label.pack(anchor="w")
+                underline = tk.Frame(cell, height=_px(3), bg="#ffffff", bd=0)
+                underline.pack(fill="x", pady=(_px(4), 0))
+                self._tiles[key] = {"underline": underline, "color": color, "count": count}
+                if count:
+                    for widget in (tile, number, label):
+                        widget.configure(cursor="hand2")
+                        widget.bind("<Button-1>", lambda _e, k=key: self._toggle_filter(k))
+            ttk.Label(
+                content,
+                text="Нажмите на плитку, чтобы показать только эту категорию",
+                foreground=_SEARCH_PLACEHOLDER_COLOR,
+                font=("", 8),
+            ).pack(anchor="w", pady=(_px(6), 0))
 
-            def add_chip(count: int, label: str, color: str) -> None:
-                if count == 0:
-                    return
-                ttk.Label(
-                    badges_row,
-                    text=f"{label}: {count}",
-                    background=_mix(color, "#ffffff", 0.85),
-                    foreground=color,
-                    font=("", 9, "bold"),
-                    padding=(_px(10), _px(4)),
-                ).pack(side="left", padx=(0, _px(8)))
-
-            add_chip(len(report.reused_groups), "Повторы", _ADVISOR_REUSED_COLOR)
-            add_chip(len(report.weak_entries), "Слабые", _ADVISOR_WEAK_COLOR)
-            add_chip(len(report.old_entries), "Устаревшие", _ADVISOR_OLD_COLOR)
-
-            # --- Прокручиваемый список находок (Canvas + внутренний
-            # Frame + Scrollbar — классический приём для скроллинга
-            # произвольных виджетов в Tkinter, `ttk.Treeview`/`Text`
-            # тут не подходят: раздел 10.12 уже объяснял, что Treeview
-            # не даёт разное форматирование внутри одной строки без
-            # owner-drawn ячеек, а нам нужны цветной маркер + жирный
-            # сайт + приглушённые логин/причина в одной строке).
-            # Фиксированная высота (320px) вместо авторазмера под
-            # содержимое — при большом хранилище список находок мог бы
-            # быть длиннее экрана; раньше это же делал `ScrolledText`
-            # автоматически.
+            # --- Лента карточек (Canvas + внутренний Frame + тонкая полоса прокрутки) ---
             feed_wrap = ttk.Frame(content)
-            feed_wrap.pack(fill="both", expand=True, pady=(_px(16), 0))
-            feed_canvas = tk.Canvas(
-                feed_wrap, width=_px(420), height=_px(320), highlightthickness=0, bd=0, background="#ffffff"
+            feed_wrap.pack(fill="both", expand=True, pady=(_px(10), 0))
+            self._feed_canvas = tk.Canvas(
+                feed_wrap,
+                width=_px(self.FEED_WIDTH),
+                height=_px(self.FEED_HEIGHT),
+                highlightthickness=0,
+                bd=0,
+                background="#ffffff",
             )
-            feed_scroll = ttk.Scrollbar(feed_wrap, orient="vertical", command=feed_canvas.yview)
-            feed_canvas.configure(yscrollcommand=feed_scroll.set)
-            feed_canvas.pack(side="left", fill="both", expand=True)
-            feed_scroll.pack(side="right", fill="y")
+            feed_scroll = ttk.Scrollbar(
+                feed_wrap, orient="vertical", command=self._feed_canvas.yview, bootstyle="round"
+            )
+            self._feed_canvas.pack(side="left", fill="both", expand=True)
 
-            feed_frame = ttk.Frame(feed_canvas)
-            feed_window = feed_canvas.create_window((0, 0), window=feed_frame, anchor="nw")
+            def update_scrollbar(first: str, last: str) -> None:
+                # Полоса прокрутки нужна, только если лента не помещается целиком.
+                feed_scroll.set(first, last)
+                if float(first) <= 0.0 and float(last) >= 1.0:
+                    feed_scroll.pack_forget()
+                elif not feed_scroll.winfo_ismapped():
+                    feed_scroll.pack(side="right", fill="y", padx=(_px(6), 0))
 
-            def _sync_scrollregion(_event=None) -> None:
-                feed_canvas.configure(scrollregion=feed_canvas.bbox("all"))
-
-            def _sync_inner_width(event) -> None:
-                feed_canvas.itemconfigure(feed_window, width=event.width)
-
-            feed_frame.bind("<Configure>", _sync_scrollregion)
-            feed_canvas.bind("<Configure>", _sync_inner_width)
-
-            def _on_mousewheel(event) -> None:
-                # Linux/X11 (Button-4/5) и Windows/macOS (MouseWheel) —
-                # разные события для одного и того же жеста; биндинг
-                # только на сам канвас, чтобы не перехватывать прокрутку
-                # где-либо ещё в приложении.
-                if event.num == 4:
-                    feed_canvas.yview_scroll(-1, "units")
-                elif event.num == 5:
-                    feed_canvas.yview_scroll(1, "units")
-                else:
-                    feed_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-
-            feed_canvas.bind("<Button-4>", _on_mousewheel)
-            feed_canvas.bind("<Button-5>", _on_mousewheel)
-            feed_canvas.bind("<MouseWheel>", _on_mousewheel)
-
-            is_first_section = True
-
-            def add_section_label(text: str) -> None:
-                nonlocal is_first_section
-                ttk.Label(
-                    feed_frame,
-                    text=text.upper(),
-                    font=("", 8, "bold"),
-                    foreground=_SEARCH_PLACEHOLDER_COLOR,
-                ).pack(fill="x", anchor="w", pady=(0 if is_first_section else _px(14), _px(6)))
-                is_first_section = False
-
-            def add_feed_row(color: str, build_body) -> None:
-                row = ttk.Frame(feed_frame)
-                row.pack(fill="x")
-                tk.Label(
-                    row, image=parent._advisor_marker(color), bd=0, highlightthickness=0
-                ).pack(side="left", padx=(_px(2), _px(10)), pady=(_px(6), 0))
-                body = ttk.Frame(row)
-                body.pack(side="left", fill="x", expand=True)
-                build_body(body)
-                ttk.Separator(feed_frame).pack(fill="x", pady=(_px(8), _px(8)))
-
-            def add_issue_row(color: str, site: str, username: str, detail: str) -> None:
-                def build(body: ttk.Frame) -> None:
-                    line1 = ttk.Frame(body)
-                    line1.pack(fill="x", anchor="w")
-                    ttk.Label(line1, text=site, font=("", 10, "bold")).pack(side="left")
-                    ttk.Label(
-                        line1, text=f"  {username}", foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
-                    ).pack(side="left")
-                    ttk.Label(
-                        body, text=detail, font=("", 9), wraplength=_px(340), justify="left"
-                    ).pack(anchor="w", pady=(_px(2), 0))
-
-                add_feed_row(color, build)
-
-            def add_reused_row(color: str, group: list[str]) -> None:
-                def build(body: ttk.Frame) -> None:
-                    ttk.Label(body, text=group[0], font=("", 10, "bold")).pack(anchor="w")
-                    ttk.Label(
-                        body,
-                        text=f"тот же пароль: {', '.join(group[1:])}",
-                        foreground=_SEARCH_PLACEHOLDER_COLOR,
-                        font=("", 9),
-                        wraplength=_px(340),
-                        justify="left",
-                    ).pack(anchor="w", pady=(_px(2), 0))
-
-                add_feed_row(color, build)
-
-            if report.reused_groups:
-                add_section_label("Повторно используемые пароли")
-                for group in report.reused_groups:
-                    add_reused_row(_ADVISOR_REUSED_COLOR, group)
-
-            if report.weak_entries:
-                add_section_label("Слабые пароли")
-                for issue in report.weak_entries:
-                    add_issue_row(
-                        _ADVISOR_WEAK_COLOR, issue.site, issue.username, "; ".join(issue.reasons)
-                    )
-
-            if report.old_entries:
-                add_section_label("Устаревшие пароли")
-                for issue in report.old_entries:
-                    add_issue_row(
-                        _ADVISOR_OLD_COLOR, issue.site, issue.username, "; ".join(issue.reasons)
-                    )
+            self._feed_canvas.configure(yscrollcommand=update_scrollbar)
+            self._feed_scroll = feed_scroll
+            self._feed = ttk.Frame(self._feed_canvas)
+            feed_window = self._feed_canvas.create_window((0, 0), window=self._feed, anchor="nw")
+            self._feed.bind(
+                "<Configure>",
+                lambda _e: self._feed_canvas.configure(scrollregion=self._feed_canvas.bbox("all")),
+            )
+            self._feed_canvas.bind(
+                "<Configure>", lambda e: self._feed_canvas.itemconfigure(feed_window, width=e.width)
+            )
+            self._render_feed()
 
         footer = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
         footer.pack(fill="x")
@@ -4231,9 +4200,116 @@ class AuditDialog(ttk.Toplevel):
             parent._neutral_style(),
         ).pack(side="right")
 
+        self.update_idletasks()
+        for redraw in pending_backdrops:
+            redraw()
         parent._round_dialog_corners(self)
         self.place_window_center()
         self.grab_set()
+
+    # --- фильтр и лента ---------------------------------------------------
+
+    def _toggle_filter(self, key: str) -> None:
+        """Щелчок по плитке: показать только эту категорию; повторный — все."""
+        self._filter = None if self._filter == key else key
+        for name, tile in self._tiles.items():
+            selected = self._filter == name
+            tile["underline"].configure(bg=tile["color"] if selected else "#ffffff")
+        self._render_feed()
+
+    @property
+    def card_count(self) -> int:
+        """Сколько карточек сейчас показано (для проверок)."""
+        return self._card_count
+
+    def _render_feed(self) -> None:
+        for child in self._feed.winfo_children():
+            child.destroy()
+        self._card_count = 0
+        report = self._report
+        first_section = True
+
+        def section(heading: str) -> None:
+            nonlocal first_section
+            ttk.Label(
+                self._feed,
+                text=heading.upper(),
+                font=("", 8, "bold"),
+                foreground=_SEARCH_PLACEHOLDER_COLOR,
+            ).pack(fill="x", anchor="w", pady=(0 if first_section else _px(12), _px(6)))
+            first_section = False
+
+        def card(color: str, site: str, username: str, pills: list[str]) -> None:
+            fill = _NEUTRAL_FILL
+            frame = ttk.Frame(self._feed, padding=(_px(14), _px(10)))
+            frame.pack(fill="x", pady=(0, _px(8)))
+            self._app._rounded_backdrop(
+                frame,
+                fill,
+                corners=(True, True, True, True),
+                surface="#ffffff",
+                radius=_ROUNDED_RADIUS,
+                border_color=_NEUTRAL_BORDER,
+                border_width=1,
+                dynamic=True,
+            )
+            top = tk.Frame(frame, bg=fill)
+            top.pack(fill="x")
+            tk.Label(top, image=self._app._advisor_marker(color), bd=0, bg=fill).pack(
+                side="left", padx=(0, _px(8))
+            )
+            tk.Label(top, text=site, bg=fill, fg=_NEUTRAL_TEXT, font=("", 10, "bold"), bd=0).pack(side="left")
+            if username:
+                tk.Label(
+                    top, text=f"  {username}", bg=fill, fg=_SEARCH_PLACEHOLDER_COLOR, font=("", 9), bd=0
+                ).pack(side="left")
+            for text in pills:
+                tk.Label(
+                    frame,
+                    text=text,
+                    bg=_mix(color, "#ffffff", 0.82),
+                    fg=_mix(color, "#000000", 0.25),
+                    font=("", 9),
+                    padx=_px(8),
+                    pady=_px(3),
+                    wraplength=_px(self.FEED_WIDTH - 90),
+                    justify="left",
+                    bd=0,
+                ).pack(anchor="w", pady=(_px(6), 0))
+            self._card_count += 1
+
+        shown = lambda key: self._filter in (None, key)  # noqa: E731
+        if report.reused_groups and shown("reused"):
+            section("Повторно используемые пароли")
+            for group in report.reused_groups:
+                card(_ADVISOR_REUSED_COLOR, group[0], "", [f"тот же пароль: {', '.join(group[1:])}"])
+        if report.weak_entries and shown("weak"):
+            section("Слабые пароли")
+            for issue in report.weak_entries:
+                card(_ADVISOR_WEAK_COLOR, issue.site, issue.username, list(issue.reasons))
+        if report.old_entries and shown("old"):
+            section("Устаревшие пароли")
+            for issue in report.old_entries:
+                card(_ADVISOR_OLD_COLOR, issue.site, issue.username, list(issue.reasons))
+
+        # Колесо мыши должно работать над любой частью ленты, а не только над
+        # пустым местом канваса: события колеса не «всплывают» от вложенных виджетов.
+        self._bind_wheel(self._feed_canvas)
+        self._bind_wheel(self._feed)
+
+    def _bind_wheel(self, widget: tk.Misc) -> None:
+        def on_wheel(event) -> None:
+            if event.num == 4:
+                self._feed_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self._feed_canvas.yview_scroll(1, "units")
+            else:
+                self._feed_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            widget.bind(sequence, on_wheel)
+        for child in widget.winfo_children():
+            self._bind_wheel(child)
 
 
 class GeneratorDialog(ttk.Toplevel):

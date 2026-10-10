@@ -53,7 +53,7 @@ def _sites(sites: list[str]) -> str:
     return ", ".join(sites)
 
 
-def _plural(n: int, forms: tuple[str, str, str]) -> str:
+def plural(n: int, forms: tuple[str, str, str]) -> str:
     """1 запись, 2 записи, 5 записей."""
     n10, n100 = n % 10, n % 100
     if n10 == 1 and n100 != 11:
@@ -64,7 +64,7 @@ def _plural(n: int, forms: tuple[str, str, str]) -> str:
 
 
 def _records(n: int) -> str:
-    return f"{n} {_plural(n, ('запись', 'записи', 'записей'))}"
+    return f"{n} {plural(n, ('запись', 'записи', 'записей'))}"
 
 
 def _priority(ctx: AssistantContext) -> str:
