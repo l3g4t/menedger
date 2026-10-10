@@ -4044,21 +4044,28 @@ class GeneratorDialog(ttk.Toplevel):
             self._on_copy(password)
 
 
+_CHAT_BG = "#f1f4f9"  # фон ленты сообщений (светлее страницы, темнее белого пузыря)
+
+
 class AssistantDialog(ttk.Toplevel):
-    """Чат с локальным помощником по безопасности (CLAUDE.md, раздел 9.4).
+    """Чат с локальным помощником по безопасности (CLAUDE.md, раздел 9.4) в
+    формате мессенджера: сообщения пользователя — справа, синие, помощника —
+    слева, белые, у каждого пузыря время; пока ответ считается, виден пузырь
+    «печатает…». Правый щелчок по пузырю копирует текст.
 
     Модель работает на этом же компьютере без сети и получает только
     метаданные хранилища (`assistant.prompt`): ни паролей, ни логинов, ни
     мастер-пароля. Всё, что в вопросе похоже на пароль, скрывается ДО
     отправки и в самом чате. Ответ считается в отдельном потоке, чтобы
-    окно не замирало на время генерации. Если модели нет — отвечают
-    шаблоны (`assistant.offline`), режим показан в заголовке."""
+    окно не замирало. Если модели нет — отвечают шаблоны
+    (`assistant.offline`), режим показан в заголовке."""
 
     QUICK_QUESTIONS = (
         "Что со слабыми паролями?",
         "Что исправить в первую очередь?",
         "Как придумать пароль?",
     )
+    BUBBLE_WRAP = 340  # px, максимальная ширина текста в пузыре
 
     def __init__(self, parent: App) -> None:
         super().__init__(title="Помощник", master=parent, resizable=(False, False), iconphoto=None)
@@ -4068,6 +4075,10 @@ class AssistantDialog(ttk.Toplevel):
         self._parent = parent
         self._busy = False
         self._results: queue.Queue = queue.Queue()
+        self._messages: list[tuple[str, str]] = []  # (роль, текст) — то, что показано в ленте
+        self._typing_row: tk.Frame | None = None
+        self._typing_job: str | None = None
+        self._sent_at = 0.0
 
         content = ttk.Frame(self, padding=_px(20))
         content.pack(fill="both", expand=True)
@@ -4084,31 +4095,40 @@ class AssistantDialog(ttk.Toplevel):
             title_stack, textvariable=self._mode_var, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
         ).pack(anchor="w")
 
-        chat_frame = ttk.Frame(content)
-        chat_frame.pack(fill="both", expand=True, pady=(_px(14), 0))
-        self._text = tk.Text(
-            chat_frame,
-            width=60,
-            height=15,
-            wrap="word",
-            state="disabled",
-            relief="flat",
-            padx=_px(10),
-            pady=_px(8),
-            font=("", 10),
-            background=_NEUTRAL_FILL,
+        # Лента сообщений: канвас с внутренним фреймом (как в AuditDialog).
+        chat_frame = tk.Frame(
+            content,
+            background=_CHAT_BG,
             highlightthickness=1,
             highlightbackground=_NEUTRAL_BORDER,
             highlightcolor=_NEUTRAL_BORDER,
         )
-        scrollbar = ttk.Scrollbar(chat_frame, orient="vertical", command=self._text.yview)
-        self._text.configure(yscrollcommand=scrollbar.set)
+        chat_frame.pack(fill="both", expand=True, pady=(_px(14), 0))
+        self._canvas = tk.Canvas(
+            chat_frame, width=_px(560), height=_px(280), highlightthickness=0, bd=0, background=_CHAT_BG
+        )
+        scrollbar = ttk.Scrollbar(chat_frame, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
-        self._text.pack(side="left", fill="both", expand=True)
-        self._text.tag_configure("who_user", foreground=_ACCENT, font=("", 9, "bold"), spacing1=_px(8))
-        self._text.tag_configure("who_bot", foreground=_SIDEBAR_BG, font=("", 9, "bold"), spacing1=_px(8))
-        self._text.tag_configure("body", foreground=_NEUTRAL_TEXT, lmargin1=_px(2), lmargin2=_px(2))
-        self._text.tag_configure("note", foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9, "italic"))
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self._feed = tk.Frame(self._canvas, background=_CHAT_BG)
+        feed_window = self._canvas.create_window((0, 0), window=self._feed, anchor="nw")
+        self._feed.bind("<Configure>", lambda _e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
+        self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfigure(feed_window, width=e.width))
+
+        def on_wheel(event) -> None:
+            if event.num == 4:
+                self._canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self._canvas.yview_scroll(1, "units")
+            else:
+                self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+        for widget in (self._canvas, self._feed):
+            widget.bind("<MouseWheel>", on_wheel)
+            widget.bind("<Button-4>", on_wheel)
+            widget.bind("<Button-5>", on_wheel)
+        self._on_wheel = on_wheel
 
         quick_row = ttk.Frame(content)
         quick_row.pack(fill="x", pady=(_px(10), 0))
@@ -4136,7 +4156,7 @@ class AssistantDialog(ttk.Toplevel):
         )
         self._send_button.pack(fill="both", expand=True)
 
-        self._status_var = tk.StringVar(value="Не вводите пароли в чат: всё, что на них похоже, скрывается.")
+        self._status_var = tk.StringVar(value=self._HINT)
         ttk.Label(
             content, textvariable=self._status_var, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
         ).pack(anchor="w", pady=(_px(8), 0))
@@ -4144,9 +4164,9 @@ class AssistantDialog(ttk.Toplevel):
         self._refresh_mode()
         if parent._assistant_history:
             for turn in parent._assistant_history:
-                self._append("Вы" if turn["role"] == "user" else "Помощник", turn["content"], turn["role"])
+                self._add_message(turn["role"], turn["content"], turn.get("time", ""))
         else:
-            self._append("Помощник", self._greeting(), "assistant")
+            self._add_message("assistant", self._greeting(), self._now())
 
         self._entry.focus_set()
         self.update_idletasks()
@@ -4155,9 +4175,20 @@ class AssistantDialog(ttk.Toplevel):
         parent._keep_dialog_in_work_area(self)
         self.deiconify()
         self.update_idletasks()
+        self._scroll_to_end()
         self.grab_set()
 
+    _HINT = "Не вводите пароли в чат: всё, что на них похоже, скрывается. Правый щелчок по сообщению — копировать."
+
     # --- вспомогательное -------------------------------------------------
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now().strftime("%H:%M")
+
+    def chat_text(self) -> str:
+        """Весь показанный текст переписки (для проверок и копирования)."""
+        return "\n".join(text for _role, text in self._messages)
 
     def _refresh_mode(self) -> None:
         reason = self._parent._assistant.llm.status()
@@ -4174,22 +4205,124 @@ class AssistantDialog(ttk.Toplevel):
             "шаблонам. Спросите про слабые, повторяющиеся и устаревшие пароли."
         )
 
-    def _append(self, who: str, text: str, role: str) -> None:
-        self._text.configure(state="normal")
-        self._text.insert("end", who + "\n", "who_user" if role == "user" else "who_bot")
-        self._text.insert("end", text + "\n", "body")
-        self._text.configure(state="disabled")
-        self._text.see("end")
+    def _scroll_to_end(self) -> None:
+        self._canvas.update_idletasks()
+        self._canvas.yview_moveto(1.0)
+
+    def _bubble_row(self, role: str, text: str, time_text: str) -> tk.Frame:
+        """Одна строка ленты: пузырь (справа у пользователя, слева у помощника)
+        с временем под ним."""
+        parent = self._parent
+        is_user = role == "user"
+        row = tk.Frame(self._feed, background=_CHAT_BG)
+        row.pack(fill="x", padx=_px(10), pady=(_px(6), 0))
+        if not is_user and hasattr(parent, "_icon_image_tiny"):
+            tk.Label(row, image=parent._icon_image_tiny, background=_CHAT_BG, bd=0).pack(
+                side="left", anchor="s", padx=(0, _px(6)), pady=(0, _px(14))
+            )
+        column = tk.Frame(row, background=_CHAT_BG)
+        column.pack(side="right" if is_user else "left")
+        bubble = ttk.Frame(column, padding=(_px(12), _px(8)))
+        bubble.pack(anchor="e" if is_user else "w")
+        fill = _ACCENT if is_user else "#ffffff"
+        # «Хвостик» мессенджера: у пузыря не скруглён угол со стороны автора.
+        parent._rounded_backdrop(
+            bubble,
+            fill,
+            corners=(True, True, False, True) if is_user else (True, True, True, False),
+            surface=_CHAT_BG,
+            radius=_ROUNDED_RADIUS + 6,
+            border_color=None if is_user else _NEUTRAL_BORDER,
+            border_width=0 if is_user else 1,
+            dynamic=True,
+        )
+        label = tk.Label(
+            bubble,
+            text=text,
+            background=fill,
+            foreground="#ffffff" if is_user else _NEUTRAL_TEXT,
+            justify="left",
+            anchor="w",
+            wraplength=_px(self.BUBBLE_WRAP),
+            font=("", 10),
+            bd=0,
+            highlightthickness=0,
+        )
+        label.pack()
+        if time_text:
+            tk.Label(
+                column, text=time_text, background=_CHAT_BG, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 8), bd=0
+            ).pack(anchor="e" if is_user else "w", padx=_px(4))
+        for widget in (row, column, bubble, label):
+            widget.bind("<MouseWheel>", self._on_wheel)
+            widget.bind("<Button-4>", self._on_wheel)
+            widget.bind("<Button-5>", self._on_wheel)
+        label.bind("<Button-3>", lambda event, t=text: self._copy_menu(event, t))
+        row.text_label = label
+        return row
+
+    def _copy_menu(self, event: tk.Event, text: str) -> str:
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Копировать", command=lambda: self._copy_text(text))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _copy_text(self, text: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(text)
+
+    def _add_message(self, role: str, text: str, time_text: str) -> None:
+        self._messages.append((role, text))
+        self._bubble_row(role, text, time_text)
+        self._scroll_to_end()
+
+    # --- «печатает…» -----------------------------------------------------
+
+    def _show_typing(self) -> None:
+        self._typing_row = self._bubble_row("assistant", "печатает", "")
+        label = self._typing_row.text_label
+        frames = ("печатает ·", "печатает · ·", "печатает · · ·")
+
+        def tick(step: int = 0) -> None:
+            try:
+                label.configure(text=frames[step % 3])
+                self._typing_job = self.after(400, tick, step + 1)
+            except tk.TclError:
+                self._typing_job = None
+
+        tick()
+        self._scroll_to_end()
+
+    def _hide_typing(self) -> None:
+        if self._typing_job is not None:
+            try:
+                self.after_cancel(self._typing_job)
+            except tk.TclError:
+                pass
+            self._typing_job = None
+        if self._typing_row is not None:
+            try:
+                self._typing_row.destroy()
+            except tk.TclError:
+                pass
+            self._typing_row = None
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
-        self._send_button.configure(state=state)
+        # Кнопка «Отправить» остаётся включённой: у неактивной кнопки с иконкой
+        # рисуется светлый квадрат вокруг значка; повторную отправку во время
+        # ответа и так игнорирует `_send`.
         for button in self._quick_buttons:
             button.configure(state=state)
-        self._status_var.set(
-            "Помощник думает…" if busy else "Не вводите пароли в чат: всё, что на них похоже, скрывается."
-        )
+        self._status_var.set("Помощник печатает…" if busy else self._HINT)
+        if busy:
+            self._show_typing()
+        else:
+            self._hide_typing()
 
     # --- отправка ----------------------------------------------------------
 
@@ -4202,8 +4335,10 @@ class AssistantDialog(ttk.Toplevel):
             return
         self._question_var.set("")
         history = list(self._parent._assistant_history)
-        self._append("Вы", shown, "user")
-        self._parent._assistant_history.append({"role": "user", "content": shown})
+        stamp = self._now()
+        self._add_message("user", shown, stamp)
+        self._parent._assistant_history.append({"role": "user", "content": shown, "time": stamp})
+        self._sent_at = time.time()
         self._set_busy(True)
         context = self._parent._assistant_context()
         assistant = self._parent._assistant
@@ -4217,6 +4352,10 @@ class AssistantDialog(ttk.Toplevel):
         threading.Thread(target=work, daemon=True).start()
         self.after(100, self._poll)
 
+    # Минимальное время показа «печатает…» — иначе мгновенный шаблонный ответ
+    # приходит раньше, чем индикатор успевают заметить.
+    MIN_TYPING_SECONDS = 0.7
+
     def _poll(self) -> None:
         try:
             result = self._results.get_nowait()
@@ -4226,14 +4365,25 @@ class AssistantDialog(ttk.Toplevel):
             except tk.TclError:
                 pass
             return
+        remaining = self.MIN_TYPING_SECONDS - (time.time() - self._sent_at)
+        try:
+            if remaining > 0:
+                self.after(int(remaining * 1000), self._deliver, result)
+            else:
+                self._deliver(result)
+        except tk.TclError:
+            pass  # окно закрыли, пока шла генерация
+
+    def _deliver(self, result) -> None:
         try:
             if isinstance(result, Exception):
                 text = "Не получилось ответить. Попробуйте ещё раз."
             else:
                 text = result.text
-            self._parent._assistant_history.append({"role": "assistant", "content": text})
-            self._append("Помощник", text, "assistant")
+            stamp = self._now()
             self._set_busy(False)
+            self._parent._assistant_history.append({"role": "assistant", "content": text, "time": stamp})
+            self._add_message("assistant", text, stamp)
             self._refresh_mode()
             self._entry.focus_set()
         except tk.TclError:

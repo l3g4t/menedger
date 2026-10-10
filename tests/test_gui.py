@@ -1051,12 +1051,12 @@ def test_assistant_dialog_answers_hides_secrets_and_clears_on_lock(app, monkeypa
     dialog._question_var.set("мой пароль Zq8#vLm2$Pw9xK надёжный?")
     dialog._send()
     _wait_idle(dialog)
-    chat = dialog._text.get("1.0", "end")
+    chat = dialog.chat_text()
     assert "Zq8#vLm2$Pw9xK" not in chat and "[пароль скрыт]" in chat
     assert "Я не вижу" in chat
     dialog._send("Что исправить в первую очередь?")
     _wait_idle(dialog)
-    assert "github.com" in dialog._text.get("1.0", "end")
+    assert "github.com" in dialog.chat_text()
     history = json.dumps(app._assistant_history, ensure_ascii=False)
     assert "Zq8#vLm2$Pw9xK" not in history and len(app._assistant_history) == 4
     dialog.destroy()
@@ -1074,4 +1074,31 @@ def test_assistant_dialog_ignores_empty_question_and_double_send(app, monkeypatc
     dialog._send("Как придумать пароль?")  # второй вызов во время ответа игнорируется
     _wait_idle(dialog)
     assert [turn["role"] for turn in app._assistant_history] == ["user", "assistant"]
+    dialog.destroy()
+
+
+def test_assistant_chat_is_messenger_style(app, monkeypatch, tmp_path):
+    """Чат в формате мессенджера: пузыри пользователя справа, помощника слева,
+    у каждого есть время; пока ответ готовится, виден пузырь «печатает»."""
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
+    dialog = guiapp.AssistantDialog(app)
+    dialog.update()
+    dialog._send("Как придумать пароль?")
+    assert dialog._typing_row is not None  # индикатор виден сразу после отправки
+    dialog.update()
+    assert "печатает" in dialog._typing_row.text_label.cget("text")
+    _wait_idle(dialog)
+    assert dialog._typing_row is None  # после ответа индикатора нет
+
+    rows = [row for row in dialog._feed.winfo_children()]
+    assert len(rows) == 3  # приветствие, вопрос, ответ
+    sides = []
+    for row in rows:
+        column = row.winfo_children()[-1]
+        sides.append(column.pack_info()["side"])
+        times = [w.cget("text") for w in column.winfo_children() if isinstance(w, tk.Label)]
+        assert times and len(times[-1]) == 5 and times[-1][2] == ":"  # «12:34»
+    assert sides == ["left", "right", "left"]
+    assert [role for role, _text in dialog._messages] == ["assistant", "user", "assistant"]
     dialog.destroy()
