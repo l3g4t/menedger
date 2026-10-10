@@ -356,6 +356,47 @@ def test_custom_titlebar_has_all_three_controls(app):
     assert set(app._titlebar._buttons) == {"min", "max", "close"}
 
 
+def test_map_while_iconic_does_not_restore_window(app, monkeypatch):
+    """На Windows <Map> приходит и при самом сворачивании; рамку возвращать
+    (и показывать окно заново) можно только когда окно реально 'normal'."""
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    app.update()
+    state = {"value": "iconic"}
+    monkeypatch.setattr(app, "_window_state", lambda: state["value"])
+    calls = []
+    monkeypatch.setattr(app, "overrideredirect", lambda flag=None: calls.append(flag))
+    app._minimized = True
+
+    class Ev:
+        widget = app
+
+    app._on_map(Ev())
+    app.update()
+    assert app._minimized is True  # преждевременный <Map> проигнорирован
+    assert calls == []
+
+    state["value"] = "normal"  # пользователь развернул окно с панели задач
+    app._on_map(Ev())
+    app.update()
+    app.after(50)
+    app.update()
+    assert app._minimized is False
+    assert True in calls  # рамка снова убрана
+
+
+def test_restore_chrome_waits_if_window_minimized_again(app, monkeypatch):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    monkeypatch.setattr(app, "_window_state", lambda: "iconic")
+    calls = []
+    monkeypatch.setattr(app, "overrideredirect", lambda flag=None: calls.append(flag))
+    app._minimized = False
+    app._restore_chrome()
+    assert app._minimized is True
+    assert calls == []
+
+
 def test_toggle_maximize_roundtrip_restores_geometry(app):
     if app._titlebar is None:
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")

@@ -785,10 +785,25 @@ class App(ttk.Window):
 
     def _on_map(self, event: tk.Event) -> None:
         if event.widget is self and self._minimized:
+            # На Windows Tk шлёт <Map> и при самом сворачивании (окно на миг
+            # "показывается", чтобы свернуться) — тогда оно уже/ещё iconic.
+            # Возвращать рамку нужно только когда окно реально показано.
+            if self._window_state() != "normal":
+                return
             self._minimized = False
             self.after(10, self._restore_chrome)
 
+    def _window_state(self) -> str:
+        try:
+            return self.state()
+        except tk.TclError:
+            return "normal"
+
     def _restore_chrome(self) -> None:
+        if self._window_state() != "normal":
+            # Пока ждали, окно снова свернули — ждём следующего настоящего <Map>.
+            self._minimized = True
+            return
         self.overrideredirect(True)
         if self._saved_geometry:
             self.geometry(self._saved_geometry)
