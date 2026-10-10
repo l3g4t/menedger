@@ -32,6 +32,7 @@ import tkinter as tk
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from tkinter import filedialog, messagebox, simpledialog
 
 import ttkbootstrap as ttk
@@ -4207,7 +4208,7 @@ class AssistantDialog(ttk.Toplevel):
         self._busy = False
         self._results: queue.Queue = queue.Queue()
         self._messages: list[tuple[str, str]] = []  # (роль, текст) — то, что показано в ленте
-        self._typing_row: tk.Frame | None = None
+        self._typing_row: SimpleNamespace | None = None
         self._typing_job: str | None = None
         self._sent_at = 0.0
         self._photos: list[ImageTk.PhotoImage] = []  # картинки пузырей — держим живыми
@@ -4243,12 +4244,18 @@ class AssistantDialog(ttk.Toplevel):
         self._canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self._canvas.pack(side="left", fill="both", expand=True)
-        self._feed = tk.Frame(self._canvas, background=_CHAT_BG)
-        feed_window = self._canvas.create_window((0, 0), window=self._feed, anchor="nw")
-        self._feed.bind("<Configure>", lambda _e: self._canvas.configure(scrollregion=self._canvas.bbox("all")))
-        self._canvas.bind("<Configure>", lambda e: self._canvas.itemconfigure(feed_window, width=e.width))
+        # Вся лента — пункты ОДНОГО канваса (без вложенных виджетов): удаление
+        # индикатора «печатает…», появление ответа и прокрутка попадают в одну
+        # перерисовку, так что нет промежуточных кадров (раздел 9.4).
+        self._y = 0  # нижняя граница уже нарисованного, в координатах канваса
+        self._tag_counter = 0
+        self._chat_rows: list = []
+        self._laid_width = self._canvas.winfo_reqwidth()
+        self._follow_end = True  # лента «прилипла» к низу, пока пользователь сам не прокрутил вверх
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
 
         def on_wheel(event) -> None:
+            self._follow_end = False  # пользователь листает сам — не возвращаем к концу
             if event.num == 4:
                 self._canvas.yview_scroll(-1, "units")
             elif event.num == 5:
@@ -4258,7 +4265,6 @@ class AssistantDialog(ttk.Toplevel):
 
         self._on_wheel = on_wheel
         self._bind_wheel(self._canvas)
-        self._bind_wheel(self._feed)
 
         self._add_date_pill("Сегодня")
 
@@ -4404,52 +4410,80 @@ class AssistantDialog(ttk.Toplevel):
         widget.bind("<Button-5>", self._on_wheel)
 
     def _scroll_to_end(self) -> None:
-        self._canvas.update_idletasks()
-        self._canvas.yview_moveto(1.0)
+        self._follow_end = True
+        self._update_scrollregion()
+
+    def _update_scrollregion(self) -> None:
+        """Область прокрутки по нарисованному и, если лента прилипла к низу,
+        прокрутка к концу — в том же обработчике, до перерисовки канваса."""
+        self._canvas.configure(scrollregion=(0, 0, self._laid_width, max(self._y + _px(10), 1)))
+        if self._follow_end:
+            self._canvas.yview_moveto(1.0)
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        """Ширина канваса стала другой, чем при раскладке: пузыри пользователя
+        (справа) и плашка даты (по центру) сдвигаются на разницу."""
+        if event.width <= 1 or event.width == self._laid_width:
+            return
+        delta = event.width - self._laid_width
+        self._canvas.move("right", delta, 0)
+        self._canvas.move("center", delta / 2, 0)
+        self._laid_width = event.width
+        self._update_scrollregion()
 
     def _set_send_look(self, state: str) -> None:
         if self._busy:
             state = "disabled"
         self._send_button.configure(image=self._send_images[state], cursor="arrow" if self._busy else "hand2")
 
+    _ROW_GAP = 8  # px между строками ленты
+    _ROW_MARGIN = 12  # px от края ленты до пузыря
+
+    def _new_tag(self) -> str:
+        self._tag_counter += 1
+        return f"chat{self._tag_counter}"
+
     def _add_date_pill(self, text: str) -> None:
         """Плашка-«таблетка» с датой по центру ленты (как «Сегодня» в
-        мессенджерах): канвас с картинкой-подложкой и прозрачным текстом."""
-        holder = tk.Frame(self._feed, background=_CHAT_BG)
-        holder.pack(fill="x", pady=(_px(10), _px(2)))
+        мессенджерах): картинка-подложка и прозрачный текст на канвасе."""
+        canvas = self._canvas
+        tag = self._new_tag()
         pad_x, pad_y = _px(14), _px(4)
-        canvas = tk.Canvas(holder, highlightthickness=0, bd=0, background=_CHAT_BG)
-        item = canvas.create_text(pad_x, pad_y, anchor="nw", text=text, fill="#5b6b95", font=("", 8, "bold"))
+        item = canvas.create_text(0, 0, anchor="nw", text=text, fill="#5b6b95", font=("", 8, "bold"), tags=(tag,))
         x1, y1, x2, y2 = canvas.bbox(item)
         width, height = (x2 - x1) + 2 * pad_x, (y2 - y1) + 2 * pad_y
-        canvas.configure(width=width, height=height)
         photo = ImageTk.PhotoImage(
             _render_bubble(width, height, _CHAT_PILL_BG, _CHAT_PILL_BG, height, (True,) * 4, _CHAT_BG)
         )
         self._photos.append(photo)
-        backdrop = canvas.create_image(0, 0, anchor="nw", image=photo)
-        canvas.tag_lower(backdrop)
-        canvas.pack()
-        self._bind_wheel(holder)
-        self._bind_wheel(canvas)
+        top = self._y + _px(10)
+        left = (self._laid_width - width) // 2
+        backdrop = canvas.create_image(left, top, anchor="nw", image=photo, tags=(tag,))
+        canvas.coords(item, left + pad_x, top + pad_y)
+        canvas.tag_lower(backdrop, item)
+        canvas.addtag_withtag("center", tag)
+        self._y = top + height + _px(2)
 
-    def _bubble(self, parent: tk.Misc, text: str, is_user: bool) -> tk.Canvas:
-        """Пузырь: канвас, на котором лежит картинка-подложка (градиент или
-        белый фон с рамкой), а поверх — прозрачный текст. Размер считается по
-        самому тексту, так что подложка точно по размеру и не зависит от
-        порядка раскладки."""
+    def _draw_message(self, role: str, text: str, time_text: str) -> SimpleNamespace:
+        """Нарисовать строку ленты (справа у пользователя, слева у помощника):
+        картинка пузыря (градиент или белый фон с рамкой), прозрачный текст
+        поверх, время под ним и иконка помощника — всё пункты одного канваса.
+        Размер считается по тексту, так что подложка точно по размеру."""
+        canvas = self._canvas
+        is_user = role == "user"
+        tag = self._new_tag()
         pad_x, pad_y = _px(14), _px(9)
-        canvas = tk.Canvas(parent, highlightthickness=0, bd=0, background=_CHAT_BG)
+        icon = None if is_user else getattr(self._parent, "_icon_image_tiny", None)
+        left = (icon.width() + _px(8)) if icon is not None else 0
         item = canvas.create_text(
-            pad_x, pad_y, anchor="nw", text=text, width=_px(self.BUBBLE_WRAP), font=("", 10),
-            fill="#ffffff" if is_user else _CHAT_TEXT,
+            0, 0, anchor="nw", text=text, width=_px(self.BUBBLE_WRAP), font=("", 10),
+            fill="#ffffff" if is_user else _CHAT_TEXT, tags=(tag,),
         )
         x1, y1, x2, y2 = canvas.bbox(item)
-        width, height = (x2 - x1) + 2 * pad_x, (y2 - y1) + 2 * pad_y
-        canvas.configure(width=width, height=height)
+        bubble_w, bubble_h = (x2 - x1) + 2 * pad_x, (y2 - y1) + 2 * pad_y
         image = _render_bubble(
-            width,
-            height,
+            bubble_w,
+            bubble_h,
             _CHAT_BLUE if is_user else "#ffffff",
             _CHAT_VIOLET if is_user else "#ffffff",
             _px(18),
@@ -4460,37 +4494,32 @@ class AssistantDialog(ttk.Toplevel):
         )
         photo = ImageTk.PhotoImage(image)
         self._photos.append(photo)
-        backdrop = canvas.create_image(0, 0, anchor="nw", image=photo)
-        canvas.tag_lower(backdrop)
-        return canvas
-
-    def _bubble_row(self, role: str, text: str, time_text: str) -> tk.Frame:
-        """Одна строка ленты: пузырь (справа у пользователя, слева у помощника)
-        с временем под ним."""
-        parent = self._parent
-        is_user = role == "user"
-        row = tk.Frame(self._feed, background=_CHAT_BG)
-        row.pack(fill="x", padx=_px(12), pady=(_px(8), 0))
-        if not is_user and hasattr(parent, "_icon_image_tiny"):
-            tk.Label(row, image=parent._icon_image_tiny, background=_CHAT_BG, bd=0).pack(
-                side="left", anchor="s", padx=(0, _px(8)), pady=(0, _px(16))
-            )
-        column = tk.Frame(row, background=_CHAT_BG)
-        column.pack(side="right" if is_user else "left")
-        bubble = self._bubble(column, text, is_user)
-        bubble.pack(anchor="e" if is_user else "w")
-        time_label = None
+        top = self._y + _px(self._ROW_GAP)
+        total_w = left + bubble_w
+        x0 = (self._laid_width - _px(self._ROW_MARGIN) - total_w) if is_user else _px(self._ROW_MARGIN)
+        backdrop = canvas.create_image(x0 + left, top, anchor="nw", image=photo, tags=(tag,))
+        canvas.coords(item, x0 + left + pad_x, top + pad_y)
+        canvas.tag_lower(backdrop, item)
+        height = bubble_h
+        if icon is not None:
+            canvas.create_image(x0, top + bubble_h - _px(16), anchor="sw", image=icon, tags=(tag,))
         if time_text:
-            time_label = tk.Label(
-                column, text=time_text, background=_CHAT_BG, foreground=_CHAT_TIME, font=("", 8), bd=0
+            stamp = canvas.create_text(
+                (x0 + left + bubble_w - _px(4)) if is_user else (x0 + left + _px(4)),
+                top + bubble_h + _px(2),
+                anchor="ne" if is_user else "nw",
+                text=time_text,
+                fill=_CHAT_TIME,
+                font=("", 8),
+                tags=(tag,),
             )
-            time_label.pack(anchor="e" if is_user else "w", padx=_px(4))
-        for widget in (row, column, bubble, time_label):
-            if widget is not None:
-                self._bind_wheel(widget)
-        bubble.bind("<Button-3>", lambda event, t=text: self._copy_menu(event, t))
-        row.bubble = bubble
-        return row
+            height = canvas.bbox(stamp)[3] - top + _px(1)
+        canvas.addtag_withtag("right" if is_user else "left", tag)
+        canvas.tag_bind(tag, "<Button-3>", lambda event, t=text: self._copy_menu(event, t))
+        self._y = top + height
+        return SimpleNamespace(
+            role=role, text=text, time_text=time_text, side="right" if is_user else "left", tag=tag
+        )
 
     def _copy_menu(self, event: tk.Event, text: str) -> str:
         menu = tk.Menu(self, tearoff=0)
@@ -4506,40 +4535,47 @@ class AssistantDialog(ttk.Toplevel):
         self.clipboard_append(text)
 
     def _add_message(self, role: str, text: str, time_text: str) -> None:
+        """Добавить пузырь. Индикатор «печатает…» убирается и ответ рисуется в
+        ОДНОМ обработчике, вместе с областью прокрутки: Tk перерисует канвас
+        только после него, поэтому нет кадров «пусто между индикатором и
+        ответом», «пузырь обрезан внизу» и «прокрутка прыгает потом»."""
         self._messages.append((role, text))
-        self._bubble_row(role, text, time_text)
-        self._scroll_to_end()
+        if role == "assistant" and self._typing_row is not None:
+            self._hide_typing()
+        self._chat_rows.append(self._draw_message(role, text, time_text))
+        self._follow_end = True
+        self._update_scrollregion()
 
     # --- «печатает…» -----------------------------------------------------
 
     def _show_typing(self) -> None:
         """Пузырь с тремя точками, по которым бежит акцент."""
-        parent = self._parent
-        row = tk.Frame(self._feed, background=_CHAT_BG)
-        row.pack(fill="x", padx=_px(12), pady=(_px(8), 0))
-        if hasattr(parent, "_icon_image_tiny"):
-            tk.Label(row, image=parent._icon_image_tiny, background=_CHAT_BG, bd=0).pack(
-                side="left", anchor="s", padx=(0, _px(8))
-            )
+        canvas = self._canvas
+        tag = self._new_tag()
+        icon = getattr(self._parent, "_icon_image_tiny", None)
+        left = (icon.width() + _px(8)) if icon is not None else 0
         width, height = _px(66), _px(38)
-        canvas = tk.Canvas(row, width=width, height=height, highlightthickness=0, bd=0, background=_CHAT_BG)
         photo = ImageTk.PhotoImage(
             _render_bubble(width, height, "#ffffff", "#ffffff", _px(18), (True, True, True, False), _CHAT_BG,
                            border=_CHAT_BOT_BORDER)
         )
         self._photos.append(photo)
-        canvas.create_image(0, 0, anchor="nw", image=photo)
+        top = self._y + _px(self._ROW_GAP)
+        x0 = _px(self._ROW_MARGIN)
+        canvas.create_image(x0 + left, top, anchor="nw", image=photo, tags=(tag,))
+        if icon is not None:
+            canvas.create_image(x0, top + height, anchor="sw", image=icon, tags=(tag,))
         dots = []
         for i in range(3):
-            cx = width // 2 + (i - 1) * _px(14)
-            dots.append(canvas.create_oval(cx - _px(4), height // 2 - _px(4), cx + _px(4), height // 2 + _px(4),
-                                           fill="#c4cde6", outline=""))
-        canvas.pack(side="left")
-        self._bind_wheel(row)
-        self._bind_wheel(canvas)
-        row.dots = dots
-        row.is_typing = True
-        self._typing_row = row
+            cx = x0 + left + width // 2 + (i - 1) * _px(14)
+            cy = top + height // 2
+            dots.append(canvas.create_oval(cx - _px(4), cy - _px(4), cx + _px(4), cy + _px(4),
+                                           fill="#c4cde6", outline="", tags=(tag,)))
+        canvas.addtag_withtag("left", tag)
+        self._typing_row = SimpleNamespace(tag=tag, dots=dots, is_typing=True, y_before=self._y)
+        self._y = top + height
+        self._follow_end = True
+        self._update_scrollregion()
 
         def tick(step: int = 0) -> None:
             try:
@@ -4550,7 +4586,6 @@ class AssistantDialog(ttk.Toplevel):
                 self._typing_job = None
 
         tick()
-        self._scroll_to_end()
 
     def _hide_typing(self) -> None:
         if self._typing_job is not None:
@@ -4561,9 +4596,10 @@ class AssistantDialog(ttk.Toplevel):
             self._typing_job = None
         if self._typing_row is not None:
             try:
-                self._typing_row.destroy()
+                self._canvas.delete(self._typing_row.tag)
             except tk.TclError:
                 pass
+            self._y = self._typing_row.y_before
             self._typing_row = None
 
     def _set_busy(self, busy: bool) -> None:
@@ -4604,14 +4640,14 @@ class AssistantDialog(ttk.Toplevel):
                 self._results.put(exc)
 
         threading.Thread(target=work, daemon=True).start()
-        self.after(100, self._poll)
+        self.after(30, self._poll)
 
     def _poll(self) -> None:
         try:
             result = self._results.get_nowait()
         except queue.Empty:
             try:
-                self.after(100, self._poll)
+                self.after(30, self._poll)
             except tk.TclError:
                 pass
             return
@@ -4631,9 +4667,9 @@ class AssistantDialog(ttk.Toplevel):
             else:
                 text = result.text
             stamp = self._now()
-            self._set_busy(False)
             self._parent._assistant_history.append({"role": "assistant", "content": text, "time": stamp})
-            self._add_message("assistant", text, stamp)
+            self._add_message("assistant", text, stamp)  # встаёт на место индикатора
+            self._set_busy(False)
             self._refresh_mode()
             self._entry.focus_set()
         except tk.TclError:

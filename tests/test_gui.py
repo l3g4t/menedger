@@ -1165,16 +1165,58 @@ def test_assistant_chat_is_messenger_style(app, monkeypatch, tmp_path):
     _wait_idle(dialog)
     assert dialog._typing_row is None  # после ответа индикатора нет
 
-    rows = [row for row in dialog._feed.winfo_children()][1:]  # первая строка — плашка «Сегодня»
+    rows = dialog._chat_rows  # плашка «Сегодня» в строки не входит
     assert len(rows) == 3  # приветствие, вопрос, ответ
     sides = []
     for row in rows:
-        column = row.winfo_children()[-1]
-        sides.append(column.pack_info()["side"])
-        times = [w.cget("text") for w in column.winfo_children() if isinstance(w, tk.Label)]
-        assert times and len(times[-1]) == 5 and times[-1][2] == ":"  # «12:34»
+        sides.append(row.side)
+        assert len(row.time_text) == 5 and row.time_text[2] == ":"  # «12:34»
     assert sides == ["left", "right", "left"]
     assert [role for role, _text in dialog._messages] == ["assistant", "user", "assistant"]
+    dialog.destroy()
+
+
+def test_assistant_answer_replaces_typing_indicator_in_one_step(app, monkeypatch, tmp_path):
+    """Ответ рисуется на месте индикатора «печатает…» без промежуточных состояний:
+    в том же обработчике индикатор удалён, область прокрутки обновлена, лента
+    прокручена к концу. (Раньше при ответе на экране были кадры «пусто», «пузырь
+    обрезан внизу» и «прокрутка прыгает потом».)"""
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
+    dialog = guiapp.AssistantDialog(app)
+    dialog.update()
+    canvas = dialog._canvas
+    dialog._add_message("user", "Как придумать пароль?", "12:00")
+    dialog._set_busy(True)
+    typing_tag = dialog._typing_row.tag
+    assert canvas.find_withtag(typing_tag)
+    y_before_typing = dialog._typing_row.y_before
+
+    long_answer = "Длинный ответ помощника. " * 12
+    dialog._add_message("assistant", long_answer, "12:01")  # ровно один вызов, без update()
+    assert dialog._typing_row is None and not canvas.find_withtag(typing_tag)
+    answer = dialog._chat_rows[-1]
+    top = min(canvas.bbox(answer.tag)[1], canvas.bbox(answer.tag)[3])
+    assert top >= y_before_typing  # ответ стоит там, где был индикатор
+    region_bottom = int(float(canvas.cget("scrollregion").split()[3]))
+    assert region_bottom >= canvas.bbox(answer.tag)[3]  # область прокрутки уже охватывает ответ
+    assert canvas.yview()[1] == 1.0  # и лента уже прокручена к концу
+    dialog.destroy()
+
+
+def test_assistant_chat_keeps_right_bubbles_flush_when_width_changes(app, monkeypatch, tmp_path):
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
+    dialog = guiapp.AssistantDialog(app)
+    dialog.update()
+    user_row = dialog._add_message("user", "Привет", "12:00") or dialog._chat_rows[-1]
+    canvas = dialog._canvas
+    right_edge = canvas.bbox(user_row.tag)[2]
+    left_edge = canvas.bbox(dialog._chat_rows[0].tag)[0]
+    event = type("E", (), {"width": dialog._laid_width + 40})()
+    dialog._on_canvas_configure(event)
+    assert canvas.bbox(user_row.tag)[2] == right_edge + 40  # пузырь справа сдвинулся
+    assert canvas.bbox(dialog._chat_rows[0].tag)[0] == left_edge  # слева — на месте
     dialog.destroy()
 
 
