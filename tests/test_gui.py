@@ -874,3 +874,24 @@ def test_new_password_dialog_eye_toggles_visibility(app):
     finally:
         dialog.destroy()
 
+
+def test_dialog_footer_buttons_have_equal_height_and_width(app):
+    """Раздел 10.52: «Сохранить»/«Создать» и «Отмена» в подвале диалогов — одного
+    размера (раньше кнопка с иконкой была выше)."""
+    entry = {"site": "s", "username": "u", "password": "x", "created_at": "2026-09-27T10:00:00Z"}
+    makers = [
+        (lambda: guiapp.NewPasswordDialog(app, entry), ("Сохранить", "Отмена")),
+        (lambda: guiapp.CreateVaultDialog(app), ("Создать", "Отмена")),
+        (lambda: guiapp.EntryDialog(app, "Новая запись"), ("Сохранить", "Отмена")),
+    ]
+    for make, (primary_text, cancel_text) in makers:
+        dialog = make()
+        dialog.update()
+        try:
+            by_text = {b.cget("text"): b for b in _find_widgets_by_class(dialog, "TButton") if b.cget("text")}
+            primary, cancel = by_text[primary_text], by_text[cancel_text]
+            assert primary.winfo_height() == cancel.winfo_height() == guiapp._px(guiapp._UNLOCK_CONTROL_HEIGHT)
+            assert abs(primary.winfo_width() - cancel.winfo_width()) <= 1
+        finally:
+            dialog.destroy()
+

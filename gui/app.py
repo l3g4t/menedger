@@ -1618,6 +1618,56 @@ class App(ttk.Window):
         self._rounded_style_names.add(style_name)
         return style_name
 
+    def _action_buttons(
+        self,
+        master: ttk.Frame,
+        *,
+        primary_text: str,
+        primary_command: Callable[[], None],
+        primary_icon: str | None = None,
+        cancel_command: Callable[[], None],
+        cancel_text: str = "Отмена",
+        stretch: bool = True,
+    ) -> None:
+        """Пара кнопок подвала диалога — главное действие (акцент, с иконкой)
+        и отмена — ОДНОГО размера (раздел 10.52). Раньше "Сохранить" с
+        иконкой получалась выше "Отмены" без неё (87 px против 78 при
+        масштабе 1.5) и немного другой ширины. Теперь обе кнопки лежат в
+        ячейках одной фиксированной высоты (`_UNLOCK_CONTROL_HEIGHT`, как
+        кнопки экрана разблокировки, раздел 10.46) и стилях `*Flat`.
+        `stretch=True` — кнопки делят ширину `master` поровну; `False` —
+        прижаты вправо, ширина обеих равна ширине более широкой."""
+        height = _px(_UNLOCK_CONTROL_HEIGHT)
+
+        def make(text: str, command: Callable[[], None], accent: bool, icon: str | None):
+            cell = ttk.Frame(master, height=height)
+            cell.pack_propagate(False)
+            kwargs = self._icon_kwargs(icon, "white" if accent else "dark") if icon else {}
+            button = self._styled(
+                ttk.Button(cell, text=text, command=command, **kwargs),
+                self._accent_style(flat=True) if accent else self._neutral_style(flat=True),
+            )
+            button.pack(fill="both", expand=True)
+            return cell, button
+
+        primary_cell, primary_button = make(primary_text, primary_command, True, primary_icon)
+        cancel_cell, cancel_button = make(cancel_text, cancel_command, False, None)
+        gap = _px(8)
+        if stretch:
+            master.columnconfigure(0, weight=1, uniform="action_pair")
+            master.columnconfigure(1, minsize=gap)
+            master.columnconfigure(2, weight=1, uniform="action_pair")
+            primary_cell.grid(row=0, column=0, sticky="ew")
+            cancel_cell.grid(row=0, column=2, sticky="ew")
+        else:
+            width = max(primary_button.winfo_reqwidth(), cancel_button.winfo_reqwidth())
+            primary_cell.configure(width=width)
+            cancel_cell.configure(width=width)
+            master.columnconfigure(0, weight=1)
+            master.columnconfigure(2, minsize=gap)
+            primary_cell.grid(row=0, column=1)
+            cancel_cell.grid(row=0, column=3)
+
     def _neutral_style(self, *, flat: bool = False, **kwargs) -> str:
         """Нейтральный скруглённый стиль референса "Разделённая панель"
         (раздел 10.4/10.6) — светлая заливка + едва заметная рамка,
@@ -2766,19 +2816,14 @@ class EntryDialog(ttk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(_px(16), 0, _px(16), _px(16)))
         buttons.pack(fill="x")
-        parent._styled(
-            ttk.Button(buttons, text="Отмена", command=self.destroy),
-            parent._neutral_style(),
-        ).pack(side="right")
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Сохранить",
-                command=self._on_save,
-                **parent._icon_kwargs("save", "white"),
-            ),
-            parent._accent_style(),
-        ).pack(side="right", padx=(0, _px(8)))
+        parent._action_buttons(
+            buttons,
+            primary_text="Сохранить",
+            primary_command=self._on_save,
+            primary_icon="save",
+            cancel_command=self.destroy,
+            stretch=False,
+        )
 
         parent._round_dialog_corners(self)
         self.place_window_center()
@@ -2995,27 +3040,13 @@ class CreateVaultDialog(ttk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
         buttons.pack(fill="x")
-        # "Создать" (с иконкой) и "Отмена" (без) сами по себе имели бы
-        # разную ширину — по запросу пользователя обе кнопки заведены
-        # через `grid` с двумя РАВНЫМИ по весу колонками (`uniform=`
-        # объединяет их в одну группу выравнивания ширины), а не через
-        # `pack`, где ширина каждой кнопки определялась бы только её
-        # собственным содержимым.
-        buttons.columnconfigure(0, weight=1, uniform="create_vault_footer")
-        buttons.columnconfigure(1, weight=1, uniform="create_vault_footer")
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Создать",
-                command=self._on_submit,
-                **parent._icon_kwargs("plus", "white"),
-            ),
-            parent._accent_style(),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, _px(8)))
-        parent._styled(
-            ttk.Button(buttons, text="Отмена", command=self.destroy),
-            parent._neutral_style(),
-        ).grid(row=0, column=1, sticky="ew")
+        parent._action_buttons(
+            buttons,
+            primary_text="Создать",
+            primary_command=self._on_submit,
+            primary_icon="plus",
+            cancel_command=self.destroy,
+        )
 
         password_entry.focus_set()
         self.update_idletasks()
@@ -3144,21 +3175,13 @@ class NewPasswordDialog(ttk.Toplevel):
 
         buttons = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
         buttons.pack(fill="x")
-        buttons.columnconfigure(0, weight=1, uniform="new_password_footer")
-        buttons.columnconfigure(1, weight=1, uniform="new_password_footer")
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Сохранить",
-                command=self._on_submit,
-                **parent._icon_kwargs("save", "white"),
-            ),
-            parent._accent_style(),
-        ).grid(row=0, column=0, sticky="ew", padx=(0, _px(8)))
-        parent._styled(
-            ttk.Button(buttons, text="Отмена", command=self.destroy),
-            parent._neutral_style(),
-        ).grid(row=0, column=1, sticky="ew")
+        parent._action_buttons(
+            buttons,
+            primary_text="Сохранить",
+            primary_command=self._on_submit,
+            primary_icon="save",
+            cancel_command=self.destroy,
+        )
 
         password_entry.focus_set()
         self.update_idletasks()
