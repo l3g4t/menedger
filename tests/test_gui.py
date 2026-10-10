@@ -1671,7 +1671,20 @@ def test_change_master_does_nothing_when_vault_is_locked(app, monkeypatch):
     assert app.master_password is None
 
 
-def test_sidebar_has_change_master_button(app, monkeypatch):
+def test_change_master_button_is_in_the_top_row_and_not_squeezed(app, monkeypatch):
+    """По просьбе пользователя кнопка — в верхнем ряду над списком (раздел 10.66),
+    не в сайдбаре; и все кнопки ряда получают свою полную ширину (раньше при
+    окне 980 px пятая кнопка сплющивалась — урок раздела 10.8)."""
     _create_vault(app, monkeypatch)
-    texts = [b.cget("text") for b in _find_widgets_by_class(app._main_frame, "TButton")]
-    assert "Мастер-пароль" in texts
+    app.update()
+    buttons = _find_widgets_by_class(app._main_frame, "TButton")
+    master = [b for b in buttons if b.cget("text") == "Мастер-пароль"]
+    assert len(master) == 1
+    sidebar_texts = {"Все записи", "Помощник", "Заблокировать"}
+    sidebar_x = min(b.winfo_rootx() for b in buttons if b.cget("text") in sidebar_texts)
+    assert master[0].winfo_rootx() > sidebar_x + app.winfo_width() // 4  # правее сайдбара
+    top_row = [b for b in buttons if b.cget("text") in ("Добавить", "Удалить", "Мастер-пароль")]
+    top_y = min(b.winfo_rooty() for b in top_row)
+    assert all(abs(b.winfo_rooty() - top_y) < 5 for b in top_row)  # в одном ряду
+    for button in top_row + [b for b in buttons if b.cget("text") in ("Советник", "Генератор") and b.winfo_rooty() <= top_y + 5]:
+        assert button.winfo_width() >= button.winfo_reqwidth() - 1, button.cget("text")

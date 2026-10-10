@@ -207,7 +207,9 @@ _UNLOCK_CONTROL_HEIGHT = 42  # px
 # главный экран.
 _UNLOCK_MARGIN_X = 40  # px
 _UNLOCK_MARGIN_Y = 24  # px
-_MAIN_WINDOW_SIZE = (980, 640)  # px
+# Ширина 1120, а не 980: в верхний ряд кнопок добавилась «Мастер-пароль»
+# (раздел 10.66), пять кнопок в 980 не помещались (раздел 10.8: тот же урок).
+_MAIN_WINDOW_SIZE = (1120, 640)  # px
 _MAIN_MIN_SIZE = (760, 460)  # px
 # Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
 # этого цвета окно не рисует. Яркий и нигде больше в интерфейсе не встречается.
@@ -779,7 +781,7 @@ class App(ttk.Window):
         super().__init__(
             title=APP_TITLE,
             themename=THEME_NAME,
-            size=(980, 640),
+            size=_MAIN_WINDOW_SIZE,
             minsize=(760, 460),
             high_dpi=True,
             iconphoto=self._window_icon_arg(),
@@ -1050,7 +1052,7 @@ class App(ttk.Window):
         # Без системной рамки ОС не знает, куда поставить окно, — по центру
         # рабочей области.
         ax, ay, aw, ah = self._work_area()
-        width, height = min(_px(980), aw), min(_px(640), ah)
+        width, height = min(_px(_MAIN_WINDOW_SIZE[0]), aw), min(_px(_MAIN_WINDOW_SIZE[1]), ah)
         self.geometry(f"{width}x{height}+{ax + (aw - width) // 2}+{ay + (ah - height) // 2}")
 
         self._install_region_corners(self, lambda: self._maximized)
@@ -1829,7 +1831,7 @@ class App(ttk.Window):
         else:
             scale = float(self.tk.call("tk", "scaling")) / (96 / 72)
         _UI_SCALE = min(max(scale, 1.0), 3.0)
-        self.geometry(f"{_px(980)}x{_px(640)}")
+        self.geometry(f"{_px(_MAIN_WINDOW_SIZE[0])}x{_px(_MAIN_WINDOW_SIZE[1])}")
         self.minsize(_px(760), _px(460))
 
     def _button_icon(self, name: str, variant: str, center: bool = False) -> tk.PhotoImage | None:
@@ -2907,7 +2909,6 @@ class App(ttk.Window):
             ("Советник", self._on_audit, "shield"),
             ("Генератор", self._on_generate_standalone, "dice"),
             ("Помощник", self._on_assistant, "chat"),
-            ("Мастер-пароль", self._on_change_master, "pencil"),
         ):
             self._styled(
                 ttk.Button(
@@ -2957,6 +2958,18 @@ class App(ttk.Window):
                 ),
                 self._neutral_style(),
             ).pack(side="left", padx=(0, _px(6)))
+        # Смена мастер-пароля (раздел 10.66) — по просьбе пользователя кнопка
+        # в верхнем ряду, у правого края (в сайдбаре она была лишней рядом с
+        # «Заблокировать»).
+        self._styled(
+            ttk.Button(
+                toolbar_row,
+                text="Мастер-пароль",
+                command=self._on_change_master,
+                **self._icon_kwargs("pencil", "dark"),
+            ),
+            self._neutral_style(),
+        ).pack(side="right")
 
         # Скруглённая "плитка" вокруг поля поиска — тот же приём, что и
         # у read-only полей в ViewEntryDialog (раздел 10.9): `_rounded_
