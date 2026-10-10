@@ -992,3 +992,27 @@ def test_entry_context_menu_has_paste_entry(app, monkeypatch):
     labels = [shown[0].entrycget(i, "label") for i in range(shown[0].index("end") + 1)]
     assert "Вставить" in labels and "Копировать" in labels
     dialog.destroy()
+
+
+def _pump(widget, seconds=0.4):
+    import time
+
+    end = time.time() + seconds
+    while time.time() < end:
+        widget.update()
+        time.sleep(0.02)
+
+
+def test_dialogs_give_keyboard_focus_to_their_input_field(app, monkeypatch):
+    """Раздел 10.57: после открытия диалога фокус стоит на поле ввода, а не на
+    самом окне — иначе Ctrl+V сразу после открытия ничего не вставляет."""
+    _create_vault(app, monkeypatch)
+    dialogs = [
+        guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"}),
+        guiapp.EntryDialog(app, "Новая запись"),
+    ]
+    for dialog in dialogs:
+        _pump(dialog)
+        focused = dialog.focus_get()
+        assert focused is not None and focused.winfo_class() in ("TEntry", "Entry"), (type(dialog).__name__, focused)
+        dialog.destroy()

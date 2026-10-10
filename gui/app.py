@@ -786,6 +786,21 @@ class App(ttk.Window):
                 pass
         return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
 
+    def _focus_dialog_field(self, dialog: tk.Toplevel) -> None:
+        """Сделать окно диалога активным и отдать фокус ввода его полю:
+        `dialog._initial_focus`, а если не задано — первому полю ввода
+        (раздел 10.57)."""
+        target = getattr(dialog, "_initial_focus", None)
+        if target is None:
+            stack = list(dialog.winfo_children())
+            while stack:
+                widget = stack.pop(0)
+                if widget.winfo_class() in ("TEntry", "Entry"):
+                    target = widget
+                    break
+                stack.extend(widget.winfo_children())
+        (target or dialog).focus_force()
+
     def _keep_dialog_in_work_area(self, dialog: tk.Toplevel) -> None:
         """Сдвинуть диалог так, чтобы он не выходил за рабочую область (раздел
         10.54): верхний край — не выше области, нижний — не ниже (если окно
@@ -1083,8 +1098,11 @@ class App(ttk.Window):
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
         def focus() -> None:
+            # `focus_force()` на самом окне сбрасывает фокус ввода с поля на
+            # окно целиком — и Ctrl+V сразу после открытия диалога уходил в
+            # никуда (раздел 10.57). Поэтому фокус отдаётся полю.
             try:
-                dialog.focus_force()
+                self._focus_dialog_field(dialog)
             except tk.TclError:
                 pass
 
@@ -1103,7 +1121,7 @@ class App(ttk.Window):
                 dialog.lift()
                 dialog.attributes("-topmost", True)
                 dialog.after(300, lambda: _clear_topmost(dialog))
-                dialog.focus_force()
+                self._focus_dialog_field(dialog)
             except tk.TclError:
                 pass
 
