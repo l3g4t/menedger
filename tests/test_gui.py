@@ -1724,7 +1724,7 @@ def test_problems_dialog_shows_a_card_per_finding_and_tiles_filter_them(app):
 
         dialog._toggle_filter("weak")
         assert dialog.card_count == 2
-        assert dialog._tiles["weak"]["underline"].cget("bg") == guiapp._SIDEBAR_BG  # тёмная, не цветная
+        assert dialog._tiles["weak"]["underline"].cget("bg") == dialog._tiles["weak"]["color"]  # раздел 10.74
         assert dialog._tiles["reused"]["underline"].cget("bg") == "#ffffff"
 
         dialog._toggle_filter("old")  # другая плитка — переключение на неё

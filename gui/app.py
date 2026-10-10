@@ -4121,10 +4121,10 @@ class AuditDialog(ttk.Toplevel):
             for column, (key, caption, _heading, color) in enumerate(self.CATEGORIES):
                 tiles_row.columnconfigure(column, weight=1, uniform="audit_tiles")
                 count = counts[key]
-                # Плитки нейтральные, без цветной заливки и цветных цифр (раздел
-                # 10.71); цвет категории остался только у карточек ниже.
-                tint = _NEUTRAL_FILL
-                accent = _NEUTRAL_TEXT if count else _SEARCH_PLACEHOLDER_COLOR
+                # Три сводные плитки — цветные (цвет категории); всё остальное в окне
+                # нейтральное (раздел 10.74). Плитка с нулём приглушена.
+                tint = _mix(color, "#ffffff", 0.88) if count else _NEUTRAL_FILL
+                accent = color if count else _SEARCH_PLACEHOLDER_COLOR
                 cell = ttk.Frame(tiles_row)
                 cell.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else _px(8), 0))
                 tile = ttk.Frame(cell, padding=(_px(14), _px(10)))
@@ -4136,7 +4136,7 @@ class AuditDialog(ttk.Toplevel):
                         corners=(True, True, True, True),
                         surface="#ffffff",
                         radius=_ROUNDED_RADIUS,
-                        border_color=_NEUTRAL_BORDER,
+                        border_color=_mix(accent, "#ffffff", 0.7),
                         border_width=1,
                     )
                 )
@@ -4146,7 +4146,7 @@ class AuditDialog(ttk.Toplevel):
                 label.pack(anchor="w")
                 underline = tk.Frame(cell, height=_px(3), bg="#ffffff", bd=0)
                 underline.pack(fill="x", pady=(_px(4), 0))
-                self._tiles[key] = {"underline": underline, "count": count}
+                self._tiles[key] = {"underline": underline, "color": color, "count": count}
                 if count:
                     for widget in (tile, number, label):
                         widget.configure(cursor="hand2")
@@ -4216,7 +4216,7 @@ class AuditDialog(ttk.Toplevel):
         self._filter = None if self._filter == key else key
         for name, tile in self._tiles.items():
             selected = self._filter == name
-            tile["underline"].configure(bg=_SIDEBAR_BG if selected else "#ffffff")
+            tile["underline"].configure(bg=tile["color"] if selected else "#ffffff")
         self._render_feed()
 
     @property
