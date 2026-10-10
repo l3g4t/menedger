@@ -1689,6 +1689,13 @@ def test_change_master_button_is_in_the_top_row_and_not_squeezed(app, monkeypatc
     assert all(abs(b.winfo_rooty() - top_y) < 5 for b in top_row)  # в одном ряду
     for button in top_row:
         assert button.winfo_width() >= button.winfo_reqwidth() - 1, button.cget("text")
+    # Раздел 10.68: три кнопки одной ширины и стоят вплотную друг к другу.
+    ordered = sorted(top_row, key=lambda b: b.winfo_rootx())
+    assert [b.cget("text") for b in ordered] == ["Добавить", "Удалить", "Мастер-пароль"]
+    assert len({b.winfo_width() for b in top_row}) == 1
+    for left, right in zip(ordered, ordered[1:]):
+        gap = right.winfo_rootx() - (left.winfo_rootx() + left.winfo_width())
+        assert 0 <= gap <= guiapp._px(12), gap
     # «Советник» и «Генератор» остались только в левой панели (раздел 10.67).
     for name in ("Советник", "Генератор"):
         assert len([b for b in buttons if b.cget("text") == name]) == 1

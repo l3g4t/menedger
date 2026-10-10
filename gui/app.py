@@ -2944,28 +2944,23 @@ class App(ttk.Window):
         # они остаются как глобальная навигация).
         toolbar_row = ttk.Frame(content)
         toolbar_row.pack(fill="x")
-        for text, command, icon_name in (
-            ("Добавить", self._on_add, "plus"),
-            ("Удалить", self._on_delete_selected, "trash"),
+        # Три кнопки одной ширины (раздел 10.68): колонки сетки в одной группе
+        # `uniform` берут ширину самой широкой («Мастер-пароль»), а не каждая по
+        # своему тексту — иначе она выглядела бы крупнее соседей.
+        for column, (text, command, icon_name) in enumerate(
+            (
+                ("Добавить", self._on_add, "plus"),
+                ("Удалить", self._on_delete_selected, "trash"),
+                ("Мастер-пароль", self._on_change_master, "pencil"),
+            )
         ):
+            toolbar_row.columnconfigure(column, uniform="toolbar")
             self._styled(
                 ttk.Button(
                     toolbar_row, text=text, command=command, **self._icon_kwargs(icon_name, "dark")
                 ),
                 self._neutral_style(),
-            ).pack(side="left", padx=(0, _px(6)))
-        # Смена мастер-пароля (раздел 10.66) — по просьбе пользователя кнопка
-        # в верхнем ряду, у правого края (в сайдбаре она была лишней рядом с
-        # «Заблокировать»).
-        self._styled(
-            ttk.Button(
-                toolbar_row,
-                text="Мастер-пароль",
-                command=self._on_change_master,
-                **self._icon_kwargs("pencil", "dark"),
-            ),
-            self._neutral_style(),
-        ).pack(side="right")
+            ).grid(row=0, column=column, sticky="ew", padx=(0, _px(6)))
 
         # Скруглённая "плитка" вокруг поля поиска — тот же приём, что и
         # у read-only полей в ViewEntryDialog (раздел 10.9): `_rounded_
