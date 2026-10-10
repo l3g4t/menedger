@@ -555,3 +555,21 @@ def test_debug_tools_write_event_log_and_arm_watchdog(app, tmp_path, monkeypatch
 )
 def test_use_native_frame_policy(env, argv, expected):
     assert guiapp._use_native_frame(env, argv) is expected
+
+
+def test_view_dialog_compact_layout_without_footer_buttons(app):
+    """Раздел 10.42: у диалога просмотра нет нижних кнопок "Закрыть"/
+    "Копировать пароль", а поля и кнопки рядом с ними одной высоты."""
+    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
+    dialog = guiapp.ViewEntryDialog(app, entry)
+    dialog.update()
+    try:
+        texts = [w.cget("text") for w in _find_widgets_by_class(dialog, "TButton")]
+        assert "Закрыть" not in texts
+        assert "Копировать пароль" not in texts
+        buttons = _find_widgets_by_class(dialog, "TButton")
+        assert len(buttons) == 4  # копировать логин; глаз, карандаш, копировать пароль
+        heights = {b.winfo_height() for b in buttons} | {b.winfo_width() for b in buttons}
+        assert heights == {guiapp._px(guiapp._VIEW_FIELD_HEIGHT)}
+    finally:
+        dialog.destroy()

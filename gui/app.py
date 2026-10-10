@@ -185,6 +185,11 @@ def _px(value: float) -> int:
 _MASTER_FIELD_WIDTH = 260  # px
 _MASTER_FIELD_HEIGHT = 38  # px
 
+# Диалог просмотра записи: высота плиток-полей и квадратных кнопок рядом с
+# ними — одна и та же, чтобы ряд читался как единая группа (раздел 10.42).
+_VIEW_FIELD_HEIGHT = 36  # px
+_VIEW_CONTENT_WIDTH = 330  # px — ширина тела диалога (без нижних кнопок её задавать нечем)
+
 # Главный экран референса ("вариант C", раздел 10.8) — не просто сайдбар
 # впритык к краям окна, а единая "карточка" (сайдбар + рабочая область)
 # со скруглёнными ТОЛЬКО внешними углами, отступом от края окна и на
@@ -602,6 +607,9 @@ class App(ttk.Window):
             )
             self._icon_image_medium = self._tk_image(
                 icon_source.resize((_px(64), _px(64)), Image.LANCZOS)
+            )
+            self._icon_image_tiny = self._tk_image(
+                icon_source.resize((_px(22), _px(22)), Image.LANCZOS)
             )
 
         # Кэш скруглённых изображений-фонов кнопок (см. _rounded_button_style
@@ -2743,30 +2751,42 @@ class ViewEntryDialog(ttk.Toplevel):
         # объяснение бага в докстринге `_rounded_backdrop`).
         pending_backdrops: list[Callable[[], None]] = []
 
-        header = ttk.Frame(self, padding=(_px(20), _px(14)))
+        header = ttk.Frame(self, padding=(_px(16), _px(4), _px(16), _px(10)))
         header.pack(fill="x")
         pending_backdrops.append(
             parent._rounded_backdrop(header, _SIDEBAR_BG, corners=(False, False, False, False), surface="#ffffff")
         )
-        if hasattr(parent, "_icon_image_small"):
-            ttk.Label(header, image=parent._icon_image_small, style="Sidebar.TLabel").pack(
-                side="left", padx=(0, _px(10))
+        if hasattr(parent, "_icon_image_tiny"):
+            ttk.Label(header, image=parent._icon_image_tiny, style="Sidebar.TLabel").pack(
+                side="left", padx=(0, _px(8))
             )
-        ttk.Label(header, text=title, style="Sidebar.TLabel", font=("", 12, "bold")).pack(side="left")
+        ttk.Label(header, text=title, style="Sidebar.TLabel", font=("", 11, "bold")).pack(side="left")
 
         body = ttk.Frame(self, padding=_px(20))
         body.pack(fill="both", expand=True)
+        # Без нижних кнопок ширину диалога больше ничто не задаёт — "распорка"
+        # фиксированной ширины. Фон — белый, как у тела: у Tk минимальная
+        # высота такого фрейма 1px, и с фоном по умолчанию он рисовал бы
+        # серую линию под шапкой.
+        tk.Frame(
+            body, width=_px(_VIEW_CONTENT_WIDTH), height=0, bd=0, highlightthickness=0, background="#ffffff"
+        ).pack()
         pending_backdrops.append(
             parent._rounded_backdrop(body, "#ffffff", corners=(False, False, True, True), surface="#ffffff")
         )
 
+        # Квадратные кнопки РОВНО высоты поля (`_VIEW_FIELD_HEIGHT`) с нулевым
+        # внутренним padding — тот же приём, что у кнопки-"глаза" в
+        # `CreateVaultDialog` (разделы 10.22–10.23): размер задаёт
+        # контейнер, а не содержимое кнопки.
         icon_button_style = parent._rounded_button_style(
-            "Rounded.IconToggle",
+            "Rounded.IconToggleSquare",
             _NEUTRAL_FILL,
             _NEUTRAL_TEXT,
             border_color=_NEUTRAL_BORDER,
-            padding=(_px(8), _px(6)),
+            padding=(0, 0),
         )
+        field_height = _px(_VIEW_FIELD_HEIGHT)
 
         def field_row(label_text: str, value: str) -> tuple[ttk.Label, ttk.Frame]:
             ttk.Label(body, text=label_text.upper(), font=("", 8, "bold"), bootstyle="secondary").pack(
@@ -2774,7 +2794,10 @@ class ViewEntryDialog(ttk.Toplevel):
             )
             row = ttk.Frame(body)
             row.pack(fill="x")
-            box = ttk.Frame(row, padding=(_px(10), _px(8)))
+            # Фиксированная высота плитки (а не "по тексту"): иначе она ниже
+            # соседних кнопок и ряд выглядит рваным.
+            box = ttk.Frame(row, padding=(_px(10), 0), height=field_height)
+            box.pack_propagate(False)
             box.pack(side="left", fill="x", expand=True)
             pending_backdrops.append(
                 parent._rounded_backdrop(
@@ -2788,14 +2811,17 @@ class ViewEntryDialog(ttk.Toplevel):
                 )
             )
             value_label = ttk.Label(box, text=value, background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT)
-            value_label.pack(anchor="w")
+            value_label.pack(side="left", fill="y")
             return value_label, row
 
         def add_icon_button(row: ttk.Frame, icon_name: str, command) -> None:
+            cell = ttk.Frame(row, width=field_height, height=field_height)
+            cell.pack_propagate(False)
+            cell.pack(side="left", padx=(_px(6), 0))
             parent._styled(
-                ttk.Button(row, command=command, **parent._icon_kwargs(icon_name, "dark")),
+                ttk.Button(cell, command=command, **parent._icon_kwargs(icon_name, "dark")),
                 icon_button_style,
-            ).pack(side="left", padx=(_px(6), 0))
+            ).pack(fill="both", expand=True)
 
         field_row("Сайт", entry["site"])
 
@@ -2817,22 +2843,6 @@ class ViewEntryDialog(ttk.Toplevel):
 
         created_at = datetime.strptime(entry["created_at"], CREATED_AT_FORMAT)
         field_row("Создан / изменён", created_at.strftime("%d.%m.%Y"))
-
-        buttons = ttk.Frame(self, padding=(_px(20), 0, _px(20), _px(20)))
-        buttons.pack(fill="x")
-        parent._styled(
-            ttk.Button(buttons, text="Закрыть", command=self.destroy),
-            parent._neutral_style(),
-        ).pack(side="right")
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Копировать пароль",
-                command=lambda: parent._copy_to_clipboard(entry["password"]),
-                **parent._icon_kwargs("copy", "white"),
-            ),
-            parent._accent_style(),
-        ).pack(side="left")
 
         # Синхронно досчитать геометрию ВСЕГО уже построенного диалога —
         # и только ПОСЛЕ этого перерисовать скруглённые подложки под их
