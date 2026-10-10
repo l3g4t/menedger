@@ -863,7 +863,11 @@ class App(ttk.Window):
         self.overrideredirect(True)
         # Скруглённые углы главного окна (раздел 10.49) — только Windows.
         if _enable_transparent_corners(self):
-            self.configure(background=_WINDOW_KEY_COLOR)
+            # Фон окна — НЕ ключевой цвет (раздел 10.59): всё, что ещё не
+            # успели нарисовать (например, сразу после восстановления с панели
+            # задач), должно быть цветом окна, а не прозрачным "окном в
+            # рабочий стол". Прозрачность дают только накладки в углах.
+            self.configure(background=_SIDEBAR_BG)
             self._window_corners = []
         self._titlebar = TitleBar(
             self,
@@ -909,6 +913,8 @@ class App(ttk.Window):
         self._chrome_theme_name = theme
         self._titlebar.set_theme(theme)
         colors = _CHROME_THEMES[theme]
+        if self._window_corners is not None:
+            self.configure(background=_SIDEBAR_BG if theme == "dark" else _PAGE_BG)
         self._grip.configure(
             background=colors["bg"], image=self._chrome_image("grip", colors["title"], colors["bg"], None)
         )
@@ -1135,7 +1141,10 @@ class App(ttk.Window):
         dialog._corner_overlay = None
         dialog._corner_top_color = _CHROME_THEMES[theme]["bg"]
         if rounded and _enable_transparent_corners(dialog):
-            dialog.configure(background=_WINDOW_KEY_COLOR)
+            # Фон окна — белый цвет тела, а НЕ ключевой цвет (раздел 10.59):
+            # так любой незакрытый виджетами участок остаётся непрозрачным.
+            # Прозрачность в углах дают накладки (`_round_dialog_corners`).
+            dialog.configure(background="#ffffff")
             dialog._corner_overlay = []
         if border:
             dialog.configure(

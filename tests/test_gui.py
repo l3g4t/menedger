@@ -680,7 +680,8 @@ def test_other_dialogs_get_rounded_corner_overlays(app, monkeypatch):
     try:
         for dialog in dialogs:
             dialog.update()
-            assert dialog.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
+            # фон окна НЕ ключевой цвет: незакрытый участок не станет дырой (10.59)
+            assert dialog.cget("background").lower() != guiapp._WINDOW_KEY_COLOR
             assert len(dialog._corner_overlay) >= 4  # тонкие строки-накладки в 4 углах
     finally:
         for dialog in dialogs:
@@ -803,12 +804,14 @@ def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
     window = guiapp.App()
     try:
         window.update()
-        assert window.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
+        assert window.cget("background").lower() != guiapp._WINDOW_KEY_COLOR  # раздел 10.59
+        assert window.cget("background").lower() == guiapp._SIDEBAR_BG  # экран разблокировки — тёмный
         assert len(window._window_corners) >= 4
         unlock_photos = [label.photo for label in window._window_corners]
         window.data = {"entries": []}
         window._show_main()
         window.update()
+        assert window.cget("background").lower() == guiapp._PAGE_BG  # главный экран — светлый фон
         assert len(window._window_corners) >= 4
         assert [label.photo for label in window._window_corners] != unlock_photos  # цвета другого экрана
         window._toggle_maximize()
