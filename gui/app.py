@@ -773,6 +773,10 @@ class App(ttk.Window):
         if self._native_frame:
             self.iconify()
             return
+        # Windows: сворачиваем напрямую (ShowWindow), не трогая рамку —
+        # без вспышки системного заголовка и пустого окна при восстановлении.
+        if self._native_minimize():
+            return
         self._saved_geometry = self.geometry()
         self._minimized = True
         self.overrideredirect(False)
@@ -782,6 +786,33 @@ class App(ttk.Window):
         self.withdraw()
         self.update_idletasks()
         self.iconify()
+
+    def _native_minimize(self) -> bool:
+        """Windows: `ShowWindow(SW_MINIMIZE)` сворачивает и безрамочное
+        (WS_POPUP) окно — Tk сам этого не умеет (`iconify()` для окна с
+        `overrideredirect(True)` игнорируется). Окно остаётся тем же, с тем
+        же стилем: при восстановлении с панели задач ничего не пересоздаётся.
+        Возвращает False (и ничего не меняет), если не Windows, вызов не
+        удался или окно после него не стало свёрнутым — тогда работает
+        прежний обходной путь с возвратом рамки."""
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.GetParent.restype = wintypes.HWND
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.IsIconic.argtypes = [wintypes.HWND]
+            hwnd = user32.GetParent(self.winfo_id())
+            if not hwnd:
+                return False
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            return bool(user32.IsIconic(hwnd))
+        except Exception:
+            return False
 
     def _on_map(self, event: tk.Event) -> None:
         if event.widget is self and self._minimized:

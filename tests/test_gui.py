@@ -385,6 +385,37 @@ def test_map_while_iconic_does_not_restore_window(app, monkeypatch):
     assert True in calls  # рамка снова убрана
 
 
+def test_minimize_uses_native_path_without_touching_frame(app, monkeypatch):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    calls = []
+    monkeypatch.setattr(app, "overrideredirect", lambda flag=None: calls.append(flag))
+    monkeypatch.setattr(app, "_native_minimize", lambda: True)
+    app._minimize()
+    assert calls == []
+    assert app._minimized is False
+
+
+def test_minimize_falls_back_when_native_path_unavailable(app, monkeypatch):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    app.update()
+    monkeypatch.setattr(app, "_native_minimize", lambda: False)
+    app._minimize()
+    app.update()
+    assert app._minimized is True
+    assert app.state() == "iconic"
+    app.deiconify()
+
+
+def test_native_minimize_is_noop_off_windows(app):
+    import sys
+
+    if sys.platform == "win32":
+        pytest.skip("только не-Windows")
+    assert app._native_minimize() is False
+
+
 def test_restore_chrome_waits_if_window_minimized_again(app, monkeypatch):
     if app._titlebar is None:
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
