@@ -3095,7 +3095,7 @@ class NewPasswordDialog(ttk.Toplevel):
         ttk.Label(title_stack, text="Новый пароль", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(anchor="w")
         ttk.Label(
             title_stack,
-            text=f"для «{entry['site']}» ({entry['username']})",
+            text=f"для «{entry['site']}»",
             foreground=_SEARCH_PLACEHOLDER_COLOR,
             font=("", 9),
             wraplength=_px(_NEW_PASSWORD_CONTENT_WIDTH - 90),
