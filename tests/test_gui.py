@@ -19,6 +19,7 @@ getpass.getpass()/input() в tests/test_cli.py. Сама крипто- и
 вызывает то же самое ядро корректно", а не саму бизнес-логику заново.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -1025,3 +1026,52 @@ def test_native_window_icon_is_noop_off_windows(app, monkeypatch):
     app._set_native_window_icon(0, 0)
     assert guiapp.ICON_ICO_PATH.exists()
     assert not hasattr(app, "_native_icons")
+
+
+def _wait_idle(dialog, timeout=5.0):
+    import time
+
+    end = time.time() + timeout
+    while dialog._busy and time.time() < end:
+        dialog.update()
+        time.sleep(0.02)
+    dialog.update()
+
+
+def test_assistant_dialog_answers_hides_secrets_and_clears_on_lock(app, monkeypatch, tmp_path):
+    """Раздел 9.4: чат отвечает (без модели — шаблоны), пароль в вопросе
+    скрывается в чате и в истории, при блокировке история сбрасывается."""
+    _create_vault(app, monkeypatch)
+    app.data["entries"] = [
+        {"site": "github.com", "username": "bob", "password": "Password1", "created_at": "2020-01-01T00:00:00Z"}
+    ]
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")  # модели нет
+    dialog = guiapp.AssistantDialog(app)
+    dialog.update()
+    dialog._question_var.set("мой пароль Zq8#vLm2$Pw9xK надёжный?")
+    dialog._send()
+    _wait_idle(dialog)
+    chat = dialog._text.get("1.0", "end")
+    assert "Zq8#vLm2$Pw9xK" not in chat and "[пароль скрыт]" in chat
+    assert "Я не вижу" in chat
+    dialog._send("Что исправить в первую очередь?")
+    _wait_idle(dialog)
+    assert "github.com" in dialog._text.get("1.0", "end")
+    history = json.dumps(app._assistant_history, ensure_ascii=False)
+    assert "Zq8#vLm2$Pw9xK" not in history and len(app._assistant_history) == 4
+    dialog.destroy()
+    app._on_lock()
+    assert app._assistant_history == []
+
+
+def test_assistant_dialog_ignores_empty_question_and_double_send(app, monkeypatch, tmp_path):
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
+    dialog = guiapp.AssistantDialog(app)
+    dialog._send("   ")
+    assert app._assistant_history == []
+    dialog._send("Как придумать пароль?")
+    dialog._send("Как придумать пароль?")  # второй вызов во время ответа игнорируется
+    _wait_idle(dialog)
+    assert [turn["role"] for turn in app._assistant_history] == ["user", "assistant"]
+    dialog.destroy()

@@ -35,6 +35,22 @@ for _package in ("cryptography", "argon2", "ttkbootstrap"):
     binaries += _binaries
     hiddenimports += _hiddenimports
 
+# Локальный помощник (CLAUDE.md, раздел 9.4): llama-cpp-python — НЕОБЯЗАТЕЛЬНАЯ
+# зависимость (requirements-assistant.txt). Если она установлена на машине
+# сборки, её нативные библиотеки (llama.dll/ggml*.dll) надо забрать явно —
+# статический анализ их не видит. Если не установлена — собирается обычное
+# приложение, помощник отвечает по шаблонам. Файл модели (.gguf) в .exe НЕ
+# упаковывается: он кладётся рядом с .exe (assistant_model.gguf).
+try:
+    import llama_cpp  # noqa: F401
+
+    _datas, _binaries, _hiddenimports = collect_all("llama_cpp")
+    datas += _datas
+    binaries += _binaries
+    hiddenimports += _hiddenimports
+except ImportError:
+    pass
+
 # ttkbootstrap рисует часть иконок темы (например, у Combobox) через
 # Pillow (PIL.ImageTk) — а Pillow сама подключает свой Tk-биндинг
 # (PIL._tkinter_finder) динамически, через отдельный от обычного

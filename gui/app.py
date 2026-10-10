@@ -24,7 +24,9 @@ import base64
 import faulthandler
 import io
 import os
+import queue
 import sys
+import threading
 import time
 import tkinter as tk
 from collections.abc import Callable
@@ -38,6 +40,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, AdvisorReport, analyze_vault
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
+from assistant.llm import Assistant
+from assistant.prompt import context_from_report, redact_secrets
 from assistant.strength import estimate_entropy_bits, is_common_password
 from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
@@ -726,6 +730,10 @@ class App(ttk.Window):
 
         self.vault_path: Path | None = None
         self.master_password: str | None = None
+        # Помощник (раздел 9.4): модель грузится при первом вопросе; история чата
+        # живёт только пока хранилище открыто (сбрасывается при блокировке).
+        self._assistant = Assistant()
+        self._assistant_history: list[dict] = []
         self.data: dict | None = None
 
         # Два "экрана"-рамки: разблокировка/создание и основной список.
@@ -2575,6 +2583,7 @@ class App(ttk.Window):
         for text, command, icon_name in (
             ("Советник", self._on_audit, "shield"),
             ("Генератор", self._on_generate_standalone, "dice"),
+            ("Помощник", self._on_assistant, "chat"),
         ):
             self._styled(
                 ttk.Button(
@@ -2892,6 +2901,15 @@ class App(ttk.Window):
     def _on_generate_standalone(self) -> None:
         GeneratorDialog(self, on_copy=self._copy_to_clipboard)
 
+    def _on_assistant(self) -> None:
+        AssistantDialog(self)
+
+    def _assistant_context(self):
+        """Метаданные хранилища для помощника (раздел 9.4): числа и названия
+        сайтов, без паролей и логинов (`assistant.prompt`)."""
+        entries = (self.data or {}).get("entries", [])
+        return context_from_report(analyze_vault(self.data or {"entries": []}), len(entries))
+
     # ------------------------------------------------------------------
     # Блокировка / закрытие
     # ------------------------------------------------------------------
@@ -2907,6 +2925,7 @@ class App(ttk.Window):
         self.master_password = None
         self.data = None
         self.vault_path = None
+        self._assistant_history = []
         self._main_frame.pack_forget()
         self._unlock_frame.pack(fill="both", expand=True)
         self._set_chrome_theme("dark")
@@ -4023,6 +4042,202 @@ class GeneratorDialog(ttk.Toplevel):
         password = self._result_var.get()
         if password:
             self._on_copy(password)
+
+
+class AssistantDialog(ttk.Toplevel):
+    """Чат с локальным помощником по безопасности (CLAUDE.md, раздел 9.4).
+
+    Модель работает на этом же компьютере без сети и получает только
+    метаданные хранилища (`assistant.prompt`): ни паролей, ни логинов, ни
+    мастер-пароля. Всё, что в вопросе похоже на пароль, скрывается ДО
+    отправки и в самом чате. Ответ считается в отдельном потоке, чтобы
+    окно не замирало на время генерации. Если модели нет — отвечают
+    шаблоны (`assistant.offline`), режим показан в заголовке."""
+
+    QUICK_QUESTIONS = (
+        "Что со слабыми паролями?",
+        "Что исправить в первую очередь?",
+        "Как придумать пароль?",
+    )
+
+    def __init__(self, parent: App) -> None:
+        super().__init__(title="Помощник", master=parent, resizable=(False, False), iconphoto=None)
+        self.withdraw()
+        parent._dialog_chrome(self, "Помощник")
+        self.transient(parent)
+        self._parent = parent
+        self._busy = False
+        self._results: queue.Queue = queue.Queue()
+
+        content = ttk.Frame(self, padding=_px(20))
+        content.pack(fill="both", expand=True)
+
+        header = ttk.Frame(content)
+        header.pack(fill="x")
+        if hasattr(parent, "_icon_image_medium"):
+            ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, _px(12)))
+        title_stack = ttk.Frame(header)
+        title_stack.pack(side="left", fill="x", expand=True)
+        ttk.Label(title_stack, text="Помощник", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(anchor="w")
+        self._mode_var = tk.StringVar()
+        ttk.Label(
+            title_stack, textvariable=self._mode_var, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
+        ).pack(anchor="w")
+
+        chat_frame = ttk.Frame(content)
+        chat_frame.pack(fill="both", expand=True, pady=(_px(14), 0))
+        self._text = tk.Text(
+            chat_frame,
+            width=60,
+            height=15,
+            wrap="word",
+            state="disabled",
+            relief="flat",
+            padx=_px(10),
+            pady=_px(8),
+            font=("", 10),
+            background=_NEUTRAL_FILL,
+            highlightthickness=1,
+            highlightbackground=_NEUTRAL_BORDER,
+            highlightcolor=_NEUTRAL_BORDER,
+        )
+        scrollbar = ttk.Scrollbar(chat_frame, orient="vertical", command=self._text.yview)
+        self._text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self._text.pack(side="left", fill="both", expand=True)
+        self._text.tag_configure("who_user", foreground=_ACCENT, font=("", 9, "bold"), spacing1=_px(8))
+        self._text.tag_configure("who_bot", foreground=_SIDEBAR_BG, font=("", 9, "bold"), spacing1=_px(8))
+        self._text.tag_configure("body", foreground=_NEUTRAL_TEXT, lmargin1=_px(2), lmargin2=_px(2))
+        self._text.tag_configure("note", foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9, "italic"))
+
+        quick_row = ttk.Frame(content)
+        quick_row.pack(fill="x", pady=(_px(10), 0))
+        self._quick_buttons = []
+        for question in self.QUICK_QUESTIONS:
+            button = parent._styled(
+                ttk.Button(quick_row, text=question, command=lambda q=question: self._send(q)),
+                parent._neutral_style(),
+            )
+            button.pack(side="left", padx=(0, _px(6)))
+            self._quick_buttons.append(button)
+
+        input_row = ttk.Frame(content)
+        input_row.pack(fill="x", pady=(_px(10), 0))
+        self._question_var = tk.StringVar()
+        box, self._entry = parent._rounded_field(input_row, self._question_var, height=_MASTER_FIELD_HEIGHT)
+        box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
+        self._entry.bind("<Return>", lambda _e: self._send())
+        send_cell = ttk.Frame(input_row, width=_px(150), height=_px(_MASTER_FIELD_HEIGHT))
+        send_cell.pack_propagate(False)
+        send_cell.pack(side="left")
+        self._send_button = parent._styled(
+            ttk.Button(send_cell, text="Отправить", command=self._send, **parent._icon_kwargs("chat", "white")),
+            parent._accent_style(flat=True),
+        )
+        self._send_button.pack(fill="both", expand=True)
+
+        self._status_var = tk.StringVar(value="Не вводите пароли в чат: всё, что на них похоже, скрывается.")
+        ttk.Label(
+            content, textvariable=self._status_var, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
+        ).pack(anchor="w", pady=(_px(8), 0))
+
+        self._refresh_mode()
+        if parent._assistant_history:
+            for turn in parent._assistant_history:
+                self._append("Вы" if turn["role"] == "user" else "Помощник", turn["content"], turn["role"])
+        else:
+            self._append("Помощник", self._greeting(), "assistant")
+
+        self._entry.focus_set()
+        self.update_idletasks()
+        parent._round_dialog_corners(self)
+        self.place_window_center()
+        parent._keep_dialog_in_work_area(self)
+        self.deiconify()
+        self.update_idletasks()
+        self.grab_set()
+
+    # --- вспомогательное -------------------------------------------------
+
+    def _refresh_mode(self) -> None:
+        reason = self._parent._assistant.llm.status()
+        if reason:
+            self._mode_var.set(f"работает на шаблонах ({reason}) · без интернета")
+        else:
+            self._mode_var.set("локальная модель · работает на вашем компьютере, без интернета")
+
+    def _greeting(self) -> str:
+        if self._parent._assistant.llm.available:
+            return "Здравствуйте! Спросите про пароли и безопасность — отвечу по результатам советника."
+        return (
+            "Здравствуйте! Модель пока не подключена, поэтому я отвечаю по заготовленным "
+            "шаблонам. Спросите про слабые, повторяющиеся и устаревшие пароли."
+        )
+
+    def _append(self, who: str, text: str, role: str) -> None:
+        self._text.configure(state="normal")
+        self._text.insert("end", who + "\n", "who_user" if role == "user" else "who_bot")
+        self._text.insert("end", text + "\n", "body")
+        self._text.configure(state="disabled")
+        self._text.see("end")
+
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        self._send_button.configure(state=state)
+        for button in self._quick_buttons:
+            button.configure(state=state)
+        self._status_var.set(
+            "Помощник думает…" if busy else "Не вводите пароли в чат: всё, что на них похоже, скрывается."
+        )
+
+    # --- отправка ----------------------------------------------------------
+
+    def _send(self, question: str | None = None) -> None:
+        if self._busy:
+            return
+        raw = question if question is not None else self._question_var.get()
+        shown = redact_secrets(raw.strip())
+        if not shown:
+            return
+        self._question_var.set("")
+        history = list(self._parent._assistant_history)
+        self._append("Вы", shown, "user")
+        self._parent._assistant_history.append({"role": "user", "content": shown})
+        self._set_busy(True)
+        context = self._parent._assistant_context()
+        assistant = self._parent._assistant
+
+        def work() -> None:
+            try:
+                self._results.put(assistant.reply(shown, history, context))
+            except Exception as exc:  # noqa: BLE001 — поток не должен падать молча
+                self._results.put(exc)
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(100, self._poll)
+
+    def _poll(self) -> None:
+        try:
+            result = self._results.get_nowait()
+        except queue.Empty:
+            try:
+                self.after(100, self._poll)
+            except tk.TclError:
+                pass
+            return
+        try:
+            if isinstance(result, Exception):
+                text = "Не получилось ответить. Попробуйте ещё раз."
+            else:
+                text = result.text
+            self._parent._assistant_history.append({"role": "assistant", "content": text})
+            self._append("Помощник", text, "assistant")
+            self._set_busy(False)
+            self._refresh_mode()
+            self._entry.focus_set()
+        except tk.TclError:
+            pass  # окно закрыли, пока шла генерация
 
 
 def main() -> None:

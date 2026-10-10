@@ -1,0 +1,7 @@
+# DEV-ONLY: дообучение модели помощника (CLAUDE.md, раздел 9.4, training/).
+# Не нужно ни для работы приложения, ни для его сборки. Запускается в
+# Google Colab (GPU), поэтому версии здесь не закреплены: в Colab
+# `pip install unsloth` сам подбирает совместимый набор torch/transformers/trl.
+unsloth
+datasets
+trl
