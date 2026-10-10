@@ -938,8 +938,58 @@ class App(ttk.Window):
             # добавляет — у окна нет заголовка.
             base = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
             user32.SetWindowLongW(hwnd, -16, base | 0x00020000 | 0x00080000)
+            self._set_native_window_icon(hwnd, self.winfo_id())
             self.withdraw()
             self.after(10, self.deiconify)
+        except Exception:
+            pass
+
+    def _set_native_window_icon(self, hwnd: int, inner_hwnd: int) -> None:
+        """Windows: иконка окна для панели задач, превью при наведении и
+        Alt+Tab (раздел 10.58). У безрамочного окна Windows не берёт иконку из
+        `wm iconbitmap`, и в превью показывался значок «окно по умолчанию».
+        Иконка задаётся явно: сообщением `WM_SETICON` (крупная и мелкая) и
+        иконкой класса окна (запасной вариант; класс общий для диалогов).
+        Любая ошибка глотается — в худшем случае останется значок по
+        умолчанию."""
+        if sys.platform != "win32" or not ICON_ICO_PATH.exists():
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.LoadImageW.restype = wintypes.HANDLE
+            user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            user32.SendMessageW.restype = ctypes.c_ssize_t
+            user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+
+            def load(width_metric: int, height_metric: int):
+                return user32.LoadImageW(
+                    None,
+                    str(ICON_ICO_PATH),
+                    1,  # IMAGE_ICON
+                    user32.GetSystemMetrics(width_metric),
+                    user32.GetSystemMetrics(height_metric),
+                    0x00000010,  # LR_LOADFROMFILE
+                )
+
+            big = load(11, 12)  # SM_CXICON, SM_CYICON
+            small = load(49, 50)  # SM_CXSMICON, SM_CYSMICON
+            # Дескрипторы держим живыми на всё время работы окна.
+            self._native_icons = (big, small)
+            for window in (hwnd, inner_hwnd):
+                if small:
+                    user32.SendMessageW(window, 0x0080, 0, small)  # WM_SETICON, ICON_SMALL
+                if big:
+                    user32.SendMessageW(window, 0x0080, 1, big)  # ICON_BIG
+            set_class = getattr(user32, "SetClassLongPtrW", None) or user32.SetClassLongW
+            set_class.restype = ctypes.c_size_t
+            set_class.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+            if big:
+                set_class(hwnd, -14, big)  # GCLP_HICON
+            if small:
+                set_class(hwnd, -34, small)  # GCLP_HICONSM
         except Exception:
             pass
 

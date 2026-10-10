@@ -1016,3 +1016,12 @@ def test_dialogs_give_keyboard_focus_to_their_input_field(app, monkeypatch):
         focused = dialog.focus_get()
         assert focused is not None and focused.winfo_class() in ("TEntry", "Entry"), (type(dialog).__name__, focused)
         dialog.destroy()
+
+
+def test_native_window_icon_is_noop_off_windows(app, monkeypatch):
+    """Раздел 10.58: вне Windows установка иконки через WM_SETICON ничего не
+    делает и не падает; на Windows иконка берётся из gui/icon.ico."""
+    monkeypatch.setattr(guiapp.sys, "platform", "linux")
+    app._set_native_window_icon(0, 0)
+    assert guiapp.ICON_ICO_PATH.exists()
+    assert not hasattr(app, "_native_icons")
