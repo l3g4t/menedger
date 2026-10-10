@@ -785,6 +785,20 @@ class App(ttk.Window):
                 pass
         return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
 
+    def _keep_dialog_in_work_area(self, dialog: tk.Toplevel) -> None:
+        """Сдвинуть диалог так, чтобы он не выходил за рабочую область (раздел
+        10.54): верхний край — не выше области, нижний — не ниже (если окно
+        выше области, прижимается к верху — строка заголовка и верхние углы
+        остаются видны). Для безрамочного окна оконный менеджер этого сам не
+        делает."""
+        dialog.update_idletasks()
+        left, top, width, height = self._work_area()
+        w, h = dialog.winfo_width(), dialog.winfo_height()
+        x = min(max(dialog.winfo_x(), left), left + max(width - w, 0))
+        y = min(max(dialog.winfo_y(), top), top + max(height - h, 0))
+        if (x, y) != (dialog.winfo_x(), dialog.winfo_y()):
+            dialog.geometry(f"+{x}+{y}")
+
     def _is_maximized(self, window: tk.Misc) -> bool:
         return window is self and self._maximized
 
@@ -3653,7 +3667,7 @@ class GeneratorDialog(ttk.Toplevel):
         self._use_digits = tk.BooleanVar(value=True)
         self._use_symbols = tk.BooleanVar(value=True)
 
-        content = ttk.Frame(self, padding=_px(24))
+        content = ttk.Frame(self, padding=_px(20))
         content.pack(fill="both", expand=True)
 
         # --- Заголовок: иконка-бейдж + название + подпись ---
@@ -3686,7 +3700,7 @@ class GeneratorDialog(ttk.Toplevel):
         # Поле и кнопка копирования — два отдельных виджета (раздел 10.53):
         # скруглённая плитка поля и рядом квадратная ячейка той же высоты.
         password_row = ttk.Frame(content)
-        password_row.pack(fill="x", pady=(_px(18), 0))
+        password_row.pack(fill="x", pady=(_px(14), 0))
         field_height = _px(_GENERATOR_FIELD_HEIGHT)
         password_box = ttk.Frame(password_row, height=field_height, padding=(_px(14), 0))
         password_box.pack_propagate(False)
@@ -3736,10 +3750,10 @@ class GeneratorDialog(ttk.Toplevel):
         # Разметка вынесена в App._build_strength_meter (раздел 10.18) —
         # тот же виджет использует CreateVaultDialog для мастер-пароля.
         strength_section = ttk.Frame(content)
-        strength_section.pack(fill="x", pady=(_px(18), 0))
+        strength_section.pack(fill="x", pady=(_px(14), 0))
         self._update_strength = parent._build_strength_meter(strength_section)
 
-        ttk.Separator(content).pack(fill="x", pady=_px(18))
+        ttk.Separator(content).pack(fill="x", pady=_px(12))
 
         # --- Длина: подпись + бейдж со значением + слайдер ---
         length_section = ttk.Frame(content)
@@ -3764,7 +3778,7 @@ class GeneratorDialog(ttk.Toplevel):
         length_scale.set(DEFAULT_GENERATED_LENGTH)
         length_scale.pack(fill="x", pady=(_px(10), 0))
 
-        ttk.Separator(content).pack(fill="x", pady=_px(18))
+        ttk.Separator(content).pack(fill="x", pady=_px(12))
 
         # --- Наборы символов: иконка-чип + подпись + переключатель ---
         toggles = (
@@ -3775,7 +3789,7 @@ class GeneratorDialog(ttk.Toplevel):
         )
         for chip_text, label_text, var in toggles:
             row = ttk.Frame(content)
-            row.pack(fill="x", pady=_px(5))
+            row.pack(fill="x", pady=_px(3))
             ttk.Label(
                 row,
                 text=chip_text,
@@ -3832,6 +3846,10 @@ class GeneratorDialog(ttk.Toplevel):
 
         parent._round_dialog_corners(self)
         self.place_window_center()
+        parent._keep_dialog_in_work_area(self)
+        # Накладки углов пересоздаются после первого показа окна (раздел
+        # 10.54) — на случай, если Windows изменила порядок окон/размер.
+        self.bind("<Map>", lambda _e: parent._round_dialog_corners(self), add="+")
         self.grab_set()
 
     def _on_length_change(self, value: str) -> None:

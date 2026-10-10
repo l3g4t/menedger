@@ -917,3 +917,17 @@ def test_generator_copy_button_is_separate_from_field_and_same_height(app, monke
     assert cell.winfo_width() == cell.winfo_height()
     assert button.winfo_rootx() >= box.winfo_rootx() + box.winfo_width()
     generator.destroy()
+
+
+def test_generator_dialog_rounded_corners_and_stays_in_work_area(app, monkeypatch):
+    """Раздел 10.54: у генератора есть накладки скруглённых углов (при
+    поддержке прозрачности) и окно не выходит за рабочую область."""
+    _create_vault(app, monkeypatch)
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda w: True)
+    generator = guiapp.GeneratorDialog(app, on_copy=lambda _text: None)
+    generator.update_idletasks()
+    assert generator._corner_overlay and len(generator._corner_overlay) >= 4
+    left, top, width, height = app._work_area()
+    assert generator.winfo_x() >= left and generator.winfo_y() >= top
+    assert generator.winfo_height() <= height
+    generator.destroy()
