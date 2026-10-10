@@ -1098,6 +1098,7 @@ class App(ttk.Window):
         """У окна с `overrideredirect(True)` `iconify()` не работает, поэтому
         на время сворачивания возвращаем системную рамку; обратно — в
         `_on_map`, когда окно снова показано."""
+        self._dlog("minimize: нажата кнопка «свернуть»")
         if self._native_frame:
             self.iconify()
             return
@@ -1137,7 +1138,9 @@ class App(ttk.Window):
             hwnd = user32.GetParent(self.winfo_id())
             if not hwnd:
                 return False
+            self._dlog("native minimize: вызываю ShowWindow(SW_MINIMIZE)")
             user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            self._dlog("native minimize: ShowWindow вернулся")
             iconic = bool(user32.IsIconic(hwnd))
             self._dlog(f"native minimize: IsIconic={iconic}")
             return iconic
@@ -1459,6 +1462,47 @@ class App(ttk.Window):
         for sequence in ("<Map>", "<Unmap>", "<Activate>", "<Deactivate>"):
             self.bind(sequence, lambda e, s=sequence: log(f"{s} {describe(e)}") if e.widget is self else None, add="+")
         self.bind("<Configure>", lambda e: log(f"Configure root {e.width}x{e.height}") if e.widget is self else None, add="+")
+
+        # Аварийный выход без traceback'а Python (например, ошибка в вызове
+        # Windows API через ctypes) иначе не оставляет в журнале ничего:
+        # `faulthandler.enable` пишет стек Python при падении процесса.
+        try:
+            faulthandler.enable(file=log_file, all_threads=True)
+        except (RuntimeError, ValueError, OSError):
+            pass
+        import atexit
+
+        def log_exit() -> None:
+            try:
+                log("=== выход из процесса (atexit)")
+            except (OSError, ValueError):  # файл журнала уже закрыт
+                pass
+
+        atexit.register(log_exit)
+
+        # Сколько Tk рисует окно после показа (<Map>, в том числе при
+        # восстановлении с панели задач): если до последнего <Expose> проходят
+        # сотни миллисекунд — медленно рисует сам Tk; если доли секунды, а
+        # задержку видно — она на стороне Windows (прорисовка слоёного окна,
+        # анимация), раздел 10.60.
+        paint = {"t0": None, "count": 0, "last": 0.0}
+
+        def on_map(event: tk.Event) -> None:
+            if event.widget is not self:
+                return
+            paint.update(t0=_time.time(), count=0, last=0.0)
+            self.after_idle(lambda: log(f"после <Map>: Tk дошёл до простоя через {(_time.time() - paint['t0']) * 1000:.0f} мс"))
+            self.after(800, lambda: log(
+                f"после <Map>: событий Expose {paint['count']}, последнее через {paint['last'] * 1000:.0f} мс"
+            ))
+
+        def on_expose(_event: tk.Event) -> None:
+            if paint["t0"] is not None:
+                paint["count"] += 1
+                paint["last"] = _time.time() - paint["t0"]
+
+        self.bind("<Map>", on_map, add="+")
+        self.bind_all("<Expose>", on_expose, add="+")
 
         # Сторож: пока цикл событий жив, каждые 500 мс взводит таймер заново;
         # если цикл встал — через 3 с таймер срабатывает и пишет стек.

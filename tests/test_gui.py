@@ -22,6 +22,7 @@ getpass.getpass()/input() в tests/test_cli.py. Сама крипто- и
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -533,6 +534,7 @@ def test_backdrop_redraw_is_coalesced_during_resize(app):
 
 
 def test_debug_tools_write_event_log_and_arm_watchdog(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(guiapp.App, "_debug_text", lambda self, folder: (self._debug_log.flush(), (folder / "menedger_debug.log").read_text(encoding="utf-8"))[1], raising=False)
     import faulthandler
 
     monkeypatch.chdir(tmp_path)
@@ -545,8 +547,19 @@ def test_debug_tools_write_event_log_and_arm_watchdog(app, tmp_path, monkeypatch
         text = (tmp_path / "menedger_debug.log").read_text(encoding="utf-8")
         assert "=== запуск" in text
         assert "ButtonPress 1" in text
+        # после повторного показа окна в журнале время прорисовки (раздел 10.60)
+        app.withdraw()
+        app.update()
+        app.deiconify()
+        deadline = time.time() + 2.5
+        while time.time() < deadline and "событий Expose" not in app._debug_text(tmp_path):
+            app.update()
+            time.sleep(0.05)
+        text = app._debug_text(tmp_path)
+        assert "Tk дошёл до простоя" in text and "событий Expose" in text
     finally:
         faulthandler.cancel_dump_traceback_later()
+        faulthandler.disable()  # `_start_debug_tools` включил запись в журнал
         app._debug_log.close()
 
 
