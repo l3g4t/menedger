@@ -3859,10 +3859,14 @@ class ViewEntryDialog(ttk.Toplevel):
         window_radius = _px(_VIEW_WINDOW_RADIUS) if rounded else 0
         header = ttk.Frame(self)
         header.pack(fill="x")
+        # Со своей рамкой шапка тёмная (она заменяет строку заголовка); с системной
+        # заголовок рисует ОС, и наша полоса — белая с тёмно-синим текстом
+        # (раздел 10.75): тёмная плашка только под текстом выглядела выделением.
+        header_fill = "#ffffff" if parent._native_frame else _SIDEBAR_BG
         pending_backdrops.append(
             parent._rounded_backdrop(
                 header,
-                _SIDEBAR_BG,
+                header_fill,
                 corners=(rounded, rounded, False, False),
                 surface=_WINDOW_KEY_COLOR if rounded else "#ffffff",
                 radius=_VIEW_WINDOW_RADIUS,
@@ -3871,14 +3875,17 @@ class ViewEntryDialog(ttk.Toplevel):
         )
         if parent._native_frame:
             # Системная рамка: заголовок и крестик рисует сама ОС, у нас — только
-            # компактная тёмная полоса с иконкой и названием.
+            # компактная белая полоса с иконкой и названием тёмно-синим цветом.
             brand = ttk.Frame(header, padding=(_px(16), _px(6)))
             brand.pack(fill="x")
             if hasattr(parent, "_icon_image_tiny"):
-                ttk.Label(brand, image=parent._icon_image_tiny, style="Sidebar.TLabel").pack(
-                    side="left", padx=(0, _px(8))
-                )
-            ttk.Label(brand, text=title, style="Sidebar.TLabel", font=("", 11, "bold")).pack(side="left")
+                tk.Label(
+                    brand, image=parent._icon_image_tiny, bd=0, highlightthickness=0, background="#ffffff"
+                ).pack(side="left", padx=(0, _px(8)))
+            self._header_title = tk.Label(
+                brand, text=title, background="#ffffff", foreground=_SIDEBAR_BG, font=("", 11, "bold"), bd=0
+            )
+            self._header_title.pack(side="left")
         else:
             bar = TitleBar(header, parent, self, title, theme="dark", controls=("close",), show_title=True)
             # Отступ по бокам = радиус: углы окна остаются за подложкой шапки,

@@ -1800,3 +1800,18 @@ def test_problems_dialog_scrollbar_hidden_when_everything_fits(app):
         assert dialog._feed_scroll.winfo_ismapped()
     finally:
         dialog.destroy()
+
+
+def test_view_dialog_native_frame_header_is_white_with_dark_blue_title(app):
+    """Раздел 10.75: с системной рамкой название записи — тёмно-синим на белом, а не
+    белым на тёмной плашке под текстом."""
+    entry = {"site": "цук", "username": "u", "password": "p", "created_at": "2026-01-01T00:00:00Z"}
+    app._native_frame = True
+    dialog = guiapp.ViewEntryDialog(app, entry)
+    try:
+        dialog.update()
+        assert dialog._header_title.cget("bg") == "#ffffff"
+        assert dialog._header_title.cget("fg") == guiapp._SIDEBAR_BG
+        assert "цук" in dialog._header_title.cget("text")
+    finally:
+        dialog.destroy()
