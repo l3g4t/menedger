@@ -221,7 +221,15 @@ def test_update_entry_changes_password_and_created_at(app, monkeypatch):
     entry = {"site": "example.com", "username": "alice", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
     app.data["entries"] = [entry]
 
-    monkeypatch.setattr(guiapp.simpledialog, "askstring", lambda *a, **k: "new-password")
+    # `_on_update_entry` открывает `NewPasswordDialog` (раздел 10.51) — подменяем
+    # на фейк по тому же принципу, что и `CreateVaultDialog` в `_create_vault`.
+    class _FakeNewPasswordDialog(tk.Toplevel):
+        def __init__(self, parent, entry):
+            super().__init__(parent)
+            self.result = "new-password"
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "NewPasswordDialog", _FakeNewPasswordDialog)
     app._on_update_entry(entry)
 
     assert entry["password"] == "new-password"
@@ -815,6 +823,54 @@ def test_corner_overlays_do_not_cover_close_button_hover(app, monkeypatch):
             overlap_x = box[0] < hover[2] and hover[0] < box[2]
             overlap_y = box[1] < hover[3] and hover[1] < box[3]
             assert not (overlap_x and overlap_y), (box, hover)
+    finally:
+        dialog.destroy()
+
+
+def test_update_entry_cancelled_dialog_keeps_password(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    entry = {"site": "example.com", "username": "alice", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
+    app.data["entries"] = [entry]
+
+    class _CancelledDialog(tk.Toplevel):
+        def __init__(self, parent, entry):
+            super().__init__(parent)
+            self.result = None
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "NewPasswordDialog", _CancelledDialog)
+    app._on_update_entry(entry)
+
+    assert entry["password"] == "old"
+    assert entry["created_at"] == "2020-01-01T00:00:00Z"
+
+
+def test_new_password_dialog_rejects_empty_and_returns_password(app):
+    """Раздел 10.51: диалог нового пароля не принимает пустой ввод и
+    возвращает введённое через `.result`."""
+    entry = {"site": "цук", "username": "цукен", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
+    dialog = guiapp.NewPasswordDialog(app, entry)
+    dialog.update()
+    try:
+        dialog._on_submit()  # пусто
+        assert dialog.result is None
+        assert "Введите" in dialog._status_label.cget("text")
+        dialog._password_var.set("Brand-new-Passw0rd!")
+        dialog._on_submit()
+        assert dialog.result == "Brand-new-Passw0rd!"
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()
+
+
+def test_new_password_dialog_eye_toggles_visibility(app):
+    entry = {"site": "цук", "username": "цукен", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
+    dialog = guiapp.NewPasswordDialog(app, entry)
+    dialog.update()
+    try:
+        assert str(dialog._password_entry.cget("show")) == "*"
+        dialog._on_toggle_visibility()
+        assert str(dialog._password_entry.cget("show")) == ""
     finally:
         dialog.destroy()
 

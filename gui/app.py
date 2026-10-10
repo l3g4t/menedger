@@ -188,6 +188,7 @@ _MASTER_FIELD_HEIGHT = 38  # px
 # Диалог просмотра записи: высота плиток-полей и квадратных кнопок рядом с
 # ними — одна и та же, чтобы ряд читался как единая группа (раздел 10.42).
 _VIEW_FIELD_HEIGHT = 36  # px
+_NEW_PASSWORD_CONTENT_WIDTH = 360  # px — ширина содержимого диалога нового пароля (раздел 10.51)
 _VIEW_CONTENT_WIDTH = 330  # px — ширина тела диалога (без нижних кнопок её задавать нечем)
 _VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (разделы 10.45–10.46)
 # Экран разблокировки (раздел 10.46): высота полей ввода и ВСЕХ кнопок на
@@ -2628,12 +2629,11 @@ class App(ttk.Window):
         момент — это поле означает "когда пароль последний раз
         установлен", важно для эвристики устаревших паролей
         (assistant.advisor, см. CLAUDE.md, раздел "Детали CLI")."""
-        new_password = simpledialog.askstring(
-            "Новый пароль",
-            f"Новый пароль для «{entry['site']}» ({entry['username']}):",
-            show="*",
-            parent=self,
-        )
+        # Диалог в стиле остального приложения (раздел 10.51), а не системное
+        # `simpledialog.askstring`.
+        dialog = NewPasswordDialog(self, entry)
+        self.wait_window(dialog)
+        new_password = dialog.result
         if not new_password:
             return
         entry["password"] = new_password
@@ -3060,6 +3060,121 @@ class CreateVaultDialog(ttk.Toplevel):
             if not proceed:
                 return
 
+        self.result = password
+        self.destroy()
+
+
+class NewPasswordDialog(ttk.Toplevel):
+    """Ввод нового пароля для записи (раздел 10.51) — замена системному
+    `simpledialog.askstring` («Новый пароль» с полями OK/Cancel): то же
+    оформление, что у остальных диалогов — своя строка заголовка и
+    скруглённые углы, скруглённое поле с кнопкой-"глазом", живая оценка
+    надёжности (`App._build_strength_meter`, как у `EntryDialog` и
+    `CreateVaultDialog`). Результат — `self.result` (None при отмене)."""
+
+    def __init__(self, parent: App, entry: dict) -> None:
+        super().__init__(title="Новый пароль", master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, "Новый пароль")
+        self.transient(parent)
+        self.result: str | None = None
+
+        content = ttk.Frame(self, padding=_px(24))
+        content.pack(fill="both", expand=True)
+        # Ширина диалога задаётся распоркой (фон белый — у Tk минимальная
+        # высота фрейма 1 px, и с фоном по умолчанию была бы серая линия).
+        tk.Frame(
+            content, width=_px(_NEW_PASSWORD_CONTENT_WIDTH), height=0, bd=0, highlightthickness=0, background="#ffffff"
+        ).pack()
+
+        header = ttk.Frame(content)
+        header.pack(fill="x")
+        if hasattr(parent, "_icon_image_medium"):
+            ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, _px(12)))
+        title_stack = ttk.Frame(header)
+        title_stack.pack(side="left", fill="both", expand=True)
+        ttk.Label(title_stack, text="Новый пароль", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(anchor="w")
+        ttk.Label(
+            title_stack,
+            text=f"для «{entry['site']}» ({entry['username']})",
+            foreground=_SEARCH_PLACEHOLDER_COLOR,
+            font=("", 9),
+            wraplength=_px(_NEW_PASSWORD_CONTENT_WIDTH - 90),
+            justify="left",
+        ).pack(anchor="w")
+
+        ttk.Label(content, text="НОВЫЙ ПАРОЛЬ", font=("", 8, "bold"), bootstyle="secondary").pack(
+            fill="x", anchor="w", pady=(_px(18), _px(2))
+        )
+        self._password_var = tk.StringVar()
+        row = ttk.Frame(content)
+        row.pack(fill="x")
+        box, password_entry = parent._rounded_field(row, self._password_var, show="*", height=_MASTER_FIELD_HEIGHT)
+        box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
+        password_entry.bind("<Return>", lambda _event: self._on_submit())
+        self._password_entry = password_entry
+        self._password_visible = False
+        eye_cell = ttk.Frame(row, width=_px(_MASTER_FIELD_HEIGHT), height=_px(_MASTER_FIELD_HEIGHT))
+        eye_cell.pack_propagate(False)
+        eye_cell.pack(side="left")
+        parent._styled(
+            ttk.Button(
+                eye_cell,
+                command=self._on_toggle_visibility,
+                **{**parent._icon_kwargs("eye", "dark", center=True), "compound": "image"},
+            ),
+            parent._rounded_button_style(
+                "Rounded.IconToggleSquare",
+                _NEUTRAL_FILL,
+                _NEUTRAL_TEXT,
+                border_color=_NEUTRAL_BORDER,
+                padding=(0, 0),
+                element_padding=0,
+            ),
+        ).pack(fill="both", expand=True)
+
+        strength_section = ttk.Frame(content)
+        strength_section.pack(fill="x", pady=(_px(12), 0))
+        self._update_strength = parent._build_strength_meter(strength_section)
+        self._password_var.trace_add("write", lambda *_args: self._update_strength(self._password_var.get()))
+
+        self._status_label = ttk.Label(
+            content, text="", bootstyle="danger", wraplength=_px(_NEW_PASSWORD_CONTENT_WIDTH), justify="left"
+        )
+        self._status_label.pack(fill="x", pady=(_px(10), 0))
+
+        buttons = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
+        buttons.pack(fill="x")
+        buttons.columnconfigure(0, weight=1, uniform="new_password_footer")
+        buttons.columnconfigure(1, weight=1, uniform="new_password_footer")
+        parent._styled(
+            ttk.Button(
+                buttons,
+                text="Сохранить",
+                command=self._on_submit,
+                **parent._icon_kwargs("save", "white"),
+            ),
+            parent._accent_style(),
+        ).grid(row=0, column=0, sticky="ew", padx=(0, _px(8)))
+        parent._styled(
+            ttk.Button(buttons, text="Отмена", command=self.destroy),
+            parent._neutral_style(),
+        ).grid(row=0, column=1, sticky="ew")
+
+        password_entry.focus_set()
+        self.update_idletasks()
+        parent._round_dialog_corners(self)
+        self.place_window_center()
+        self.grab_set()
+
+    def _on_toggle_visibility(self) -> None:
+        self._password_visible = not self._password_visible
+        self._password_entry.configure(show="" if self._password_visible else "*")
+
+    def _on_submit(self) -> None:
+        password = self._password_var.get()
+        if not password:
+            self._status_label.configure(text="Введите новый пароль.")
+            return
         self.result = password
         self.destroy()
 
