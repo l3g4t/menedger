@@ -1087,11 +1087,11 @@ def test_assistant_chat_is_messenger_style(app, monkeypatch, tmp_path):
     dialog._send("Как придумать пароль?")
     assert dialog._typing_row is not None  # индикатор виден сразу после отправки
     dialog.update()
-    assert "печатает" in dialog._typing_row.text_label.cget("text")
+    assert getattr(dialog._typing_row, "is_typing", False) and len(dialog._typing_row.dots) == 3
     _wait_idle(dialog)
     assert dialog._typing_row is None  # после ответа индикатора нет
 
-    rows = [row for row in dialog._feed.winfo_children()]
+    rows = [row for row in dialog._feed.winfo_children()][1:]  # первая строка — плашка «Сегодня»
     assert len(rows) == 3  # приветствие, вопрос, ответ
     sides = []
     for row in rows:
@@ -1102,3 +1102,18 @@ def test_assistant_chat_is_messenger_style(app, monkeypatch, tmp_path):
     assert sides == ["left", "right", "left"]
     assert [role for role, _text in dialog._messages] == ["assistant", "user", "assistant"]
     dialog.destroy()
+
+
+def test_render_bubble_survives_pill_radius_and_tiny_sizes():
+    """Регрессия: радиус ровно в полвысоты роняет Pillow на пузыре с одним
+    нескруглённым углом."""
+    for height in (20, 21, 35, 36, 51, 100):
+        for corners in ((True, True, False, True), (True, True, True, False), (True,) * 4):
+            image = guiapp._render_bubble(200, height, "#3b82f6", "#8b5cf6", 99, corners, "#eef2ff", border="#d9e1f5")
+            assert image.size == (200, height)
+
+
+def test_gradient_image_runs_between_stops():
+    image = guiapp._gradient_image(100, 10, [(0.0, "#000000"), (1.0, "#ff0000")])
+    assert image.getpixel((0, 5)) == (0, 0, 0) and image.getpixel((99, 5))[0] == 255
+    assert guiapp._gradient_image(10, 10, [(0.0, "#123456"), (1.0, "#123456")]).getpixel((5, 5)) == (0x12, 0x34, 0x56)

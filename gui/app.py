@@ -2013,6 +2013,7 @@ class App(ttk.Window):
         show: str = "",
         width: int = 20,
         height: int | None = None,
+        radius: int = _ROUNDED_RADIUS,
     ) -> tuple[ttk.Frame, ttk.Entry]:
         """Поле ввода в скруглённой "плитке" (раздел 10.28): фрейм с
         подложкой `_rounded_backdrop` + `Entry` со стилем
@@ -2034,7 +2035,7 @@ class App(ttk.Window):
             _NEUTRAL_FILL,
             corners=(True, True, True, True),
             surface="#ffffff",
-            radius=_ROUNDED_RADIUS,
+            radius=radius,
             border_color=_NEUTRAL_BORDER,
             border_width=1,
             dynamic=True,
@@ -4044,33 +4045,145 @@ class GeneratorDialog(ttk.Toplevel):
             self._on_copy(password)
 
 
-_CHAT_BG = "#f1f4f9"  # фон ленты сообщений (светлее страницы, темнее белого пузыря)
+# --- Графика чата помощника (раздел 9.4): градиенты, пузыри, кнопка отправки --
+
+_CHAT_BG = "#eef2ff"  # фон ленты сообщений — мягкий индиго
+_CHAT_BLUE = "#3b82f6"
+_CHAT_VIOLET = "#8b5cf6"
+_CHAT_PILL_BG = "#dbe3fb"
+_CHAT_TEXT = "#26324d"
+_CHAT_TIME = "#8a96b3"
+_CHAT_BOT_BORDER = "#d9e1f5"
+
+
+def _gradient_image(
+    width: int, height: int, stops: list[tuple[float, str]], *, mix_x: float = 1.0, mix_y: float = 0.0
+) -> Image.Image:
+    """Линейный градиент по нескольким остановкам `(позиция 0..1, цвет)`.
+    Направление задаётся долями `mix_x`/`mix_y`: (1, 0) — слева направо,
+    (0.5, 0.5) — по диагонали из левого верхнего угла в правый нижний."""
+    colors = [(pos, _hex_to_rgb(color)) for pos, color in stops]
+    if len(colors) == 1 or all(c == colors[0][1] for _p, c in colors):
+        return Image.new("RGB", (width, height), colors[0][1])
+    total = (mix_x + mix_y) or 1.0
+
+    def at(t: float) -> tuple[int, int, int]:
+        if t <= colors[0][0]:
+            return colors[0][1]
+        for (p0, c0), (p1, c1) in zip(colors, colors[1:]):
+            if t <= p1:
+                k = (t - p0) / ((p1 - p0) or 1.0)
+                return tuple(round(a + (b - a) * k) for a, b in zip(c0, c1))  # type: ignore[return-value]
+        return colors[-1][1]
+
+    # t зависит от x и y линейно — значения по x и по y считаются один раз.
+    xs = [mix_x * x / max(width - 1, 1) for x in range(width)]
+    ys = [mix_y * y / max(height - 1, 1) for y in range(height)]
+    cache: dict[int, tuple[int, int, int]] = {}
+    data = []
+    for yt in ys:
+        for xt in xs:
+            key = round((xt + yt) / total * 255)
+            color = cache.get(key)
+            if color is None:
+                color = cache[key] = at(key / 255)
+            data.append(color)
+    image = Image.new("RGB", (width, height))
+    image.putdata(data)
+    return image
+
+
+def _render_bubble(
+    width: int,
+    height: int,
+    fill_a: str,
+    fill_b: str,
+    radius: int,
+    corners: tuple[bool, bool, bool, bool],
+    surface: str,
+    border: str | None = None,
+    factor: int = 3,
+) -> Image.Image:
+    """Пузырь сообщения: скруглённый по маске `corners` прямоугольник,
+    залитый градиентом `fill_a` -> `fill_b` (одинаковые цвета — сплошной), с
+    необязательной рамкой в 1 px. Края сглажены суперсэмплингом маски."""
+
+    # Радиус строго меньше половины стороны: при ровно половине Pillow падает на
+    # пузырях с нескруглённым углом (`y1 must be >= y0`).
+    radius = max(1, min(radius, width // 2 - 1, height // 2 - 1))
+
+    def mask(inset: int) -> Image.Image:
+        big = Image.new("L", (width * factor, height * factor), 0)
+        d = inset * factor
+        ImageDraw.Draw(big).rounded_rectangle(
+            [d, d, width * factor - 1 - d, height * factor - 1 - d],
+            radius=max(radius * factor - d, 0),
+            fill=255,
+            corners=corners,
+        )
+        return big.resize((width, height), Image.LANCZOS)
+
+    base = Image.new("RGB", (width, height), surface)
+    if border:
+        base.paste(Image.new("RGB", (width, height), border), (0, 0), mask(0))
+        inner = mask(1)
+    else:
+        inner = mask(0)
+    base.paste(_gradient_image(width, height, [(0.0, fill_a), (1.0, fill_b)]), (0, 0), inner)
+    return base
+
+
+def _render_send_button(size: int, state: str = "normal", factor: int = 4) -> Image.Image:
+    """Круглая кнопка отправки с бумажным самолётиком; `state`: normal /
+    hover (светлее) / disabled (серая). Фон — цвет ленты (`_CHAT_BG`... кнопка
+    стоит на белом поле ввода, поэтому поверхность белая)."""
+    big = size * factor
+    if state == "disabled":
+        body = Image.new("RGB", (big, big), "#c4cde0")
+    else:
+        body = _gradient_image(big, big, [(0.0, _CHAT_BLUE), (1.0, _CHAT_VIOLET)], mix_x=0.5, mix_y=0.5)
+        if state == "hover":
+            body = Image.blend(body, Image.new("RGB", (big, big), "#ffffff"), 0.18)
+    mask = Image.new("L", (big, big), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, big - 1, big - 1], fill=255)
+    canvas = Image.new("RGB", (big, big), "#ffffff")
+    canvas.paste(body, (0, 0), mask)
+    draw = ImageDraw.Draw(canvas)
+    plane = [(0.29, 0.30), (0.75, 0.50), (0.29, 0.70), (0.38, 0.50)]
+    draw.polygon([(x * big, y * big) for x, y in plane], fill="#ffffff")
+    return canvas.resize((size, size), Image.LANCZOS)
+
 
 
 class AssistantDialog(ttk.Toplevel):
     """Чат с локальным помощником по безопасности (CLAUDE.md, раздел 9.4) в
-    формате мессенджера: сообщения пользователя — справа, синие, помощника —
-    слева, белые, у каждого пузыря время; пока ответ считается, виден пузырь
-    «печатает…». Правый щелчок по пузырю копирует текст.
+    формате современного мессенджера: цветная шапка с градиентом и статусом,
+    лента на мягком индиго-фоне с плашкой «Сегодня», сообщения пользователя —
+    справа в сине-фиолетовом градиенте, помощника — слева, белые; у каждого
+    пузыря время; пока ответ готовится — пузырь с тремя бегущими точками;
+    быстрые ответы-«чипы», поле ввода в виде таблетки и круглая кнопка
+    отправки с самолётиком. Правый щелчок по пузырю копирует текст.
 
     Модель работает на этом же компьютере без сети и получает только
     метаданные хранилища (`assistant.prompt`): ни паролей, ни логинов, ни
     мастер-пароля. Всё, что в вопросе похоже на пароль, скрывается ДО
     отправки и в самом чате. Ответ считается в отдельном потоке, чтобы
     окно не замирало. Если модели нет — отвечают шаблоны
-    (`assistant.offline`), режим показан в заголовке."""
+    (`assistant.offline`), режим показан в шапке."""
 
     QUICK_QUESTIONS = (
         "Что со слабыми паролями?",
         "Что исправить в первую очередь?",
         "Как придумать пароль?",
     )
-    BUBBLE_WRAP = 340  # px, максимальная ширина текста в пузыре
+    BUBBLE_WRAP = 330  # px, максимальная ширина текста в пузыре
+    MIN_TYPING_SECONDS = 0.7  # минимальное время показа «печатает»
+    _HINT = "Не вводите пароли в чат: всё, что на них похоже, скрывается. Правый щелчок по сообщению — копировать."
 
     def __init__(self, parent: App) -> None:
         super().__init__(title="Помощник", master=parent, resizable=(False, False), iconphoto=None)
         self.withdraw()
-        parent._dialog_chrome(self, "Помощник")
+        parent._dialog_chrome(self, "Помощник", theme="dark")
         self.transient(parent)
         self._parent = parent
         self._busy = False
@@ -4079,31 +4192,22 @@ class AssistantDialog(ttk.Toplevel):
         self._typing_row: tk.Frame | None = None
         self._typing_job: str | None = None
         self._sent_at = 0.0
+        self._photos: list[ImageTk.PhotoImage] = []  # картинки пузырей — держим живыми
 
-        content = ttk.Frame(self, padding=_px(20))
+        self._build_header()
+
+        content = ttk.Frame(self, padding=(_px(20), _px(14), _px(20), _px(18)))
         content.pack(fill="both", expand=True)
-
-        header = ttk.Frame(content)
-        header.pack(fill="x")
-        if hasattr(parent, "_icon_image_medium"):
-            ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, _px(12)))
-        title_stack = ttk.Frame(header)
-        title_stack.pack(side="left", fill="x", expand=True)
-        ttk.Label(title_stack, text="Помощник", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(anchor="w")
-        self._mode_var = tk.StringVar()
-        ttk.Label(
-            title_stack, textvariable=self._mode_var, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
-        ).pack(anchor="w")
 
         # Лента сообщений: канвас с внутренним фреймом (как в AuditDialog).
         chat_frame = tk.Frame(
             content,
             background=_CHAT_BG,
             highlightthickness=1,
-            highlightbackground=_NEUTRAL_BORDER,
-            highlightcolor=_NEUTRAL_BORDER,
+            highlightbackground=_CHAT_BOT_BORDER,
+            highlightcolor=_CHAT_BOT_BORDER,
         )
-        chat_frame.pack(fill="both", expand=True, pady=(_px(14), 0))
+        chat_frame.pack(fill="both", expand=True)
         self._canvas = tk.Canvas(
             chat_frame, width=_px(560), height=_px(280), highlightthickness=0, bd=0, background=_CHAT_BG
         )
@@ -4124,42 +4228,52 @@ class AssistantDialog(ttk.Toplevel):
             else:
                 self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
 
-        for widget in (self._canvas, self._feed):
-            widget.bind("<MouseWheel>", on_wheel)
-            widget.bind("<Button-4>", on_wheel)
-            widget.bind("<Button-5>", on_wheel)
         self._on_wheel = on_wheel
+        self._bind_wheel(self._canvas)
+        self._bind_wheel(self._feed)
 
+        self._add_date_pill("Сегодня")
+
+        # Быстрые ответы — «чипы» в цвете акцента.
         quick_row = ttk.Frame(content)
-        quick_row.pack(fill="x", pady=(_px(10), 0))
+        quick_row.pack(fill="x", pady=(_px(12), 0))
+        chip_style = parent._rounded_button_style(
+            "Rounded.Chip", "#e7edff", "#3558d6", border_color="#c9d6ff", padding=(_px(10), _px(5))
+        )
         self._quick_buttons = []
         for question in self.QUICK_QUESTIONS:
             button = parent._styled(
-                ttk.Button(quick_row, text=question, command=lambda q=question: self._send(q)),
-                parent._neutral_style(),
+                ttk.Button(quick_row, text=question, command=lambda q=question: self._send(q)), chip_style
             )
             button.pack(side="left", padx=(0, _px(6)))
             self._quick_buttons.append(button)
 
+        # Поле ввода-«таблетка» и круглая кнопка отправки.
         input_row = ttk.Frame(content)
-        input_row.pack(fill="x", pady=(_px(10), 0))
+        input_row.pack(fill="x", pady=(_px(12), 0))
         self._question_var = tk.StringVar()
-        box, self._entry = parent._rounded_field(input_row, self._question_var, height=_MASTER_FIELD_HEIGHT)
-        box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
-        self._entry.bind("<Return>", lambda _e: self._send())
-        send_cell = ttk.Frame(input_row, width=_px(150), height=_px(_MASTER_FIELD_HEIGHT))
-        send_cell.pack_propagate(False)
-        send_cell.pack(side="left")
-        self._send_button = parent._styled(
-            ttk.Button(send_cell, text="Отправить", command=self._send, **parent._icon_kwargs("chat", "white")),
-            parent._accent_style(flat=True),
+        field_height = _MASTER_FIELD_HEIGHT + 6
+        box, self._entry = parent._rounded_field(
+            input_row, self._question_var, height=field_height, radius=field_height // 2
         )
-        self._send_button.pack(fill="both", expand=True)
+        box.pack(side="left", fill="x", expand=True, padx=(0, _px(10)))
+        self._entry.bind("<Return>", lambda _e: self._send())
+        size = _px(field_height)
+        self._send_images = {
+            state: ImageTk.PhotoImage(_render_send_button(size, state)) for state in ("normal", "hover", "disabled")
+        }
+        self._send_button = tk.Label(
+            input_row, image=self._send_images["normal"], bd=0, highlightthickness=0, background="#ffffff", cursor="hand2"
+        )
+        self._send_button.pack(side="left")
+        self._send_button.bind("<Button-1>", lambda _e: self._send())
+        self._send_button.bind("<Enter>", lambda _e: self._set_send_look("hover"))
+        self._send_button.bind("<Leave>", lambda _e: self._set_send_look("normal"))
 
         self._status_var = tk.StringVar(value=self._HINT)
         ttk.Label(
             content, textvariable=self._status_var, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
-        ).pack(anchor="w", pady=(_px(8), 0))
+        ).pack(anchor="w", pady=(_px(10), 0))
 
         self._refresh_mode()
         if parent._assistant_history:
@@ -4178,7 +4292,59 @@ class AssistantDialog(ttk.Toplevel):
         self._scroll_to_end()
         self.grab_set()
 
-    _HINT = "Не вводите пароли в чат: всё, что на них похоже, скрывается. Правый щелчок по сообщению — копировать."
+    # --- шапка ---------------------------------------------------------------
+
+    _HEADER_HEIGHT = 92
+
+    def _build_header(self) -> None:
+        """Шапка на канвасе: градиент (тёмно-синий -> синий -> фиолетовый), иконка
+        приложения, название и строка статуса с цветной точкой. Пункты канваса
+        прозрачны, поэтому текст лежит прямо на градиенте."""
+        self._header = tk.Canvas(
+            self, height=_px(self._HEADER_HEIGHT), highlightthickness=0, bd=0, background=_SIDEBAR_BG
+        )
+        self._header.pack(fill="x")
+        self._header_width = 0
+        self._header.bind("<Configure>", lambda e: self._draw_header(e.width))
+
+    def _draw_header(self, width: int) -> None:
+        if width < 10 or width == self._header_width:
+            return
+        self._header_width = width
+        height = _px(self._HEADER_HEIGHT)
+        canvas = self._header
+        canvas.delete("all")
+        image = _gradient_image(
+            width, height, [(0.0, _SIDEBAR_BG), (0.55, "#2f6fed"), (1.0, _CHAT_VIOLET)], mix_x=0.55, mix_y=0.45
+        )
+        self._header_photo = ImageTk.PhotoImage(image)
+        canvas.create_image(0, 0, anchor="nw", image=self._header_photo)
+        x = _px(22)
+        mid = height // 2
+        icon = getattr(self._parent, "_icon_image_medium", None)
+        if icon is not None:
+            canvas.create_image(x, mid, anchor="w", image=icon)
+            x += icon.width() + _px(14)
+        canvas.create_text(x, mid - _px(13), anchor="w", text="Помощник", fill="#ffffff", font=("", 15, "bold"))
+        self._status_dot = canvas.create_oval(
+            x, mid + _px(9), x + _px(9), mid + _px(18), fill="#34d399", outline=""
+        )
+        self._mode_text = canvas.create_text(
+            x + _px(16), mid + _px(14), anchor="w", text=self._mode_label, fill="#dbe4ff", font=("", 9)
+        )
+
+    @property
+    def _mode_label(self) -> str:
+        reason = self._parent._assistant.llm.status()
+        if reason:
+            return f"работает на шаблонах ({reason}) · без интернета"
+        return "локальная модель · на вашем компьютере, без интернета"
+
+    def _refresh_mode(self) -> None:
+        reason = self._parent._assistant.llm.status()
+        if self._header_width:
+            self._header.itemconfigure(self._mode_text, text=self._mode_label)
+            self._header.itemconfigure(self._status_dot, fill="#fbbf24" if reason else "#34d399")
 
     # --- вспомогательное -------------------------------------------------
 
@@ -4190,13 +4356,6 @@ class AssistantDialog(ttk.Toplevel):
         """Весь показанный текст переписки (для проверок и копирования)."""
         return "\n".join(text for _role, text in self._messages)
 
-    def _refresh_mode(self) -> None:
-        reason = self._parent._assistant.llm.status()
-        if reason:
-            self._mode_var.set(f"работает на шаблонах ({reason}) · без интернета")
-        else:
-            self._mode_var.set("локальная модель · работает на вашем компьютере, без интернета")
-
     def _greeting(self) -> str:
         if self._parent._assistant.llm.available:
             return "Здравствуйте! Спросите про пароли и безопасность — отвечу по результатам советника."
@@ -4205,9 +4364,71 @@ class AssistantDialog(ttk.Toplevel):
             "шаблонам. Спросите про слабые, повторяющиеся и устаревшие пароли."
         )
 
+    def _bind_wheel(self, widget: tk.Misc) -> None:
+        widget.bind("<MouseWheel>", self._on_wheel)
+        widget.bind("<Button-4>", self._on_wheel)
+        widget.bind("<Button-5>", self._on_wheel)
+
     def _scroll_to_end(self) -> None:
         self._canvas.update_idletasks()
         self._canvas.yview_moveto(1.0)
+
+    def _set_send_look(self, state: str) -> None:
+        if self._busy:
+            state = "disabled"
+        self._send_button.configure(image=self._send_images[state], cursor="arrow" if self._busy else "hand2")
+
+    def _add_date_pill(self, text: str) -> None:
+        """Плашка-«таблетка» с датой по центру ленты (как «Сегодня» в
+        мессенджерах): канвас с картинкой-подложкой и прозрачным текстом."""
+        holder = tk.Frame(self._feed, background=_CHAT_BG)
+        holder.pack(fill="x", pady=(_px(10), _px(2)))
+        pad_x, pad_y = _px(14), _px(4)
+        canvas = tk.Canvas(holder, highlightthickness=0, bd=0, background=_CHAT_BG)
+        item = canvas.create_text(pad_x, pad_y, anchor="nw", text=text, fill="#5b6b95", font=("", 8, "bold"))
+        x1, y1, x2, y2 = canvas.bbox(item)
+        width, height = (x2 - x1) + 2 * pad_x, (y2 - y1) + 2 * pad_y
+        canvas.configure(width=width, height=height)
+        photo = ImageTk.PhotoImage(
+            _render_bubble(width, height, _CHAT_PILL_BG, _CHAT_PILL_BG, height, (True,) * 4, _CHAT_BG)
+        )
+        self._photos.append(photo)
+        backdrop = canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas.tag_lower(backdrop)
+        canvas.pack()
+        self._bind_wheel(holder)
+        self._bind_wheel(canvas)
+
+    def _bubble(self, parent: tk.Misc, text: str, is_user: bool) -> tk.Canvas:
+        """Пузырь: канвас, на котором лежит картинка-подложка (градиент или
+        белый фон с рамкой), а поверх — прозрачный текст. Размер считается по
+        самому тексту, так что подложка точно по размеру и не зависит от
+        порядка раскладки."""
+        pad_x, pad_y = _px(14), _px(9)
+        canvas = tk.Canvas(parent, highlightthickness=0, bd=0, background=_CHAT_BG)
+        item = canvas.create_text(
+            pad_x, pad_y, anchor="nw", text=text, width=_px(self.BUBBLE_WRAP), font=("", 10),
+            fill="#ffffff" if is_user else _CHAT_TEXT,
+        )
+        x1, y1, x2, y2 = canvas.bbox(item)
+        width, height = (x2 - x1) + 2 * pad_x, (y2 - y1) + 2 * pad_y
+        canvas.configure(width=width, height=height)
+        image = _render_bubble(
+            width,
+            height,
+            _CHAT_BLUE if is_user else "#ffffff",
+            _CHAT_VIOLET if is_user else "#ffffff",
+            _px(18),
+            # «Хвостик»: у пузыря не скруглён угол со стороны автора.
+            (True, True, False, True) if is_user else (True, True, True, False),
+            _CHAT_BG,
+            border=None if is_user else _CHAT_BOT_BORDER,
+        )
+        photo = ImageTk.PhotoImage(image)
+        self._photos.append(photo)
+        backdrop = canvas.create_image(0, 0, anchor="nw", image=photo)
+        canvas.tag_lower(backdrop)
+        return canvas
 
     def _bubble_row(self, role: str, text: str, time_text: str) -> tk.Frame:
         """Одна строка ленты: пузырь (справа у пользователя, слева у помощника)
@@ -4215,50 +4436,26 @@ class AssistantDialog(ttk.Toplevel):
         parent = self._parent
         is_user = role == "user"
         row = tk.Frame(self._feed, background=_CHAT_BG)
-        row.pack(fill="x", padx=_px(10), pady=(_px(6), 0))
+        row.pack(fill="x", padx=_px(12), pady=(_px(8), 0))
         if not is_user and hasattr(parent, "_icon_image_tiny"):
             tk.Label(row, image=parent._icon_image_tiny, background=_CHAT_BG, bd=0).pack(
-                side="left", anchor="s", padx=(0, _px(6)), pady=(0, _px(14))
+                side="left", anchor="s", padx=(0, _px(8)), pady=(0, _px(16))
             )
         column = tk.Frame(row, background=_CHAT_BG)
         column.pack(side="right" if is_user else "left")
-        bubble = ttk.Frame(column, padding=(_px(12), _px(8)))
+        bubble = self._bubble(column, text, is_user)
         bubble.pack(anchor="e" if is_user else "w")
-        fill = _ACCENT if is_user else "#ffffff"
-        # «Хвостик» мессенджера: у пузыря не скруглён угол со стороны автора.
-        parent._rounded_backdrop(
-            bubble,
-            fill,
-            corners=(True, True, False, True) if is_user else (True, True, True, False),
-            surface=_CHAT_BG,
-            radius=_ROUNDED_RADIUS + 6,
-            border_color=None if is_user else _NEUTRAL_BORDER,
-            border_width=0 if is_user else 1,
-            dynamic=True,
-        )
-        label = tk.Label(
-            bubble,
-            text=text,
-            background=fill,
-            foreground="#ffffff" if is_user else _NEUTRAL_TEXT,
-            justify="left",
-            anchor="w",
-            wraplength=_px(self.BUBBLE_WRAP),
-            font=("", 10),
-            bd=0,
-            highlightthickness=0,
-        )
-        label.pack()
+        time_label = None
         if time_text:
-            tk.Label(
-                column, text=time_text, background=_CHAT_BG, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 8), bd=0
-            ).pack(anchor="e" if is_user else "w", padx=_px(4))
-        for widget in (row, column, bubble, label):
-            widget.bind("<MouseWheel>", self._on_wheel)
-            widget.bind("<Button-4>", self._on_wheel)
-            widget.bind("<Button-5>", self._on_wheel)
-        label.bind("<Button-3>", lambda event, t=text: self._copy_menu(event, t))
-        row.text_label = label
+            time_label = tk.Label(
+                column, text=time_text, background=_CHAT_BG, foreground=_CHAT_TIME, font=("", 8), bd=0
+            )
+            time_label.pack(anchor="e" if is_user else "w", padx=_px(4))
+        for widget in (row, column, bubble, time_label):
+            if widget is not None:
+                self._bind_wheel(widget)
+        bubble.bind("<Button-3>", lambda event, t=text: self._copy_menu(event, t))
+        row.bubble = bubble
         return row
 
     def _copy_menu(self, event: tk.Event, text: str) -> str:
@@ -4282,14 +4479,39 @@ class AssistantDialog(ttk.Toplevel):
     # --- «печатает…» -----------------------------------------------------
 
     def _show_typing(self) -> None:
-        self._typing_row = self._bubble_row("assistant", "печатает", "")
-        label = self._typing_row.text_label
-        frames = ("печатает ·", "печатает · ·", "печатает · · ·")
+        """Пузырь с тремя точками, по которым бежит акцент."""
+        parent = self._parent
+        row = tk.Frame(self._feed, background=_CHAT_BG)
+        row.pack(fill="x", padx=_px(12), pady=(_px(8), 0))
+        if hasattr(parent, "_icon_image_tiny"):
+            tk.Label(row, image=parent._icon_image_tiny, background=_CHAT_BG, bd=0).pack(
+                side="left", anchor="s", padx=(0, _px(8))
+            )
+        width, height = _px(66), _px(38)
+        canvas = tk.Canvas(row, width=width, height=height, highlightthickness=0, bd=0, background=_CHAT_BG)
+        photo = ImageTk.PhotoImage(
+            _render_bubble(width, height, "#ffffff", "#ffffff", _px(18), (True, True, True, False), _CHAT_BG,
+                           border=_CHAT_BOT_BORDER)
+        )
+        self._photos.append(photo)
+        canvas.create_image(0, 0, anchor="nw", image=photo)
+        dots = []
+        for i in range(3):
+            cx = width // 2 + (i - 1) * _px(14)
+            dots.append(canvas.create_oval(cx - _px(4), height // 2 - _px(4), cx + _px(4), height // 2 + _px(4),
+                                           fill="#c4cde6", outline=""))
+        canvas.pack(side="left")
+        self._bind_wheel(row)
+        self._bind_wheel(canvas)
+        row.dots = dots
+        row.is_typing = True
+        self._typing_row = row
 
         def tick(step: int = 0) -> None:
             try:
-                label.configure(text=frames[step % 3])
-                self._typing_job = self.after(400, tick, step + 1)
+                for i, dot in enumerate(dots):
+                    canvas.itemconfigure(dot, fill=_CHAT_BLUE if i == step % 3 else "#c4cde6")
+                self._typing_job = self.after(350, tick, step + 1)
             except tk.TclError:
                 self._typing_job = None
 
@@ -4313,11 +4535,9 @@ class AssistantDialog(ttk.Toplevel):
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
-        # Кнопка «Отправить» остаётся включённой: у неактивной кнопки с иконкой
-        # рисуется светлый квадрат вокруг значка; повторную отправку во время
-        # ответа и так игнорирует `_send`.
         for button in self._quick_buttons:
             button.configure(state=state)
+        self._set_send_look("normal")
         self._status_var.set("Помощник печатает…" if busy else self._HINT)
         if busy:
             self._show_typing()
@@ -4351,10 +4571,6 @@ class AssistantDialog(ttk.Toplevel):
 
         threading.Thread(target=work, daemon=True).start()
         self.after(100, self._poll)
-
-    # Минимальное время показа «печатает…» — иначе мгновенный шаблонный ответ
-    # приходит раньше, чем индикатор успевают заметить.
-    MIN_TYPING_SECONDS = 0.7
 
     def _poll(self) -> None:
         try:
