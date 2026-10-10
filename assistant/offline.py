@@ -86,7 +86,7 @@ def _priority(ctx: AssistantContext) -> str:
         return text
     if ctx.old_count:
         return f"Обновите давно не менявшиеся пароли ({_sites(ctx.old_sites)}), начиная с самых важных аккаунтов."
-    return "Явных проблем нет: советник ничего не нашёл. Включите двухфакторную аутентификацию для почты и банков."
+    return "Явных проблем нет: в разделе «Проблемы» ничего не найдено. Включите двухфакторную аутентификацию для почты и банков."
 
 
 def _has(text: str, phrases: tuple[str, ...]) -> bool:
@@ -113,7 +113,7 @@ def _vault_answer(text: str, ctx: AssistantContext | None) -> str | None:
         problems = ctx.reused_count + ctx.weak_count + ctx.old_count
         if not problems:
             return (
-                f"Да, советник проблем не нашёл: в хранилище {_records(ctx.total_entries)}, "
+                f"Да, проблем не найдено: в хранилище {_records(ctx.total_entries)}, "
                 "повторов, слабых и устаревших паролей нет."
             )
         return f"Не совсем: найдено проблем — {problems}. " + _priority(ctx)
@@ -143,7 +143,7 @@ def _vault_answer(text: str, ctx: AssistantContext | None) -> str | None:
                     "Это частые пароли, пароли с логином или названием сайта внутри либо "
                     "слишком короткие. Замените их на сгенерированные длиной от 16 символов."
                 )
-            return "Слабых паролей советник не нашёл. Для новых используйте генератор, длина от 16 символов."
+            return "Слабых паролей не найдено. Для новых используйте генератор, длина от 16 символов."
         if ctx.old_count:
             return (
                 f"Не менялись больше полугода: {ctx.old_count} ({_sites(ctx.old_sites)}). "
@@ -156,8 +156,8 @@ def _vault_answer(text: str, ctx: AssistantContext | None) -> str | None:
 
 def _closed() -> str:
     return (
-        "Результатов советника сейчас нет — хранилище закрыто. Разблокируйте его и спросите ещё раз: "
-        "я расскажу, что нашёл советник."
+        "Раздел «Проблемы» сейчас недоступен — хранилище закрыто. Разблокируйте его и спросите ещё раз: "
+        "я расскажу, что там найдено."
     )
 
 

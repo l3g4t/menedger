@@ -2904,7 +2904,7 @@ class App(ttk.Window):
             "Rounded.SidebarNav", _SIDEBAR_BG, _SIDEBAR_TEXT, anchor="w", surface=_SIDEBAR_BG
         )
         for text, command, icon_name in (
-            ("Советник", self._on_audit, "shield"),
+            ("Проблемы", self._on_audit, "warning"),
             ("Генератор", self._on_generate_standalone, "dice"),
             ("Помощник", self._on_assistant, "chat"),
         ):
@@ -4027,8 +4027,8 @@ class AuditDialog(ttk.Toplevel):
     username/reasons), а не единый блок текста."""
 
     def __init__(self, parent: App, report: AdvisorReport) -> None:
-        super().__init__(title="Советник по безопасности", master=parent, resizable=(False, False), iconphoto=None)
-        parent._dialog_chrome(self, "Советник по безопасности")
+        super().__init__(title="Проблемы", master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, "Проблемы")
         self.transient(parent)
 
         content = ttk.Frame(self, padding=_px(24))
@@ -4044,7 +4044,7 @@ class AuditDialog(ttk.Toplevel):
         tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
             x=0, y=0, relwidth=1, relheight=1
         )
-        shield_icon = parent._button_icon("shield", "white")
+        shield_icon = parent._button_icon("warning", "white")
         if shield_icon is not None:
             tk.Label(badge, image=shield_icon, bd=0, bg=_ACCENT, highlightthickness=0).place(
                 relx=0.5, rely=0.5, anchor="center"
@@ -4052,7 +4052,7 @@ class AuditDialog(ttk.Toplevel):
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="both", expand=True)
         ttk.Label(
-            title_stack, text="Советник по безопасности", font=("", 14, "bold"), foreground=_SIDEBAR_BG
+            title_stack, text="Проблемы", font=("", 14, "bold"), foreground=_SIDEBAR_BG
         ).pack(anchor="w")
         ttk.Label(
             title_stack,
@@ -4848,10 +4848,10 @@ class AssistantDialog(ttk.Toplevel):
 
     def _greeting(self) -> str:
         if self._parent._assistant.llm.available:
-            return "Здравствуйте! Спросите про пароли и безопасность — отвечу по результатам советника."
+            return "Здравствуйте! Спросите про пароли и безопасность — отвечу по результатам раздела «Проблемы»."
         return (
             "Здравствуйте! Я помощник на базе знаний: отвечаю на вопросы про пароли и "
-            "безопасность, а про ваше хранилище — по результатам советника. Спросите, "
+            "безопасность, а про ваше хранилище — по результатам раздела «Проблемы». Спросите, "
             "например, про слабые, повторяющиеся и устаревшие пароли."
         )
 

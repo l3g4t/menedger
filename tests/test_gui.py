@@ -1696,6 +1696,6 @@ def test_change_master_button_is_in_the_top_row_and_not_squeezed(app, monkeypatc
     for left, right in zip(ordered, ordered[1:]):
         gap = right.winfo_rootx() - (left.winfo_rootx() + left.winfo_width())
         assert 0 <= gap <= guiapp._px(12), gap
-    # «Советник» и «Генератор» остались только в левой панели (раздел 10.67).
-    for name in ("Советник", "Генератор"):
+    # «Проблемы» (бывший «Советник») и «Генератор» — только в левой панели (разделы 10.67, 10.69).
+    for name in ("Проблемы", "Генератор"):
         assert len([b for b in buttons if b.cget("text") == name]) == 1
