@@ -340,21 +340,16 @@ def _clear_topmost(window: tk.Misc) -> None:
         pass
 
 
-def _use_native_frame(platform: str, env: "os._Environ[str] | dict", argv: list[str]) -> bool:
-    """Нужна ли системная рамка окна (раздел 10.36).
+def _use_native_frame(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
+    """Нужна ли системная рамка окна (разделы 10.36–10.38).
 
-    На Windows безрамочный режим (раздел 10.33) вызывал полное зависание
-    главного экрана при клике, а с системной рамкой зависаний нет
-    (проверено пользователем), поэтому там собственная рамка — только по
-    явному запросу (`MENEDGER_CUSTOM_FRAME=1` или флаг `--custom-frame`),
-    пока причину не найдём. На остальных ОС — собственная рамка по
-    умолчанию. `MENEDGER_NATIVE_FRAME=1` принудительно включает системную
-    рамку везде и приоритетнее всего."""
-    if env.get("MENEDGER_NATIVE_FRAME"):
-        return True
-    if env.get("MENEDGER_CUSTOM_FRAME") or "--custom-frame" in argv:
-        return False
-    return platform == "win32"
+    По умолчанию на всех ОС — собственная рамка (раздел 10.33). Системная —
+    только по запросу: `MENEDGER_NATIVE_FRAME=1` или флаг `--native-frame`
+    (для ярлыка `.exe`, где переменную окружения не задать). Это запасной
+    выход на случай, если безрамочное окно на какой-то системе поведёт себя
+    плохо. (На Windows по умолчанию была системная рамка, пока "зависание"
+    не оказалось невидимым модальным диалогом — раздел 10.37.)"""
+    return bool(env.get("MENEDGER_NATIVE_FRAME")) or "--native-frame" in argv
 
 
 # ----------------------------------------------------------------------
@@ -654,7 +649,7 @@ class App(ttk.Window):
         # ДО pack() экранов: она должна встать над ними. `MENEDGER_NATIVE_
         # FRAME=1` оставляет системную рамку (запасной вариант, если
         # безрамочное окно на какой-то системе поведёт себя плохо).
-        self._native_frame = _use_native_frame(sys.platform, os.environ, sys.argv)
+        self._native_frame = _use_native_frame(os.environ, sys.argv)
         self._chrome_images: dict[tuple, tk.PhotoImage] = {}
         self._maximized = False
         self._minimized = False

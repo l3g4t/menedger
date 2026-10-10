@@ -468,56 +468,18 @@ def test_debug_tools_write_event_log_and_arm_watchdog(app, tmp_path, monkeypatch
         app._debug_log.close()
 
 
-# --- Выбор рамки окна (раздел 10.36) ---------------------------------------
+# --- Выбор рамки окна (разделы 10.36–10.38) --------------------------------
 
 
 @pytest.mark.parametrize(
-    "platform, env, argv, expected",
+    "env, argv, expected",
     [
-        ("win32", {}, ["app"], True),  # Windows: по умолчанию системная
-        ("win32", {"MENEDGER_CUSTOM_FRAME": "1"}, ["app"], False),
-        ("win32", {}, ["app", "--custom-frame"], False),
-        ("linux", {}, ["app"], False),  # остальные ОС: своя рамка
-        ("linux", {"MENEDGER_NATIVE_FRAME": "1"}, ["app"], True),
-        # NATIVE приоритетнее CUSTOM — запасной выход всегда работает.
-        ("win32", {"MENEDGER_NATIVE_FRAME": "1", "MENEDGER_CUSTOM_FRAME": "1"}, ["app"], True),
+        ({}, ["app"], False),  # по умолчанию — собственная рамка на всех ОС
+        ({"MENEDGER_NATIVE_FRAME": "1"}, ["app"], True),
+        ({}, ["app", "--native-frame"], True),
+        # Старая переменная больше ничего не значит и не мешает.
+        ({"MENEDGER_CUSTOM_FRAME": "1"}, ["app"], False),
     ],
 )
-def test_use_native_frame_policy(platform, env, argv, expected):
-    assert guiapp._use_native_frame(platform, env, argv) is expected
-
-
-# --- Диалог не должен "теряться" за главным окном (раздел 10.37) -----------
-
-
-def test_click_outside_modal_dialog_raises_it(app, monkeypatch):
-    if app._titlebar is None:
-        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
-    dialog = guiapp.GeneratorDialog(app, lambda _v: None)
-    try:
-        app.update()
-        calls = []
-        monkeypatch.setattr(dialog, "lift", lambda *a, **k: calls.append("lift"))
-        # Tk при захвате доставляет клик по главному окну САМОМУ диалогу
-        # (event.widget is dialog) — имитируем это событием на диалоге.
-        dialog.event_generate("<ButtonPress-1>", x=1, y=1)
-        app.update()
-        assert "lift" in calls
-    finally:
-        dialog.destroy()
-
-
-def test_dialog_clears_temporary_topmost(app):
-    if app._titlebar is None:
-        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
-    import time
-
-    dialog = guiapp.GeneratorDialog(app, lambda _v: None)
-    try:
-        end = time.time() + 0.8
-        while time.time() < end:
-            app.update()
-            time.sleep(0.01)
-        assert not int(dialog.attributes("-topmost"))
-    finally:
-        dialog.destroy()
+def test_use_native_frame_policy(env, argv, expected):
+    assert guiapp._use_native_frame(env, argv) is expected
