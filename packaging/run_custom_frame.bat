@@ -1,9 +1,9 @@
 @echo off
-rem Test: window corners via SetWindowRgn (no layered window). See CLAUDE.md 10.60.
+rem Own title bar (minimise/maximise/close drawn by the app), system-rounded corners. See CLAUDE.md 10.33 and 10.64.
 cd /d "%~dp0.."
 if not exist "dist\menedger.exe" (
     echo dist\menedger.exe not found. Run packaging\build_windows.bat first.
     pause
     exit /b 1
 )
-start "" "dist\menedger.exe" --custom-frame --region-corners
+start "" "dist\menedger.exe" --custom-frame

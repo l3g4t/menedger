@@ -6,4 +6,4 @@ if not exist "dist\menedger.exe" (
     pause
     exit /b 1
 )
-start "" "dist\menedger.exe" --layered-corners
+start "" "dist\menedger.exe" --custom-frame --layered-corners

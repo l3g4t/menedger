@@ -46,6 +46,11 @@ pytestmark = pytest.mark.skipif(
 # может быть безобиден, но лучше держать это рядом со skip-условием.
 import gui.app as guiapp  # noqa: E402
 
+# С раздела 10.64 по умолчанию — системная рамка, а большинство тестов этого
+# файла проверяют собственную (разделы 10.33–10.58): включаем её на весь файл.
+# Выбор рамки по умолчанию проверяют тесты с явным окружением (ниже).
+os.environ.setdefault("MENEDGER_CUSTOM_FRAME", "1")
+
 MASTER = "StrongMasterPassword123"
 
 
@@ -569,15 +574,34 @@ def test_debug_tools_write_event_log_and_arm_watchdog(app, tmp_path, monkeypatch
 @pytest.mark.parametrize(
     "env, argv, expected",
     [
-        ({}, ["app"], False),  # по умолчанию — собственная рамка на всех ОС
+        ({}, ["app"], True),  # по умолчанию — системная рамка (раздел 10.64)
+        ({"MENEDGER_CUSTOM_FRAME": "1"}, ["app"], False),
+        ({}, ["app", "--custom-frame"], False),
         ({"MENEDGER_NATIVE_FRAME": "1"}, ["app"], True),
         ({}, ["app", "--native-frame"], True),
-        # Старая переменная больше ничего не значит и не мешает.
-        ({"MENEDGER_CUSTOM_FRAME": "1"}, ["app"], False),
+        # явная просьба о системной рамке сильнее просьбы о своей
+        ({"MENEDGER_CUSTOM_FRAME": "1", "MENEDGER_NATIVE_FRAME": "1"}, ["app"], True),
+        ({}, ["app", "--custom-frame", "--native-frame"], True),
     ],
 )
 def test_use_native_frame_policy(env, argv, expected):
     assert guiapp._use_native_frame(env, argv) is expected
+
+
+def test_default_window_uses_system_frame(monkeypatch):
+    """Раздел 10.64: без запроса собственной рамки окно обычное — без своей
+    строки заголовка и «уголка», с системными кнопками."""
+    monkeypatch.delenv("MENEDGER_CUSTOM_FRAME", raising=False)
+    monkeypatch.delenv("MENEDGER_NATIVE_FRAME", raising=False)
+    monkeypatch.setattr(guiapp.sys, "argv", ["app"])
+    window = guiapp.App()
+    try:
+        window.update()
+        assert window._native_frame is True
+        assert window._titlebar is None and window._grip is None
+        assert not window.overrideredirect()
+    finally:
+        window.destroy()
 
 
 def test_view_dialog_compact_layout_without_footer_buttons(app):
