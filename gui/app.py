@@ -189,6 +189,10 @@ _MASTER_FIELD_HEIGHT = 38  # px
 # ними — одна и та же, чтобы ряд читался как единая группа (раздел 10.42).
 _VIEW_FIELD_HEIGHT = 36  # px
 _VIEW_CONTENT_WIDTH = 330  # px — ширина тела диалога (без нижних кнопок её задавать нечем)
+_VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (раздел 10.45)
+# Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
+# этого цвета окно не рисует. Яркий и нигде больше в интерфейсе не встречается.
+_WINDOW_KEY_COLOR = "#fe00fe"
 
 # Главный экран референса ("вариант C", раздел 10.8) — не просто сайдбар
 # впритык к краям окна, а единая "карточка" (сайдбар + рабочая область)
@@ -335,6 +339,49 @@ def _render_rounded_rect(
         (width - cell, cell),
     )
     return result
+
+
+def _render_keyed_rounded_rect(
+    width: int,
+    height: int,
+    fill: str,
+    key: str,
+    radius_px: int,
+    corners: tuple[bool, bool, bool, bool],
+    border_color: str | None,
+    border_px: int,
+) -> Image.Image:
+    """Скруглённый прямоугольник для "прозрачных" углов окна (раздел 10.45).
+
+    Вне скругления — ровно `key` (цвет, который Windows не рисует), а края
+    БЕЗ сглаживания: сглаженный пиксель на границе был бы смесью `fill` и
+    яркого `key` — цветная кайма вокруг угла. Поэтому форма берётся маской
+    (порог 50%), а цвет внутри — из обычной отрисовки, где "поверхностью"
+    служит сам цвет края (рамка или заливка), чтобы к краю не подмешивалось
+    ничего постороннего."""
+    rim = border_color if (border_color and border_px) else fill
+    body = _render_rounded_rect(width, height, fill, rim, radius_px, corners, border_color, border_px)
+    mask = (
+        _render_rounded_rect(width, height, "#ffffff", "#000000", radius_px, corners, None, 0)
+        .convert("L")
+        .point(lambda value: 255 if value >= 128 else 0)
+    )
+    result = Image.new("RGB", (width, height), key)
+    result.paste(body, (0, 0), mask)
+    return result
+
+
+def _enable_transparent_corners(window: tk.Misc) -> bool:
+    """Включить "прозрачность" ключевого цвета у окна (только Windows:
+    `-transparentcolor` на других ОС не поддерживается). Возвращает True,
+    если углы окна можно скруглять. Отключается `MENEDGER_SQUARE_WINDOWS=1`."""
+    if sys.platform != "win32" or os.environ.get("MENEDGER_SQUARE_WINDOWS"):
+        return False
+    try:
+        window.attributes("-transparentcolor", _WINDOW_KEY_COLOR)
+    except tk.TclError:
+        return False
+    return True
 
 
 def _clear_topmost(window: tk.Misc) -> None:
@@ -887,7 +934,16 @@ class App(ttk.Window):
         new_h = max(_px(460), height + event.y_root - y0)
         self.geometry(f"{new_w}x{new_h}")
 
-    def _dialog_chrome(self, dialog: tk.Toplevel, title: str, *, theme: str = "light", show_title: bool = True) -> None:
+    def _dialog_chrome(
+        self,
+        dialog: tk.Toplevel,
+        title: str,
+        *,
+        theme: str = "light",
+        show_title: bool = True,
+        bar: bool = True,
+        border: bool = True,
+    ) -> None:
         """Та же рамка для диалогов: строка заголовка с одной кнопкой
         "закрыть", тонкая граница и Escape. Вызывается СРАЗУ после
         `super().__init__`, до построения содержимого — чтобы строка
@@ -895,11 +951,13 @@ class App(ttk.Window):
         if self._native_frame:
             return
         dialog.overrideredirect(True)
-        dialog.configure(
-            highlightthickness=1, highlightbackground=_CHROME_BORDER, highlightcolor=_CHROME_BORDER
-        )
-        bar = TitleBar(dialog, self, dialog, title, theme=theme, controls=("close",), show_title=show_title)
-        bar.pack(side="top", fill="x")
+        if border:
+            dialog.configure(
+                highlightthickness=1, highlightbackground=_CHROME_BORDER, highlightcolor=_CHROME_BORDER
+            )
+        if bar:
+            title_bar = TitleBar(dialog, self, dialog, title, theme=theme, controls=("close",), show_title=show_title)
+            title_bar.pack(side="top", fill="x")
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
         def focus() -> None:
@@ -1390,6 +1448,7 @@ class App(ttk.Window):
         border_color: str | None = None,
         border_width: int = 0,
         dynamic: bool = False,
+        key: str | None = None,
     ) -> Callable[[], None] | None:
         """Кладёт скруглённый по маске `corners` (top_left, top_right,
         bottom_right, bottom_left) фон ПОД уже созданный `frame`, поверх
@@ -1477,9 +1536,14 @@ class App(ttk.Window):
                 return
             drawn_size[:] = [(width, height)]
             started = time.perf_counter()
-            small = _render_rounded_rect(
-                width, height, fill, surface, radius_px, corners, border_color, border_px
-            )
+            if key is not None:
+                small = _render_keyed_rounded_rect(
+                    width, height, fill, key, radius_px, corners, border_color, border_px
+                )
+            else:
+                small = _render_rounded_rect(
+                    width, height, fill, surface, radius_px, corners, border_color, border_px
+                )
             photo = ImageTk.PhotoImage(small)
             backdrop.configure(image=photo)
             backdrop.photo = photo
@@ -2739,7 +2803,14 @@ class ViewEntryDialog(ttk.Toplevel):
     def __init__(self, parent: App, entry: dict) -> None:
         title = f"Запись — {entry['site']}"
         super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
-        parent._dialog_chrome(self, title, theme="dark", show_title=False)
+        # Скруглённые углы САМОГО окна (раздел 10.45): только на Windows
+        # (`-transparentcolor`), только с собственной рамкой. Иначе — как раньше.
+        rounded = (not parent._native_frame) and _enable_transparent_corners(self)
+        key = _WINDOW_KEY_COLOR if rounded else None
+        parent._dialog_chrome(self, title, theme="dark", bar=False, border=not rounded)
+        if rounded:
+            # Всё, что не закрыто шапкой/телом, — прозрачно, а не серый квадрат.
+            self.configure(background=_WINDOW_KEY_COLOR)
         self._parent = parent
         self._entry = entry
         self.transient(parent)
@@ -2751,16 +2822,43 @@ class ViewEntryDialog(ttk.Toplevel):
         # объяснение бага в докстринге `_rounded_backdrop`).
         pending_backdrops: list[Callable[[], None]] = []
 
-        header = ttk.Frame(self, padding=(_px(16), _px(4), _px(16), _px(10)))
+        # Шапка — ОДНА тёмная полоса высотой в строку заголовка: иконка,
+        # название записи и крестик. Раньше это были две полосы подряд
+        # (строка с крестиком + шапка с иконкой и названием).
+        window_radius = _px(_VIEW_WINDOW_RADIUS) if rounded else 0
+        header = ttk.Frame(self)
         header.pack(fill="x")
         pending_backdrops.append(
-            parent._rounded_backdrop(header, _SIDEBAR_BG, corners=(False, False, False, False), surface="#ffffff")
-        )
-        if hasattr(parent, "_icon_image_tiny"):
-            ttk.Label(header, image=parent._icon_image_tiny, style="Sidebar.TLabel").pack(
-                side="left", padx=(0, _px(8))
+            parent._rounded_backdrop(
+                header,
+                _SIDEBAR_BG,
+                corners=(rounded, rounded, False, False),
+                surface=_WINDOW_KEY_COLOR if rounded else "#ffffff",
+                radius=_VIEW_WINDOW_RADIUS,
+                key=key,
             )
-        ttk.Label(header, text=title, style="Sidebar.TLabel", font=("", 11, "bold")).pack(side="left")
+        )
+        if parent._native_frame:
+            # Системная рамка: заголовок и крестик рисует сама ОС, у нас — только
+            # компактная тёмная полоса с иконкой и названием.
+            brand = ttk.Frame(header, padding=(_px(16), _px(6)))
+            brand.pack(fill="x")
+            if hasattr(parent, "_icon_image_tiny"):
+                ttk.Label(brand, image=parent._icon_image_tiny, style="Sidebar.TLabel").pack(
+                    side="left", padx=(0, _px(8))
+                )
+            ttk.Label(brand, text=title, style="Sidebar.TLabel", font=("", 11, "bold")).pack(side="left")
+        else:
+            bar = TitleBar(header, parent, self, title, theme="dark", controls=("close",), show_title=True)
+            # Отступ по бокам = радиус: углы окна остаются за подложкой шапки,
+            # а не закрыты прямоугольными краями строки заголовка.
+            bar.pack(fill="x", padx=(window_radius, window_radius))
+            bar._title_label.configure(foreground="#ffffff", font=("", 10, "bold"))
+            bar._title_label.pack_configure(padx=(_px(8), 0))
+            if hasattr(parent, "_icon_image_tiny"):
+                tk.Label(
+                    bar, image=parent._icon_image_tiny, bd=0, highlightthickness=0, background=_SIDEBAR_BG
+                ).pack(side="left", padx=(_px(12), 0), before=bar._title_label)
 
         body = ttk.Frame(self, padding=_px(20))
         body.pack(fill="both", expand=True)
@@ -2772,7 +2870,18 @@ class ViewEntryDialog(ttk.Toplevel):
             body, width=_px(_VIEW_CONTENT_WIDTH), height=0, bd=0, highlightthickness=0, background="#ffffff"
         ).pack()
         pending_backdrops.append(
-            parent._rounded_backdrop(body, "#ffffff", corners=(False, False, True, True), surface="#ffffff")
+            parent._rounded_backdrop(
+                body,
+                "#ffffff",
+                corners=(False, False, rounded, rounded),
+                surface=_WINDOW_KEY_COLOR if rounded else "#ffffff",
+                radius=_VIEW_WINDOW_RADIUS,
+                # Рамка окна (вместо `highlightthickness`, который у скруглённого
+                # окна дал бы прямоугольные углы).
+                border_color=_CHROME_BORDER if rounded else None,
+                border_width=1 if rounded else 0,
+                key=key,
+            )
         )
 
         # Квадратные кнопки РОВНО высоты поля (`_VIEW_FIELD_HEIGHT`) с нулевым

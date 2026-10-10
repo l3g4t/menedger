@@ -573,3 +573,59 @@ def test_view_dialog_compact_layout_without_footer_buttons(app):
         assert heights == {guiapp._px(guiapp._VIEW_FIELD_HEIGHT)}
     finally:
         dialog.destroy()
+
+
+def test_keyed_rounded_rect_has_hard_edges_and_key_outside_corners():
+    """Раздел 10.45: вне скругления ровно ключевой цвет, края без сглаживания
+    (никаких смесей заливки с ярким ключом — иначе цветная кайма у угла)."""
+    key, fill, border = "#fe00fe", "#12233d", "#b8c2d6"
+    width, height, radius = 120, 60, 14
+    image = guiapp._render_keyed_rounded_rect(
+        width, height, fill, key, radius, (True, True, True, True), border, 1
+    )
+    key_rgb, fill_rgb = guiapp._hex_to_rgb(key), guiapp._hex_to_rgb(fill)
+    assert image.getpixel((0, 0)) == key_rgb
+    assert image.getpixel((width - 1, height - 1)) == key_rgb
+    assert image.getpixel((width // 2, height // 2)) == fill_rgb
+    # Пиксели вне ключа не зависят от самого ключа: форма та же при другом
+    # ключевом цвете, значит ничего не подмешано (нет каймы).
+    other_key = "#00ff00"
+    other = guiapp._render_keyed_rounded_rect(
+        width, height, fill, other_key, radius, (True, True, True, True), border, 1
+    )
+    other_key_rgb = guiapp._hex_to_rgb(other_key)
+    for x in range(width):
+        for y in range(height):
+            a, b = image.getpixel((x, y)), other.getpixel((x, y))
+            assert (a == key_rgb) == (b == other_key_rgb)
+            if a != key_rgb:
+                assert a == b
+
+
+def test_view_dialog_rounded_window_mode(app, monkeypatch):
+    """Раздел 10.45: при поддержке прозрачных углов фон окна — ключевой цвет,
+    а у шапки скруглены верхние углы (диалог собирается без ошибок)."""
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda window: True)
+    if app._native_frame:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
+    dialog = guiapp.ViewEntryDialog(app, entry)
+    dialog.update()
+    try:
+        assert dialog.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
+        assert int(dialog.cget("highlightthickness")) == 0
+    finally:
+        dialog.destroy()
+
+
+def test_view_dialog_plain_mode_keeps_square_window_border(app):
+    if app._native_frame or guiapp.sys.platform == "win32":
+        pytest.skip("только не-Windows с собственной рамкой")
+    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
+    dialog = guiapp.ViewEntryDialog(app, entry)
+    dialog.update()
+    try:
+        assert int(dialog.cget("highlightthickness")) == 1
+    finally:
+        dialog.destroy()
+
