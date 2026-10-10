@@ -384,6 +384,24 @@ def _enable_transparent_corners(window: tk.Misc) -> bool:
     return True
 
 
+def _recenter_glyph(icon: Image.Image) -> Image.Image:
+    """Сдвинуть видимую часть значка (по альфа-каналу) в центр холста.
+    Некоторые значки нарисованы чуть выше/ниже центра своего PNG (например,
+    "копировать" на 2 px выше) — в кнопке с текстом это незаметно, а в
+    квадратной кнопке только с иконкой выглядит как "уплывший" значок."""
+    box = icon.split()[3].point(lambda value: 255 if value > 60 else 0).getbbox()
+    if box is None:
+        return icon
+    width, height = icon.size
+    shift_x = round((width - 1) / 2 - (box[0] + box[2] - 1) / 2)
+    shift_y = round((height - 1) / 2 - (box[1] + box[3] - 1) / 2)
+    if shift_x == 0 and shift_y == 0:
+        return icon
+    centered = Image.new("RGBA", icon.size, (0, 0, 0, 0))
+    centered.paste(icon, (shift_x, shift_y))
+    return centered
+
+
 def _clear_topmost(window: tk.Misc) -> None:
     """Снять временный `-topmost` (раздел 10.37); окно к этому моменту могло
     быть уже закрыто — тогда ничего не делаем."""
@@ -1158,7 +1176,7 @@ class App(ttk.Window):
         self.geometry(f"{_px(980)}x{_px(640)}")
         self.minsize(_px(760), _px(460))
 
-    def _button_icon(self, name: str, variant: str) -> tk.PhotoImage | None:
+    def _button_icon(self, name: str, variant: str, center: bool = False) -> tk.PhotoImage | None:
         """Вернуть кэшированный tk.PhotoImage для gui/icons/<name>_<variant>.png.
 
         Названо НЕ `_icon` — ttkbootstrap.Window сам уже использует
@@ -1175,7 +1193,7 @@ class App(ttk.Window):
         `parent._copy_to_clipboard(...)`. Если файла нет, тихо
         возвращает None — отсутствие иконки не должно ронять кнопку.
         """
-        key = (name, variant)
+        key = (name, variant, center)
         if key not in self._icons:
             path = ICONS_DIR / f"{name}_{variant}.png"
             if not path.exists():
@@ -1184,12 +1202,16 @@ class App(ttk.Window):
                 icon = source.convert("RGBA")
             if _UI_SCALE != 1.0:
                 icon = icon.resize((_px(icon.width), _px(icon.height)), Image.LANCZOS)
+            if center:
+                icon = _recenter_glyph(icon)
             self._icons[key] = self._tk_image(icon)
         return self._icons[key]
 
-    def _icon_kwargs(self, name: str, variant: str) -> dict:
-        """kwargs для ttk.Button(...): image+compound, либо {} без иконки."""
-        image = self._button_icon(name, variant)
+    def _icon_kwargs(self, name: str, variant: str, center: bool = False) -> dict:
+        """kwargs для ttk.Button(...): image+compound, либо {} без иконки.
+        `center=True` — для кнопок только с иконкой: значок сдвигается так,
+        чтобы его видимая часть стояла ровно по центру картинки (раздел 10.44)."""
+        image = self._button_icon(name, variant, center)
         if image is None:
             return {}
         return {"image": image, "compound": "left"}
@@ -1315,9 +1337,17 @@ class App(ttk.Window):
         anchor: str = "center",
         padding: tuple[int, int] | None = None,
         surface: str = "#ffffff",
+        element_padding: int | None = None,
     ) -> str:
         """Создать (при первом обращении) и вернуть имя ttk-стиля
         скруглённой кнопки.
+
+        `element_padding` (раздел 10.44) — внутренний отступ самого
+        image-элемента фона. По умолчанию (None) ttk берёт его равным
+        `border` (радиусу скругления): содержимое кнопки отодвигается от
+        краёв на радиус. Для маленьких квадратных кнопок-иконок, размер
+        которых задан контейнером, это ломает центрирование — см. раздел
+        10.44; им передаётся 0.
 
         `ttk.Button` в теме `bootstrap-light` рисуется плоским
         прямоугольным элементом (border/relief) — сам `bootstyle` такого
@@ -1382,6 +1412,7 @@ class App(ttk.Window):
             ("active", hover_img),
             border=_px(_ROUNDED_RADIUS),
             sticky="nsew",
+            **({} if element_padding is None else {"padding": (element_padding,) * 4}),
         )
         style.layout(
             style_name,
@@ -2673,7 +2704,7 @@ class CreateVaultDialog(ttk.Toplevel):
             ttk.Button(
                 eye_button_box,
                 command=self._on_toggle_visibility,
-                **parent._icon_kwargs("eye", "dark"),
+                **{**parent._icon_kwargs("eye", "dark", center=True), "compound": "image"},
             ),
             parent._rounded_button_style(
                 "Rounded.IconToggleSquare",
@@ -2681,6 +2712,7 @@ class CreateVaultDialog(ttk.Toplevel):
                 _NEUTRAL_TEXT,
                 border_color=_NEUTRAL_BORDER,
                 padding=(0, 0),
+                element_padding=0,
             ),
         ).pack(fill="both", expand=True)
 
@@ -2894,6 +2926,7 @@ class ViewEntryDialog(ttk.Toplevel):
             _NEUTRAL_TEXT,
             border_color=_NEUTRAL_BORDER,
             padding=(0, 0),
+            element_padding=0,
         )
         field_height = _px(_VIEW_FIELD_HEIGHT)
 
@@ -2928,7 +2961,10 @@ class ViewEntryDialog(ttk.Toplevel):
             cell.pack_propagate(False)
             cell.pack(side="left", padx=(_px(6), 0))
             parent._styled(
-                ttk.Button(cell, command=command, **parent._icon_kwargs(icon_name, "dark")),
+                # compound="image": кнопка БЕЗ текста — иначе ttk при
+                # compound="left" всё равно оставляет место под текст и сдвигает
+                # значок влево от центра (раздел 10.44).
+                ttk.Button(cell, command=command, **{**parent._icon_kwargs(icon_name, "dark", center=True), "compound": "image"}),
                 icon_button_style,
             ).pack(fill="both", expand=True)
 

@@ -629,3 +629,26 @@ def test_view_dialog_plain_mode_keeps_square_window_border(app):
     finally:
         dialog.destroy()
 
+
+def test_recenter_glyph_moves_visible_part_to_canvas_center():
+    from PIL import Image
+
+    icon = Image.new("RGBA", (22, 22), (0, 0, 0, 0))
+    for x in range(3, 19):
+        for y in range(2, 16):  # видимая часть выше центра на 2 px
+            icon.putpixel((x, y), (0, 0, 0, 255))
+    box = guiapp._recenter_glyph(icon).split()[3].getbbox()
+    assert ((box[0] + box[2] - 1) / 2, (box[1] + box[3] - 1) / 2) == (10.5, 10.5)
+
+
+def test_view_dialog_icon_buttons_are_image_only_and_square(app):
+    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
+    dialog = guiapp.ViewEntryDialog(app, entry)
+    dialog.update()
+    try:
+        for button in _find_widgets_by_class(dialog, "TButton"):
+            assert str(button.cget("compound")) == "image"
+            assert button.winfo_width() == button.winfo_height()
+    finally:
+        dialog.destroy()
+
