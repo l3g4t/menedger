@@ -1128,22 +1128,45 @@ class App(ttk.Window):
         cell = radius + 4
         border_px = 1 if border_color else 0
         placements = (
-            ("nw", 0.0, 0.0, top_color, (0, 0)),
-            ("ne", 1.0, 0.0, top_color, (cell, 0)),
-            ("sw", 0.0, 1.0, bottom_color, (0, cell)),
-            ("se", 1.0, 1.0, bottom_color, (cell, cell)),
+            ("nw", top_color, (0, 0)),
+            ("ne", top_color, (cell, 0)),
+            ("sw", bottom_color, (0, cell)),
+            ("se", bottom_color, (cell, cell)),
         )
         labels: list[tk.Label] = []
-        for anchor, relx, rely, base, (qx, qy) in placements:
+        for anchor, base, (qx, qy) in placements:
             shape = _render_keyed_rounded_rect(
                 2 * cell, 2 * cell, base, _WINDOW_KEY_COLOR, radius, (True, True, True, True), border_color, border_px
             )
-            photo = ImageTk.PhotoImage(shape.crop((qx, qy, qx + cell, qy + cell)))
-            label = tk.Label(window, image=photo, bd=0, highlightthickness=0)
-            label.photo = photo
-            label.place(relx=relx, rely=rely, anchor=anchor, bordermode="outside")
-            label.lift()
-            labels.append(label)
+            piece = shape.crop((qx, qy, qx + cell, qy + cell))
+            base_rgb = _hex_to_rgb(base)
+            on_right = anchor.endswith("e")
+            on_bottom = anchor.startswith("s")
+            # Накладка — НЕ один квадрат, а тонкие строки в 1 px: каждая
+            # закрывает только то, что вне дуги (ключ + дуга рамки), а
+            # однородная область внутри дуги не трогается. Квадрат красил бы
+            # внутреннюю часть угла цветом строки заголовка и срезал бы всё,
+            # что туда заходит (подсветку кнопки закрытия — раздел 10.49).
+            for row in range(cell):
+                xs = [x for x in range(cell) if piece.getpixel((x, row)) != base_rgb]
+                if not xs:
+                    continue
+                if on_right:
+                    left, right = min(xs), cell
+                else:
+                    left, right = 0, max(xs) + 1
+                photo = ImageTk.PhotoImage(piece.crop((left, row, right, row + 1)))
+                label = tk.Label(window, image=photo, bd=0, highlightthickness=0)
+                label.photo = photo
+                label.place(
+                    relx=1.0 if on_right else 0.0,
+                    rely=1.0 if on_bottom else 0.0,
+                    y=(row - cell) if on_bottom else row,
+                    anchor="ne" if on_right else "nw",
+                    bordermode="outside",
+                )
+                label.lift()
+                labels.append(label)
         return labels
 
     def _round_dialog_corners(self, dialog: tk.Toplevel) -> None:

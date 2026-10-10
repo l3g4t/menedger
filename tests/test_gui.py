@@ -671,7 +671,7 @@ def test_other_dialogs_get_rounded_corner_overlays(app, monkeypatch):
         for dialog in dialogs:
             dialog.update()
             assert dialog.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
-            assert len(dialog._corner_overlay) == 4
+            assert len(dialog._corner_overlay) >= 4  # тонкие строки-накладки в 4 углах
     finally:
         for dialog in dialogs:
             dialog.destroy()
@@ -750,19 +750,19 @@ def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
     try:
         window.update()
         assert window.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
-        assert len(window._window_corners) == 4
+        assert len(window._window_corners) >= 4
         unlock_photos = [label.photo for label in window._window_corners]
         window.data = {"entries": []}
         window._show_main()
         window.update()
-        assert len(window._window_corners) == 4
+        assert len(window._window_corners) >= 4
         assert [label.photo for label in window._window_corners] != unlock_photos  # цвета другого экрана
         window._toggle_maximize()
         window.update()
         assert window._window_corners == []
         window._toggle_maximize()
         window.update()
-        assert len(window._window_corners) == 4
+        assert len(window._window_corners) >= 4
     finally:
         window.destroy()
 
@@ -782,4 +782,39 @@ def test_close_button_keeps_gap_from_rounded_corner(monkeypatch):
         assert int(str(right)) == guiapp._px(8)
     finally:
         window.destroy()
+
+
+def test_corner_overlays_do_not_cover_close_button_hover(app, monkeypatch):
+    """Раздел 10.49 (повторно): накладки скруглённого угла не должны лежать
+    поверх области подсветки кнопки закрытия — раньше квадратная накладка
+    срезала у подсветки правый верхний угол."""
+    if app._native_frame:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda window: True)
+    from assistant.advisor import AdvisorReport
+
+    dialog = guiapp.AuditDialog(app, AdvisorReport())
+    try:
+        dialog.update()
+        button = dialog._title_bar._buttons["close"]
+        inset = guiapp._px(3)  # отступ подсветки внутри кнопки (`_chrome_glyph`)
+        hover = (
+            button.winfo_rootx() + inset,
+            button.winfo_rooty() + inset,
+            button.winfo_rootx() + button.winfo_width() - inset,
+            button.winfo_rooty() + button.winfo_height() - inset,
+        )
+        assert len(dialog._corner_overlay) > 4  # тонкие строки, а не 4 квадрата
+        for label in dialog._corner_overlay:
+            box = (
+                label.winfo_rootx(),
+                label.winfo_rooty(),
+                label.winfo_rootx() + label.winfo_width(),
+                label.winfo_rooty() + label.winfo_height(),
+            )
+            overlap_x = box[0] < hover[2] and hover[0] < box[2]
+            overlap_y = box[1] < hover[3] and hover[1] < box[3]
+            assert not (overlap_x and overlap_y), (box, hover)
+    finally:
+        dialog.destroy()
 
