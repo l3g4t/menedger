@@ -1534,3 +1534,144 @@ def test_gradient_image_runs_between_stops():
     image = guiapp._gradient_image(100, 10, [(0.0, "#000000"), (1.0, "#ff0000")])
     assert image.getpixel((0, 5)) == (0, 0, 0) and image.getpixel((99, 5))[0] == 255
     assert guiapp._gradient_image(10, 10, [(0.0, "#123456"), (1.0, "#123456")]).getpixel((5, 5)) == (0x12, 0x34, 0x56)
+
+
+# --- смена мастер-пароля (CLAUDE.md, раздел 10.66) ----------------------------
+
+NEW_MASTER = "purple monkey dishwasher stapler"
+
+
+def _fake_change_dialog(monkeypatch, current, new):
+    """Подмена диалога смены пароля: как будто пользователь ввёл `current` и `new`
+    (None вместо `new` — нажал «Отмена»). Проверка текущего пароля — настоящая:
+    `check_current` из App вызывается так же, как это делал бы сам диалог."""
+    seen = {}
+
+    class _Fake(guiapp.tk.Toplevel):
+        def __init__(self, parent, *, change=False, check_current=None):
+            super().__init__(parent)
+            seen["change"] = change
+            ok = new is not None and (check_current is None or check_current(current))
+            seen["current_ok"] = ok
+            self.result = new if ok else None
+            self.current_password = current if ok else None
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "CreateVaultDialog", _Fake)
+    return seen
+
+
+def test_change_master_dialog_validates_every_field(app, monkeypatch):
+    dialog = guiapp.CreateVaultDialog(app, change=True, check_current=lambda pw: pw == MASTER)
+    dialog._current_var.set("")
+    dialog._password_var.set(NEW_MASTER)
+    dialog._confirm_var.set(NEW_MASTER)
+    dialog._on_submit()
+    assert "текущий" in dialog._status_label.cget("text") and dialog.result is None
+
+    dialog._current_var.set("не тот пароль")
+    dialog._on_submit()
+    assert "Неверный текущий" in dialog._status_label.cget("text") and dialog.result is None
+
+    dialog._current_var.set(MASTER)
+    dialog._confirm_var.set("другое")
+    dialog._on_submit()
+    assert "не совпадают" in dialog._status_label.cget("text") and dialog.result is None
+
+    dialog._password_var.set(MASTER)
+    dialog._confirm_var.set(MASTER)
+    dialog._on_submit()
+    assert "совпадает с текущим" in dialog._status_label.cget("text") and dialog.result is None
+
+    dialog._password_var.set(NEW_MASTER)
+    dialog._confirm_var.set(NEW_MASTER)
+    dialog._on_submit()
+    assert dialog.result == NEW_MASTER and dialog.current_password == MASTER
+
+
+def test_change_master_dialog_looks_like_create_dialog_plus_current_field(app):
+    change = guiapp.CreateVaultDialog(app, change=True)
+    create = guiapp.CreateVaultDialog(app)
+    try:
+        assert len(_find_widgets_by_class(change, "TEntry")) == len(_find_widgets_by_class(create, "TEntry")) + 1
+        assert change.title() == "Смена мастер-пароля" and create.title() == "Новое хранилище"
+    finally:
+        change.destroy()
+        create.destroy()
+
+
+def test_change_master_reencrypts_the_vault_with_the_new_password(app, monkeypatch):
+    from vault.crypto import InvalidMasterPasswordError, decrypt_vault
+    from vault.storage import load_vault_file
+
+    _create_vault(app, monkeypatch)
+    app.data["entries"].append(
+        {"site": "example.com", "username": "alice", "password": "s3cr3t!", "created_at": "2026-01-01T00:00:00Z"}
+    )  # добавлено в память, но ещё не сохранено на диск
+    infos = []
+    monkeypatch.setattr(guiapp.messagebox, "showinfo", lambda *a, **k: infos.append(a))
+    seen = _fake_change_dialog(monkeypatch, MASTER, NEW_MASTER)
+
+    app._on_change_master()
+
+    assert seen["change"] is True and seen["current_ok"] is True
+    assert app.master_password == NEW_MASTER
+    blob = load_vault_file(app.vault_path)
+    assert decrypt_vault(blob, NEW_MASTER)["entries"][0]["site"] == "example.com"  # несохранённая запись не потеряна
+    with pytest.raises(InvalidMasterPasswordError):
+        decrypt_vault(blob, MASTER)
+    assert infos and "СТАРЫМ" in infos[0][1]  # предупреждение про старые копии
+
+
+def test_change_master_with_wrong_current_password_changes_nothing(app, monkeypatch):
+    from vault.storage import load_vault_file
+
+    _create_vault(app, monkeypatch)
+    before = load_vault_file(app.vault_path)
+    seen = _fake_change_dialog(monkeypatch, "не тот пароль", NEW_MASTER)
+
+    app._on_change_master()
+
+    assert seen["current_ok"] is False
+    assert app.master_password == MASTER and load_vault_file(app.vault_path) == before
+
+
+def test_change_master_cancelled_changes_nothing(app, monkeypatch):
+    from vault.storage import load_vault_file
+
+    _create_vault(app, monkeypatch)
+    before = load_vault_file(app.vault_path)
+    _fake_change_dialog(monkeypatch, MASTER, None)
+
+    app._on_change_master()
+
+    assert app.master_password == MASTER and load_vault_file(app.vault_path) == before
+
+
+def test_change_master_keeps_old_password_if_writing_fails(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    errors = []
+    monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a))
+    _fake_change_dialog(monkeypatch, MASTER, NEW_MASTER)
+
+    def broken_save(path, blob):
+        raise OSError("диск переполнен")
+
+    monkeypatch.setattr(guiapp, "save_vault_file", broken_save)
+    app._on_change_master()
+
+    # Пароль в памяти меняется только после успешной записи.
+    assert app.master_password == MASTER
+    assert errors
+
+
+def test_change_master_does_nothing_when_vault_is_locked(app, monkeypatch):
+    _fake_change_dialog(monkeypatch, MASTER, NEW_MASTER)
+    app._on_change_master()  # хранилище не открыто — ни ошибки, ни диалога
+    assert app.master_password is None
+
+
+def test_sidebar_has_change_master_button(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    texts = [b.cget("text") for b in _find_widgets_by_class(app._main_frame, "TButton")]
+    assert "Мастер-пароль" in texts

@@ -168,6 +168,9 @@ CORPUS = [
  ("Сколько стоит билет на самолёт?", None),
  ("Расскажи анекдот", None),
  ("Кто выиграл вчера матч?", None),
+    ("как поменять главный пароль", "master-change"),
+    ("хочу сменить мастер пароль на новый", "master-change"),
+    ("Как поменять пароль к записи?", "change-entry-password"),
     # --- новые формулировки (проверка на вопросах, которых не было при настройке) ---
     ('а если я забуду главный пароль от хранилища, всё пропадёт?', 'master-forgot'),
     ('можно ли пользоваться одним паролем на двух сайтах', 'one-password'),
@@ -335,7 +338,8 @@ def test_answers_do_not_claim_missing_features():
     texts = " ".join(e.answer for e in FAQ).lower()
     assert "облачная синхронизация включена" not in texts
     master_change = next(e for e in FAQ if e.id == "master-change")
-    assert "пока нет" in master_change.answer
+    assert "пока нет" not in master_change.answer  # смена мастер-пароля уже есть (раздел 3.1)
+    assert "Мастер-пароль" in master_change.answer and "перешифру" in master_change.answer
 
 
 def test_related_question_is_offered_only_when_scores_are_close():

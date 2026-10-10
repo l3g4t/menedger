@@ -14,6 +14,7 @@ from vault.crypto import (
     SALT_SIZE,
     InvalidMasterPasswordError,
     VaultFormatError,
+    change_master_password,
     decrypt_vault,
     derive_key,
     encrypt_vault,
@@ -148,3 +149,39 @@ def test_nonce_size_constant_matches_format():
     CLAUDE.md и без пересчёта смещений в decrypt_vault."""
     assert SALT_SIZE == 16
     assert NONCE_SIZE == 12
+
+
+NEW_PASSWORD = "purple monkey dishwasher stapler"
+
+
+def test_change_master_password_keeps_data_and_switches_the_key():
+    blob = encrypt_vault(SAMPLE_DATA, MASTER_PASSWORD)
+
+    new_blob = change_master_password(blob, MASTER_PASSWORD, NEW_PASSWORD)
+
+    assert decrypt_vault(new_blob, NEW_PASSWORD)["entries"] == SAMPLE_DATA["entries"]
+    # Новый файл старым паролем больше не открывается (никакого «запасного ключа»).
+    with pytest.raises(InvalidMasterPasswordError):
+        decrypt_vault(new_blob, MASTER_PASSWORD)
+    # Исходный блок (например, старая резервная копия) по-прежнему открывается старым.
+    assert decrypt_vault(blob, MASTER_PASSWORD)["entries"] == SAMPLE_DATA["entries"]
+
+
+def test_change_master_password_rejects_wrong_current_password():
+    blob = encrypt_vault(SAMPLE_DATA, MASTER_PASSWORD)
+    with pytest.raises(InvalidMasterPasswordError):
+        change_master_password(blob, WRONG_PASSWORD, NEW_PASSWORD)
+
+
+def test_change_master_password_uses_fresh_salt_and_nonce():
+    blob = encrypt_vault(SAMPLE_DATA, MASTER_PASSWORD)
+    new_blob = change_master_password(blob, MASTER_PASSWORD, NEW_PASSWORD)
+    header = 4 + 1  # MAGIC + VERSION
+    assert blob[header : header + SALT_SIZE] != new_blob[header : header + SALT_SIZE]
+    nonce_at = header + SALT_SIZE
+    assert blob[nonce_at : nonce_at + NONCE_SIZE] != new_blob[nonce_at : nonce_at + NONCE_SIZE]
+
+
+def test_change_master_password_rejects_corrupted_file():
+    with pytest.raises(VaultFormatError):
+        change_master_password(b"not a vault", MASTER_PASSWORD, NEW_PASSWORD)

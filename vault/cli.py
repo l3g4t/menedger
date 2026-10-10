@@ -35,6 +35,7 @@ from vault.common import DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
     InvalidMasterPasswordError,
     VaultFormatError,
+    change_master_password,
     decrypt_vault,
     encrypt_vault,
 )
@@ -85,21 +86,13 @@ def _open_vault(path: Path, master_password: str) -> dict:
         raise SystemExit(1)
 
 
-def cmd_create(args: argparse.Namespace) -> None:
-    """Создать новое пустое хранилище с новым мастер-паролем."""
-    path = Path(args.path)
-
-    if path.exists() and not args.force:
-        print(
-            f"Хранилище уже существует: {path}\n"
-            "Если вы точно хотите его пересоздать (СТАРЫЕ ДАННЫЕ БУДУТ "
-            "ПОТЕРЯНЫ), повторите команду с флагом --force.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-    master_password = _prompt_secret("Придумайте мастер-пароль: ")
-    confirmation = _prompt_secret("Повторите мастер-пароль: ")
+def _prompt_new_master_password(prompt: str, confirm_prompt: str) -> str:
+    """Запросить НОВЫЙ мастер-пароль (дважды) и проверить его: совпадение,
+    минимальная длина, предупреждение о слабом пароле. Общий для `create` и
+    `change-master`: пароль, который защищает всё хранилище, проверяется
+    одинаково и при создании, и при смене (раздел 10.18)."""
+    master_password = _prompt_secret(prompt)
+    confirmation = _prompt_secret(confirm_prompt)
     if master_password != confirmation:
         print("Пароли не совпадают.", file=sys.stderr)
         raise SystemExit(1)
@@ -131,10 +124,51 @@ def cmd_create(args: argparse.Namespace) -> None:
         if answer not in ("y", "yes", "да"):
             print("Отменено.")
             raise SystemExit(1)
+    return master_password
+
+
+def cmd_create(args: argparse.Namespace) -> None:
+    """Создать новое пустое хранилище с новым мастер-паролем."""
+    path = Path(args.path)
+
+    if path.exists() and not args.force:
+        print(
+            f"Хранилище уже существует: {path}\n"
+            "Если вы точно хотите его пересоздать (СТАРЫЕ ДАННЫЕ БУДУТ "
+            "ПОТЕРЯНЫ), повторите команду с флагом --force.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    master_password = _prompt_new_master_password("Придумайте мастер-пароль: ", "Повторите мастер-пароль: ")
 
     blob = encrypt_vault({"entries": []}, master_password)
     save_vault_file(path, blob)
     print(f"Хранилище создано: {path}")
+
+
+def cmd_change_master(args: argparse.Namespace) -> None:
+    """Сменить мастер-пароль: всё хранилище перешифровывается новым паролем."""
+    path = Path(args.path)
+    old_password = _prompt_secret("Текущий мастер-пароль: ")
+    # Сначала проверяем текущий пароль (и существование файла) — до того, как
+    # просить придумать новый: нет смысла вводить новый пароль, если старый
+    # неверен.
+    _open_vault(path, old_password)
+    new_password = _prompt_new_master_password("Новый мастер-пароль: ", "Повторите новый мастер-пароль: ")
+    if new_password == old_password:
+        print("Новый мастер-пароль совпадает с текущим — менять нечего.", file=sys.stderr)
+        raise SystemExit(1)
+
+    blob = change_master_password(load_vault_file(path), old_password, new_password)
+    # Запись атомарная (раздел 5): при сбое на диске останется старый файл.
+    save_vault_file(path, blob)
+    print("Мастер-пароль изменён. Хранилище перешифровано заново.")
+    print(
+        "Внимание: старые резервные копии файла по-прежнему открываются СТАРЫМ паролем — "
+        "удалите их, если старый пароль скомпрометирован.",
+        file=sys.stderr,
+    )
 
 
 def cmd_add(args: argparse.Namespace) -> None:
@@ -348,6 +382,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="пересоздать хранилище, даже если оно уже существует",
     )
     p_create.set_defaults(func=cmd_create)
+
+    p_change = subparsers.add_parser("change-master", help="сменить мастер-пароль хранилища")
+    p_change.set_defaults(func=cmd_change_master)
 
     p_add = subparsers.add_parser("add", help="добавить новую запись")
     p_add.add_argument("site", help="сайт/сервис, например example.com")

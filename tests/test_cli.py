@@ -380,3 +380,77 @@ def test_delete_missing_site_returns_nonzero(tmp_path, monkeypatch):
         secrets=[MASTER],
     )
     assert code != 0
+
+
+NEW_MASTER = "purple monkey dishwasher stapler"
+
+
+def _make_vault_with_entry(monkeypatch, vault_path):
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(
+        monkeypatch,
+        ["--path", str(vault_path), "add", "example.com", "--username", "alice"],
+        secrets=[MASTER, "s3cr3t!"],
+    )
+
+
+def test_change_master_moves_entries_to_the_new_password(tmp_path, monkeypatch, capsys):
+    vault_path = tmp_path / "test.vault"
+    _make_vault_with_entry(monkeypatch, vault_path)
+
+    code = _run(
+        monkeypatch,
+        ["--path", str(vault_path), "change-master"],
+        secrets=[MASTER, NEW_MASTER, NEW_MASTER],
+    )
+    assert code == 0
+    assert "Мастер-пароль изменён" in capsys.readouterr().out
+
+    # Старый пароль больше не подходит, новый открывает те же записи.
+    assert _run(monkeypatch, ["--path", str(vault_path), "get", "example.com"], secrets=[MASTER]) != 0
+    capsys.readouterr()
+    assert _run(monkeypatch, ["--path", str(vault_path), "get", "example.com"], secrets=[NEW_MASTER]) == 0
+    assert "s3cr3t!" in capsys.readouterr().out
+
+
+def test_change_master_with_wrong_current_password_changes_nothing(tmp_path, monkeypatch):
+    vault_path = tmp_path / "test.vault"
+    _make_vault_with_entry(monkeypatch, vault_path)
+    before = vault_path.read_bytes()
+
+    # Новый пароль у пользователя даже не спрашивают: сначала проверка текущего.
+    code = _run(monkeypatch, ["--path", str(vault_path), "change-master"], secrets=["wrong password"])
+
+    assert code != 0
+    assert vault_path.read_bytes() == before
+
+
+def test_change_master_rejects_mismatch_short_and_same_password(tmp_path, monkeypatch):
+    vault_path = tmp_path / "test.vault"
+    _make_vault_with_entry(monkeypatch, vault_path)
+    before = vault_path.read_bytes()
+    base = ["--path", str(vault_path), "change-master"]
+
+    assert _run(monkeypatch, base, secrets=[MASTER, NEW_MASTER, "другой пароль"]) != 0  # не совпали
+    assert _run(monkeypatch, base, secrets=[MASTER, "short", "short"]) != 0  # слишком короткий
+    assert _run(monkeypatch, base, secrets=[MASTER, MASTER, MASTER]) != 0  # тот же самый
+
+    assert vault_path.read_bytes() == before
+
+
+def test_change_master_warns_about_weak_new_password(tmp_path, monkeypatch):
+    vault_path = tmp_path / "test.vault"
+    _make_vault_with_entry(monkeypatch, vault_path)
+    base = ["--path", str(vault_path), "change-master"]
+
+    declined = _run(monkeypatch, base, secrets=[MASTER, "aaaaaaaa", "aaaaaaaa"], plain_inputs=["n"])
+    assert declined != 0
+    assert _run(monkeypatch, ["--path", str(vault_path), "get", "example.com"], secrets=[MASTER]) == 0
+
+    accepted = _run(monkeypatch, base, secrets=[MASTER, "aaaaaaaa", "aaaaaaaa"], plain_inputs=["y"])
+    assert accepted == 0
+
+
+def test_change_master_on_missing_vault_fails_cleanly(tmp_path, monkeypatch):
+    code = _run(monkeypatch, ["--path", str(tmp_path / "none.vault"), "change-master"], secrets=[MASTER])
+    assert code != 0

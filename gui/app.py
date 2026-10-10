@@ -25,6 +25,7 @@ import faulthandler
 import io
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -48,6 +49,7 @@ from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSW
 from vault.crypto import (
     InvalidMasterPasswordError,
     VaultFormatError,
+    change_master_password,
     decrypt_vault,
     encrypt_vault,
 )
@@ -2905,6 +2907,7 @@ class App(ttk.Window):
             ("Советник", self._on_audit, "shield"),
             ("Генератор", self._on_generate_standalone, "dice"),
             ("Помощник", self._on_assistant, "chat"),
+            ("Мастер-пароль", self._on_change_master, "pencil"),
         ):
             self._styled(
                 ttk.Button(
@@ -3225,6 +3228,53 @@ class App(ttk.Window):
     def _on_assistant(self) -> None:
         AssistantDialog(self)
 
+    def _on_change_master(self) -> None:
+        """Смена мастер-пароля (раздел 10.66): диалог запрашивает текущий
+        пароль и новый (дважды), затем всё хранилище перешифровывается заново.
+
+        Порядок важен для надёжности: 1) сначала сохраняем текущие данные
+        СТАРЫМ паролем — чтобы на диске ничего не отставало от того, что в
+        памяти (иначе при смене пароля «из файла» потерялись бы несохранённые
+        изменения); 2) `change_master_password` читает файл, проверяет старый
+        пароль и шифрует под новый; 3) запись атомарная (`save_vault_file`,
+        раздел 5) — при сбое на диске останется целый старый файл, а
+        `self.master_password` меняется только ПОСЛЕ успешной записи."""
+        if self.data is None or self.vault_path is None or self.master_password is None:
+            return
+
+        def is_current(candidate: str) -> bool:
+            return secrets.compare_digest(candidate.encode("utf-8"), self.master_password.encode("utf-8"))
+
+        dialog = CreateVaultDialog(self, change=True, check_current=is_current)
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        old_password, new_password = dialog.current_password, dialog.result
+
+        if not self._save_vault():
+            return
+        try:
+            blob = change_master_password(load_vault_file(self.vault_path), old_password, new_password)
+            save_vault_file(self.vault_path, blob)
+        except InvalidMasterPasswordError:
+            messagebox.showerror("Ошибка", "Неверный текущий мастер-пароль.", parent=self)
+            return
+        except VaultFormatError as exc:
+            messagebox.showerror("Ошибка", f"Файл хранилища повреждён: {exc}", parent=self)
+            return
+        except OSError as exc:
+            messagebox.showerror("Ошибка", f"Не удалось сохранить хранилище: {exc}", parent=self)
+            return
+
+        self.master_password = new_password
+        messagebox.showinfo(
+            "Мастер-пароль изменён",
+            "Хранилище перешифровано новым мастер-паролем.\n\n"
+            "Старые резервные копии файла по-прежнему открываются СТАРЫМ паролем — "
+            "удалите их, если старый пароль скомпрометирован.",
+            parent=self,
+        )
+
     def _assistant_context(self):
         """Метаданные хранилища для помощника (раздел 9.4): числа и названия
         сайтов, без паролей и логинов (`assistant.prompt`)."""
@@ -3356,13 +3406,29 @@ class CreateVaultDialog(ttk.Toplevel):
     `App._build_strength_meter`) — мастер-пароль защищает ВСЁ
     хранилище целиком, поэтому его сила заслуживает такой же наглядной
     обратной связи, что и пароль отдельной записи (раздел 10.13), а не
-    просто безликое текстовое поле ввода."""
+    просто безликое текстовое поле ввода.
 
-    def __init__(self, parent: App) -> None:
-        super().__init__(title="Новое хранилище", master=parent, resizable=(False, False), iconphoto=None)
-        parent._dialog_chrome(self, "Новое хранилище")
+    Тот же диалог служит и для СМЕНЫ мастер-пароля (`change=True`, раздел
+    10.66): добавляется поле «текущий мастер-пароль» (его проверяет
+    `check_current`, чтобы показать ошибку, не закрывая окна), остальное —
+    новый пароль, подтверждение и живая оценка надёжности — то же самое,
+    потому что к новому мастер-паролю предъявляются те же требования."""
+
+    def __init__(
+        self,
+        parent: App,
+        *,
+        change: bool = False,
+        check_current: Callable[[str], bool] | None = None,
+    ) -> None:
+        window_title = "Смена мастер-пароля" if change else "Новое хранилище"
+        super().__init__(title=window_title, master=parent, resizable=(False, False), iconphoto=None)
+        parent._dialog_chrome(self, window_title)
         self.transient(parent)
         self.result: str | None = None
+        self.current_password: str | None = None  # только при смене пароля
+        self._change = change
+        self._check_current = check_current
         pending_backdrops: list[Callable[[], None]] = []
 
         content = ttk.Frame(self, padding=_px(24))
@@ -3384,21 +3450,60 @@ class CreateVaultDialog(ttk.Toplevel):
             ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, _px(12)))
         title_stack = ttk.Frame(header)
         title_stack.pack(side="left", fill="both", expand=True)
-        ttk.Label(title_stack, text="Новое хранилище", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(
+        ttk.Label(title_stack, text=window_title, font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(
             anchor="w"
         )
         ttk.Label(
             title_stack,
-            text="Мастер-пароль защищает всё хранилище целиком",
+            text=(
+                "Хранилище будет зашифровано заново новым паролем"
+                if change
+                else "Мастер-пароль защищает всё хранилище целиком"
+            ),
             foreground=_SEARCH_PLACEHOLDER_COLOR,
             font=("", 9),
         ).pack(anchor="w")
 
+        # --- Только при смене: текущий мастер-пароль (тот же вид поля, что
+        # у «подтверждения» ниже) ---
+        self._current_var = tk.StringVar()
+        current_entry = None
+        if change:
+            ttk.Label(
+                content, text="ТЕКУЩИЙ МАСТЕР-ПАРОЛЬ", font=("", 8, "bold"), bootstyle="secondary"
+            ).pack(fill="x", anchor="w", pady=(_px(18), _px(2)))
+            current_box = ttk.Frame(
+                content,
+                padding=(_px(10), _px(6)),
+                width=_px(_MASTER_FIELD_WIDTH),
+                height=_px(_MASTER_FIELD_HEIGHT),
+            )
+            current_box.pack_propagate(False)
+            current_box.pack(anchor="w")
+            pending_backdrops.append(
+                parent._rounded_backdrop(
+                    current_box,
+                    _NEUTRAL_FILL,
+                    corners=(True, True, True, True),
+                    surface="#ffffff",
+                    radius=_ROUNDED_RADIUS,
+                    border_color=_NEUTRAL_BORDER,
+                    border_width=1,
+                )
+            )
+            current_entry = ttk.Entry(current_box, textvariable=self._current_var, show="*")
+            current_entry.configure(style="NeutralField.TEntry")
+            current_entry.pack(fill="both", expand=True)
+            current_entry.bind("<Return>", lambda _event: self._on_submit())
+
         # --- Поле мастер-пароля + кнопка-"глаз" (тот же приём, что и на
         # экране разблокировки, раздел 10.7) ---
-        ttk.Label(content, text="МАСТЕР-ПАРОЛЬ", font=("", 8, "bold"), bootstyle="secondary").pack(
-            fill="x", anchor="w", pady=(_px(18), _px(2))
-        )
+        ttk.Label(
+            content,
+            text="НОВЫЙ МАСТЕР-ПАРОЛЬ" if change else "МАСТЕР-ПАРОЛЬ",
+            font=("", 8, "bold"),
+            bootstyle="secondary",
+        ).pack(fill="x", anchor="w", pady=(_px(18), _px(2)))
         self._password_var = tk.StringVar()
         # Поля мастер-пароля/подтверждения заведомо ýже и ниже, чем
         # остальные ряды диалога (заголовок, шкала надёжности) — по
@@ -3501,7 +3606,12 @@ class CreateVaultDialog(ttk.Toplevel):
         )
 
         # --- Подтверждение ---
-        ttk.Label(content, text="ПОДТВЕРЖДЕНИЕ", font=("", 8, "bold"), bootstyle="secondary").pack(
+        ttk.Label(
+            content,
+            text="ПОДТВЕРЖДЕНИЕ НОВОГО ПАРОЛЯ" if change else "ПОДТВЕРЖДЕНИЕ",
+            font=("", 8, "bold"),
+            bootstyle="secondary",
+        ).pack(
             fill="x", anchor="w", pady=(_px(18), _px(2))
         )
         self._confirm_var = tk.StringVar()
@@ -3535,13 +3645,13 @@ class CreateVaultDialog(ttk.Toplevel):
         buttons.pack(fill="x")
         parent._action_buttons(
             buttons,
-            primary_text="Создать",
+            primary_text="Сменить" if change else "Создать",
             primary_command=self._on_submit,
-            primary_icon="plus",
+            primary_icon="lock" if change else "plus",
             cancel_command=self.destroy,
         )
 
-        password_entry.focus_set()
+        (current_entry or password_entry).focus_set()
         self.update_idletasks()
         for redraw in pending_backdrops:
             redraw()
@@ -3557,6 +3667,14 @@ class CreateVaultDialog(ttk.Toplevel):
         password = self._password_var.get()
         confirmation = self._confirm_var.get()
 
+        if self._change:
+            current = self._current_var.get()
+            if not current:
+                self._status_label.configure(text="Введите текущий мастер-пароль.")
+                return
+            if self._check_current is not None and not self._check_current(current):
+                self._status_label.configure(text="Неверный текущий мастер-пароль.")
+                return
         if password != confirmation:
             self._status_label.configure(text="Пароли не совпадают.")
             return
@@ -3564,6 +3682,10 @@ class CreateVaultDialog(ttk.Toplevel):
             self._status_label.configure(
                 text=f"Мастер-пароль должен быть не короче {MIN_MASTER_PASSWORD_LENGTH} символов."
             )
+            return
+
+        if self._change and password == self._current_var.get():
+            self._status_label.configure(text="Новый мастер-пароль совпадает с текущим.")
             return
 
         # Мастер-пароль оценивается по ТЕМ ЖЕ критериям "слабости", что и
@@ -3585,6 +3707,8 @@ class CreateVaultDialog(ttk.Toplevel):
                 return
 
         self.result = password
+        if self._change:
+            self.current_password = self._current_var.get()
         self.destroy()
 
 
