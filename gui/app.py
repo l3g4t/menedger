@@ -526,6 +526,7 @@ class TitleBar(tk.Frame):
         theme: str = "light",
         controls: tuple[str, ...] = ("min", "max", "close"),
         show_title: bool = True,
+        right_margin: int = 0,
     ) -> None:
         super().__init__(master, height=_px(_CHROME_BAR_HEIGHT), borderwidth=0, highlightthickness=0)
         self.pack_propagate(False)
@@ -546,9 +547,12 @@ class TitleBar(tk.Frame):
             "max": app._toggle_maximize,
             "close": getattr(window, "_on_close", window.destroy),
         }
-        for kind in reversed(controls):
+        for index, kind in enumerate(reversed(controls)):
             label = tk.Label(self, borderwidth=0, cursor="arrow")
-            label.pack(side="right", fill="y")
+            # `right_margin` — зазор справа у самой правой кнопки: у окна со
+            # скруглёнными углами (раздел 10.49) подсветка кнопки закрытия не
+            # должна заходить в угол, где её срезала бы дуга.
+            label.pack(side="right", fill="y", padx=(0, right_margin if index == 0 else 0))
             label.bind("<Enter>", lambda _e, k=kind: self._set_button(k, True))
             label.bind("<Leave>", lambda _e, k=kind: self._set_button(k, False))
             label.bind("<ButtonRelease-1>", lambda e, k=kind: self._click(k, e, commands[k]))
@@ -740,6 +744,8 @@ class App(ttk.Window):
         self._saved_geometry: str | None = None
         self._titlebar: TitleBar | None = None
         self._grip: tk.Label | None = None
+        self._window_corners: list[tk.Label] | None = None
+        self._chrome_theme_name = "dark"
         if not self._native_frame:
             self._install_chrome()
 
@@ -814,7 +820,18 @@ class App(ttk.Window):
 
     def _install_chrome(self) -> None:
         self.overrideredirect(True)
-        self._titlebar = TitleBar(self, self, self, APP_TITLE, theme="dark")
+        # Скруглённые углы главного окна (раздел 10.49) — только Windows.
+        if _enable_transparent_corners(self):
+            self.configure(background=_WINDOW_KEY_COLOR)
+            self._window_corners = []
+        self._titlebar = TitleBar(
+            self,
+            self,
+            self,
+            APP_TITLE,
+            theme="dark",
+            right_margin=_px(8) if self._window_corners is not None else 0,
+        )
         self._titlebar.pack(side="top", fill="x")
 
         # Безрамочное окно некому растягивать — маленький "уголок" справа
@@ -825,7 +842,10 @@ class App(ttk.Window):
             self._grip.configure(cursor="size_nw_se" if sys.platform == "win32" else "bottom_right_corner")
         except tk.TclError:
             pass
-        self._grip.place(relx=1.0, rely=1.0, anchor="se")
+        # Отступ от угла: у окна со скруглёнными углами "уголок" не должен
+        # заходить в вырезанную дугой область (раздел 10.49).
+        self._grip_offset = _px(8) if self._window_corners is not None else 0
+        self._grip.place(relx=1.0, rely=1.0, x=-self._grip_offset, y=-self._grip_offset, anchor="se")
         self._grip.bind("<ButtonPress-1>", self._grip_start)
         self._grip.bind("<B1-Motion>", self._grip_move)
         self._set_chrome_theme("dark")
@@ -845,11 +865,13 @@ class App(ttk.Window):
         (в цвет страницы)."""
         if self._titlebar is None or self._grip is None:
             return
+        self._chrome_theme_name = theme
         self._titlebar.set_theme(theme)
         colors = _CHROME_THEMES[theme]
         self._grip.configure(
             background=colors["bg"], image=self._chrome_image("grip", colors["title"], colors["bg"], None)
         )
+        self._refresh_window_corners()
 
     def _focus_window(self) -> None:
         try:
@@ -984,7 +1006,10 @@ class App(ttk.Window):
             if self._maximized:
                 self._grip.place_forget()
             else:
-                self._grip.place(relx=1.0, rely=1.0, anchor="se")
+                self._grip.place(
+                    relx=1.0, rely=1.0, x=-self._grip_offset, y=-self._grip_offset, anchor="se"
+                )
+        self._refresh_window_corners()
 
     def _grip_start(self, event: tk.Event) -> None:
         self._grip_origin = (event.x_root, event.y_root, self.winfo_width(), self.winfo_height())
@@ -1026,8 +1051,18 @@ class App(ttk.Window):
                 highlightthickness=1, highlightbackground=_CHROME_BORDER, highlightcolor=_CHROME_BORDER
             )
         if bar:
-            title_bar = TitleBar(dialog, self, dialog, title, theme=theme, controls=("close",), show_title=show_title)
+            title_bar = TitleBar(
+                dialog,
+                self,
+                dialog,
+                title,
+                theme=theme,
+                controls=("close",),
+                show_title=show_title,
+                right_margin=_px(8) if dialog._corner_overlay is not None else 0,
+            )
             title_bar.pack(side="top", fill="x")
+            dialog._title_bar = title_bar
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
 
         def focus() -> None:
@@ -1080,41 +1115,67 @@ class App(ttk.Window):
 
             dialog.after(250, report)
 
+    def _make_corner_overlays(
+        self, window: tk.Misc, top_color: str, bottom_color: str, border_color: str | None
+    ) -> list[tk.Label]:
+        """Четыре накладки-угла для окна со скруглёнными углами (разделы
+        10.46, 10.49): вне дуги — ключевой цвет (его Windows не рисует,
+        `-transparentcolor`), внутри дуги — цвет того, что под накладкой
+        (у верхних углов — `top_color`, у нижних — `bottom_color`), плюс
+        дуга рамки `border_color` (None — без рамки). Подходит, пока угловая
+        область однородна. Края без сглаживания — как в 10.43."""
+        radius = _px(_VIEW_WINDOW_RADIUS)
+        cell = radius + 4
+        border_px = 1 if border_color else 0
+        placements = (
+            ("nw", 0.0, 0.0, top_color, (0, 0)),
+            ("ne", 1.0, 0.0, top_color, (cell, 0)),
+            ("sw", 0.0, 1.0, bottom_color, (0, cell)),
+            ("se", 1.0, 1.0, bottom_color, (cell, cell)),
+        )
+        labels: list[tk.Label] = []
+        for anchor, relx, rely, base, (qx, qy) in placements:
+            shape = _render_keyed_rounded_rect(
+                2 * cell, 2 * cell, base, _WINDOW_KEY_COLOR, radius, (True, True, True, True), border_color, border_px
+            )
+            photo = ImageTk.PhotoImage(shape.crop((qx, qy, qx + cell, qy + cell)))
+            label = tk.Label(window, image=photo, bd=0, highlightthickness=0)
+            label.photo = photo
+            label.place(relx=relx, rely=rely, anchor=anchor, bordermode="outside")
+            label.lift()
+            labels.append(label)
+        return labels
+
     def _round_dialog_corners(self, dialog: tk.Toplevel) -> None:
         """Скруглить углы окна диалога (раздел 10.46). Вызывается В КОНЦЕ
         `__init__` диалога — накладки должны лежать ПОВЕРХ всех виджетов.
-
-        Окно прямоугольное, поэтому в каждый угол кладётся маленькая
-        картинка-накладка `tk.Label`: вне дуги — ключевой цвет (его Windows
-        не рисует, `-transparentcolor`), внутри дуги — цвет того, что под
-        ней (у верхних углов — фон строки заголовка, у нижних — белый фон
-        тела), плюс дуга рамки. Подходит, пока угловая область однородна —
-        у этих диалогов так и есть (отступы больше радиуса). Без поддержки
-        прозрачности (не Windows) ничего не делает."""
+        Верхние углы — цвет строки заголовка, нижние — белый фон тела, плюс
+        дуга рамки `_CHROME_BORDER`. Без поддержки прозрачности (не Windows)
+        ничего не делает."""
         overlays = getattr(dialog, "_corner_overlay", None)
         if overlays is None:
             return
         for label in overlays:
             label.destroy()
         overlays.clear()
-        radius = _px(_VIEW_WINDOW_RADIUS)
-        cell = radius + 4
-        placements = (
-            ("nw", 0.0, 0.0, dialog._corner_top_color, (0, 0)),
-            ("ne", 1.0, 0.0, dialog._corner_top_color, (cell, 0)),
-            ("sw", 0.0, 1.0, "#ffffff", (0, cell)),
-            ("se", 1.0, 1.0, "#ffffff", (cell, cell)),
-        )
-        for anchor, relx, rely, base, (qx, qy) in placements:
-            shape = _render_keyed_rounded_rect(
-                2 * cell, 2 * cell, base, _WINDOW_KEY_COLOR, radius, (True, True, True, True), _CHROME_BORDER, 1
-            )
-            photo = ImageTk.PhotoImage(shape.crop((qx, qy, qx + cell, qy + cell)))
-            label = tk.Label(dialog, image=photo, bd=0, highlightthickness=0)
-            label.photo = photo
-            label.place(relx=relx, rely=rely, anchor=anchor, bordermode="outside")
-            label.lift()
-            overlays.append(label)
+        overlays.extend(self._make_corner_overlays(dialog, dialog._corner_top_color, "#ffffff", _CHROME_BORDER))
+
+    def _refresh_window_corners(self) -> None:
+        """Скруглённые углы ГЛАВНОГО окна (раздел 10.49): цвета углов зависят
+        от экрана (тёмная строка заголовка и тёмный фон на разблокировке,
+        светлые на главном экране), поэтому накладки пересоздаются при смене
+        темы; у развёрнутого окна углы прямые — накладок нет."""
+        overlays = getattr(self, "_window_corners", None)
+        if overlays is None:
+            return
+        for label in overlays:
+            label.destroy()
+        overlays.clear()
+        if self._maximized:
+            return
+        theme = self._chrome_theme_name
+        bottom = _SIDEBAR_BG if theme == "dark" else _PAGE_BG
+        overlays.extend(self._make_corner_overlays(self, _CHROME_THEMES[theme]["bg"], bottom, None))
 
     def _dlog(self, message: str) -> None:
         """Строка в `menedger_debug.log` (только при `MENEDGER_DEBUG=1`)."""

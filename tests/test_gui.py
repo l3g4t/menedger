@@ -739,3 +739,47 @@ def test_window_shrinks_around_card_on_unlock_screen(app):
     app.update()
     assert (app.winfo_width(), app.winfo_height()) == unlock_size
 
+
+def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
+    """Раздел 10.49: при поддержке прозрачных углов у главного окна 4 накладки;
+    у развёрнутого окна углов нет; цвета обновляются при смене экрана."""
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda window: True)
+    if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    window = guiapp.App()
+    try:
+        window.update()
+        assert window.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
+        assert len(window._window_corners) == 4
+        unlock_photos = [label.photo for label in window._window_corners]
+        window.data = {"entries": []}
+        window._show_main()
+        window.update()
+        assert len(window._window_corners) == 4
+        assert [label.photo for label in window._window_corners] != unlock_photos  # цвета другого экрана
+        window._toggle_maximize()
+        window.update()
+        assert window._window_corners == []
+        window._toggle_maximize()
+        window.update()
+        assert len(window._window_corners) == 4
+    finally:
+        window.destroy()
+
+
+def test_close_button_keeps_gap_from_rounded_corner(monkeypatch):
+    """Раздел 10.49: у окна со скруглёнными углами подсветка кнопки закрытия
+    не заходит в угол — у правой кнопки есть зазор справа."""
+    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda window: True)
+    if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    window = guiapp.App()
+    try:
+        window.update()
+        info = window._titlebar._buttons["close"].pack_info()
+        padx = info["padx"]
+        right = padx[1] if isinstance(padx, (tuple, list)) else padx
+        assert int(str(right)) == guiapp._px(8)
+    finally:
+        window.destroy()
+
