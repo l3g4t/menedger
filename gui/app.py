@@ -66,18 +66,6 @@ APP_TITLE = "Хранилище тайн"
 # доступном любому другому процессу в системе.
 CLIPBOARD_CLEAR_DELAY_MS = 20_000
 
-def _debug_enabled(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
-    """Отладочный журнал (раздел 10.35): `MENEDGER_DEBUG=1` или флаг
-    `--debug` (удобно для ярлыка `.exe`, где переменную не задать)."""
-    return bool(env.get("MENEDGER_DEBUG")) or "--debug" in argv
-
-
-def _native_minimize_enabled(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
-    """Экспериментальное сворачивание через `ShowWindow` (раздел 10.44) —
-    только по запросу: `MENEDGER_NATIVE_MINIMIZE=1` или `--native-minimize`."""
-    return bool(env.get("MENEDGER_NATIVE_MINIMIZE")) or "--native-minimize" in argv
-
-
 def _gui_resource_dir() -> Path:
     """Папка с ресурсами GUI (иконки). В обычном запуске это папка этого
     файла; в PyInstaller-сборке `__file__` точки входа указывает в корень
@@ -533,9 +521,7 @@ class TitleBar(tk.Frame):
         # системных кнопок (можно "передумать", отведя курсор).
         label = self._buttons[kind]
         if 0 <= event.x < label.winfo_width() and 0 <= event.y < label.winfo_height():
-            self._app._dlog(f"titlebar: клик '{kind}' -> вызываю команду")
             command()
-            self._app._dlog(f"titlebar: команда '{kind}' вернулась")
 
     def _drag_start(self, event: tk.Event) -> None:
         if self._app._is_maximized(self._window):
@@ -678,12 +664,9 @@ class App(ttk.Window):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        if _debug_enabled(os.environ, sys.argv):
+        if os.environ.get("MENEDGER_DEBUG"):
             self.after(800, lambda: self._debug_report_images("старт"))
             self._start_debug_tools()
-            # У .exe без консоли stderr не виден — путь к журналу показываем в
-            # окне, иначе его негде узнать (раздел 10.42).
-            self.after(1200, self._announce_debug_log)
 
     # ------------------------------------------------------------------
     # Собственная рамка окна (раздел 10.33)
@@ -779,6 +762,12 @@ class App(ttk.Window):
             style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
             style = (style & ~0x00000080) | 0x00040000  # -WS_EX_TOOLWINDOW, +WS_EX_APPWINDOW
             user32.SetWindowLongW(hwnd, -20, style)
+            # Гипотеза (раздел 10.41): без WS_MINIMIZEBOX/WS_SYSMENU у окна без
+            # заголовка Windows не анимирует сворачивание/восстановление
+            # (рисует каркас-контур и пустое окно). Внешне стиль ничего не
+            # добавляет — у окна нет заголовка.
+            base = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
+            user32.SetWindowLongW(hwnd, -16, base | 0x00020000 | 0x00080000)
             self.withdraw()
             self.after(10, self.deiconify)
         except Exception:
@@ -791,18 +780,10 @@ class App(ttk.Window):
         if self._native_frame:
             self.iconify()
             return
-        # Экспериментально (раздел 10.44): прямой ShowWindow без возврата
-        # рамки — только по запросу, отложенно (вне обработчика клика).
-        if _native_minimize_enabled(os.environ, sys.argv):
-            self.after(50, self._minimize_native_or_legacy)
+        # Windows: сворачиваем напрямую (ShowWindow), не трогая рамку —
+        # без вспышки системного заголовка и пустого окна при восстановлении.
+        if self._native_minimize():
             return
-        self._minimize_legacy()
-
-    def _minimize_native_or_legacy(self) -> None:
-        if not self._native_minimize():
-            self._minimize_legacy()
-
-    def _minimize_legacy(self) -> None:
         self._saved_geometry = self.geometry()
         self._minimized = True
         self.overrideredirect(False)
@@ -835,9 +816,7 @@ class App(ttk.Window):
             hwnd = user32.GetParent(self.winfo_id())
             if not hwnd:
                 return False
-            self._dlog(f"native minimize: hwnd={hwnd}, вызываю ShowWindow(SW_MINIMIZE)")
             user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
-            self._dlog("native minimize: ShowWindow вернулся")
             iconic = bool(user32.IsIconic(hwnd))
             self._dlog(f"native minimize: IsIconic={iconic}")
             return iconic
@@ -965,11 +944,6 @@ class App(ttk.Window):
 
             dialog.after(250, report)
 
-    def _announce_debug_log(self) -> None:
-        path = getattr(self, "_debug_log_path", None)
-        if path is not None:
-            messagebox.showinfo("Отладка включена", f"Журнал пишется в файл:\n{path.resolve()}", parent=self)
-
     def _dlog(self, message: str) -> None:
         """Строка в `menedger_debug.log` (только при `MENEDGER_DEBUG=1`)."""
         log_file = getattr(self, "_debug_log", None)
@@ -995,17 +969,13 @@ class App(ttk.Window):
         import tempfile
         import time as _time
 
-        # Рядом с .exe (а не в "текущей папке", которая у запуска двойным
-        # кликом или из ярлыка непредсказуема); из исходников — в рабочей папке.
-        base_dir = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd()
-        log_path = base_dir / "menedger_debug.log"
+        log_path = Path("menedger_debug.log")
         try:
             log_file = open(log_path, "a", buffering=1, encoding="utf-8")
         except OSError:
             log_path = Path(tempfile.gettempdir()) / "menedger_debug.log"
             log_file = open(log_path, "a", buffering=1, encoding="utf-8")
         self._debug_log = log_file
-        self._debug_log_path = log_path
         started = self._debug_started = _time.time()
 
         def log(message: str) -> None:
@@ -2213,7 +2183,7 @@ class App(ttk.Window):
         self._main_frame.pack(fill="both", expand=True)
         self._set_chrome_theme("light")
         self._refresh_tree()
-        if _debug_enabled(os.environ, sys.argv):
+        if os.environ.get("MENEDGER_DEBUG"):
             self.after(500, lambda: self._debug_report_images("главный экран"))
 
     def _on_show_all_entries(self) -> None:
