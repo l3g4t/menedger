@@ -895,3 +895,25 @@ def test_dialog_footer_buttons_have_equal_height_and_width(app):
         finally:
             dialog.destroy()
 
+
+
+def test_generator_copy_button_is_separate_from_field_and_same_height(app, monkeypatch):
+    """Раздел 10.53: поле пароля и кнопка копирования — отдельные виджеты
+    одной высоты (кнопка не внутри плитки поля)."""
+    _create_vault(app, monkeypatch)
+    generator = guiapp.GeneratorDialog(app, on_copy=lambda _text: None)
+    generator.update_idletasks()
+    button = generator._copy_button
+    entry = _find_widgets_by_class(generator, "TEntry")[0]
+    box = entry.nametowidget(entry.winfo_parent())
+    assert button.winfo_toplevel() is generator
+    # кнопка не потомок плитки поля
+    parent = button
+    while parent is not generator and parent is not box:
+        parent = parent.nametowidget(parent.winfo_parent())
+    assert parent is not box
+    cell = button.nametowidget(button.winfo_parent())
+    assert cell.winfo_height() == box.winfo_height()
+    assert cell.winfo_width() == cell.winfo_height()
+    assert button.winfo_rootx() >= box.winfo_rootx() + box.winfo_width()
+    generator.destroy()

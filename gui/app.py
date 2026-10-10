@@ -188,6 +188,7 @@ _MASTER_FIELD_HEIGHT = 38  # px
 # Диалог просмотра записи: высота плиток-полей и квадратных кнопок рядом с
 # ними — одна и та же, чтобы ряд читался как единая группа (раздел 10.42).
 _VIEW_FIELD_HEIGHT = 36  # px
+_GENERATOR_FIELD_HEIGHT = 42  # px, поле пароля генератора и кнопка копирования
 _NEW_PASSWORD_CONTENT_WIDTH = 360  # px — ширина содержимого диалога нового пароля (раздел 10.51)
 _VIEW_CONTENT_WIDTH = 330  # px — ширина тела диалога (без нижних кнопок её задавать нечем)
 _VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (разделы 10.45–10.46)
@@ -3682,8 +3683,14 @@ class GeneratorDialog(ttk.Toplevel):
         ).pack(anchor="w")
 
         # --- Сгенерированный пароль ---
-        password_box = ttk.Frame(content, padding=(_px(14), _px(12)))
-        password_box.pack(fill="x", pady=(_px(18), 0))
+        # Поле и кнопка копирования — два отдельных виджета (раздел 10.53):
+        # скруглённая плитка поля и рядом квадратная ячейка той же высоты.
+        password_row = ttk.Frame(content)
+        password_row.pack(fill="x", pady=(_px(18), 0))
+        field_height = _px(_GENERATOR_FIELD_HEIGHT)
+        password_box = ttk.Frame(password_row, height=field_height, padding=(_px(14), 0))
+        password_box.pack_propagate(False)
+        password_box.pack(side="left", fill="x", expand=True)
         pending_backdrops.append(
             parent._rounded_backdrop(
                 password_box,
@@ -3704,18 +3711,26 @@ class GeneratorDialog(ttk.Toplevel):
         # 10.16–10.17), поэтому цвет корректно применяется и здесь
         # (`state="readonly"`), и там (обычное редактируемое поле).
         result_entry.configure(style="NeutralField.TEntry")
-        result_entry.pack(side="left", fill="x", expand=True)
-        icon_button_style = parent._rounded_button_style(
-            "Rounded.IconToggle",
-            _NEUTRAL_FILL,
-            _NEUTRAL_TEXT,
-            border_color=_NEUTRAL_BORDER,
-            padding=(_px(8), _px(6)),
+        result_entry.pack(fill="x", expand=True)
+        copy_cell = ttk.Frame(password_row, width=field_height, height=field_height)
+        copy_cell.pack_propagate(False)
+        copy_cell.pack(side="left", padx=(_px(8), 0))
+        self._copy_button = parent._styled(
+            ttk.Button(
+                copy_cell,
+                command=self._on_copy_click,
+                **{**parent._icon_kwargs("copy", "dark", center=True), "compound": "image"},
+            ),
+            parent._rounded_button_style(
+                "Rounded.IconToggleSquare",
+                _NEUTRAL_FILL,
+                _NEUTRAL_TEXT,
+                border_color=_NEUTRAL_BORDER,
+                padding=(0, 0),
+                element_padding=0,
+            ),
         )
-        parent._styled(
-            ttk.Button(password_box, command=self._on_copy_click, **parent._icon_kwargs("copy", "dark")),
-            icon_button_style,
-        ).pack(side="left", padx=(_px(8), 0))
+        self._copy_button.pack(fill="both", expand=True)
 
         # --- Надёжность: подпись + бейдж + сегментированная шкала ---
         # Разметка вынесена в App._build_strength_meter (раздел 10.18) —

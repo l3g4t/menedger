@@ -84,7 +84,5 @@ def explain_password(password: str) -> str:
     bits = estimate_entropy_bits(password)
     return (
         f"Длина: {len(password)} символов. "
-        f"Оценка энтропии: ~{bits:.0f} бит "
-        f"(при {bits:.0f} битах перебор всех вариантов на современном "
-        f"оборудовании практически неосуществим)."
+        f"Оценка энтропии: ~{bits:.0f} бит."
     )
