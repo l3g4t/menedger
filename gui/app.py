@@ -527,7 +527,9 @@ class TitleBar(tk.Frame):
         # системных кнопок (можно "передумать", отведя курсор).
         label = self._buttons[kind]
         if 0 <= event.x < label.winfo_width() and 0 <= event.y < label.winfo_height():
+            self._app._dlog(f"titlebar: клик '{kind}' -> вызываю команду")
             command()
+            self._app._dlog(f"titlebar: команда '{kind}' вернулась")
 
     def _drag_start(self, event: tk.Event) -> None:
         if self._app._is_maximized(self._window):
@@ -825,7 +827,9 @@ class App(ttk.Window):
             hwnd = user32.GetParent(self.winfo_id())
             if not hwnd:
                 return False
+            self._dlog(f"native minimize: hwnd={hwnd}, вызываю ShowWindow(SW_MINIMIZE)")
             user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+            self._dlog("native minimize: ShowWindow вернулся")
             iconic = bool(user32.IsIconic(hwnd))
             self._dlog(f"native minimize: IsIconic={iconic}")
             return iconic
