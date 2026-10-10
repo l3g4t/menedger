@@ -331,6 +331,15 @@ def _render_rounded_rect(
     return result
 
 
+def _clear_topmost(window: tk.Misc) -> None:
+    """Снять временный `-topmost` (раздел 10.37); окно к этому моменту могло
+    быть уже закрыто — тогда ничего не делаем."""
+    try:
+        window.attributes("-topmost", False)
+    except tk.TclError:
+        pass
+
+
 def _use_native_frame(platform: str, env: "os._Environ[str] | dict", argv: list[str]) -> bool:
     """Нужна ли системная рамка окна (раздел 10.36).
 
@@ -841,6 +850,48 @@ class App(ttk.Window):
                 pass
 
         dialog.after(80, focus)
+
+        # Модальный диалог безрамочного окна на Windows может оказаться ЗА
+        # главным окном (раздел 10.37): захват ввода (`grab_set`) при этом
+        # блокирует главное окно, а диалога не видно — со стороны это
+        # выглядит как полное зависание. Поэтому (1) поднимаем диалог
+        # трюком "topmost вкл → выкл" (он встаёт над главным окном, но не
+        # остаётся над всеми приложениями) и (2) при любом клике МИМО
+        # диалога — Tk при захвате доставляет такие клики самому диалогу
+        # (`event.widget is dialog`) — снова поднимаем его и звякаем.
+        def raise_dialog() -> None:
+            try:
+                dialog.lift()
+                dialog.attributes("-topmost", True)
+                dialog.after(300, lambda: _clear_topmost(dialog))
+                dialog.focus_force()
+            except tk.TclError:
+                pass
+
+        def on_click_outside(event: tk.Event) -> None:
+            if event.widget is dialog:
+                raise_dialog()
+                try:
+                    dialog.bell()
+                except tk.TclError:
+                    pass
+
+        dialog.bind("<ButtonPress>", on_click_outside, add="+")
+        dialog.after(100, raise_dialog)
+
+        log_file = getattr(self, "_debug_log", None)
+        if log_file is not None:
+
+            def report() -> None:
+                try:
+                    log_file.write(
+                        f"dialog {type(dialog).__name__}: geometry={dialog.geometry()} "
+                        f"viewable={dialog.winfo_viewable()} state={dialog.state()}\n"
+                    )
+                except tk.TclError:
+                    pass
+
+            dialog.after(250, report)
 
     def _start_debug_tools(self) -> None:
         """Диагностика зависаний (раздел 10.35), включается `MENEDGER_DEBUG=1`.
