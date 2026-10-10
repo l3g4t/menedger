@@ -72,6 +72,12 @@ def _debug_enabled(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
     return bool(env.get("MENEDGER_DEBUG")) or "--debug" in argv
 
 
+def _native_minimize_enabled(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
+    """Экспериментальное сворачивание через `ShowWindow` (раздел 10.44) —
+    только по запросу: `MENEDGER_NATIVE_MINIMIZE=1` или `--native-minimize`."""
+    return bool(env.get("MENEDGER_NATIVE_MINIMIZE")) or "--native-minimize" in argv
+
+
 def _gui_resource_dir() -> Path:
     """Папка с ресурсами GUI (иконки). В обычном запуске это папка этого
     файла; в PyInstaller-сборке `__file__` точки входа указывает в корень
@@ -773,12 +779,6 @@ class App(ttk.Window):
             style = user32.GetWindowLongW(hwnd, -20)  # GWL_EXSTYLE
             style = (style & ~0x00000080) | 0x00040000  # -WS_EX_TOOLWINDOW, +WS_EX_APPWINDOW
             user32.SetWindowLongW(hwnd, -20, style)
-            # Гипотеза (раздел 10.41): без WS_MINIMIZEBOX/WS_SYSMENU у окна без
-            # заголовка Windows не анимирует сворачивание/восстановление
-            # (рисует каркас-контур и пустое окно). Внешне стиль ничего не
-            # добавляет — у окна нет заголовка.
-            base = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
-            user32.SetWindowLongW(hwnd, -16, base | 0x00020000 | 0x00080000)
             self.withdraw()
             self.after(10, self.deiconify)
         except Exception:
@@ -791,10 +791,18 @@ class App(ttk.Window):
         if self._native_frame:
             self.iconify()
             return
-        # Windows: сворачиваем напрямую (ShowWindow), не трогая рамку —
-        # без вспышки системного заголовка и пустого окна при восстановлении.
-        if self._native_minimize():
+        # Экспериментально (раздел 10.44): прямой ShowWindow без возврата
+        # рамки — только по запросу, отложенно (вне обработчика клика).
+        if _native_minimize_enabled(os.environ, sys.argv):
+            self.after(50, self._minimize_native_or_legacy)
             return
+        self._minimize_legacy()
+
+    def _minimize_native_or_legacy(self) -> None:
+        if not self._native_minimize():
+            self._minimize_legacy()
+
+    def _minimize_legacy(self) -> None:
         self._saved_geometry = self.geometry()
         self._minimized = True
         self.overrideredirect(False)

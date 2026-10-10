@@ -385,27 +385,70 @@ def test_map_while_iconic_does_not_restore_window(app, monkeypatch):
     assert True in calls  # рамка снова убрана
 
 
-def test_minimize_uses_native_path_without_touching_frame(app, monkeypatch):
+def _pump(app, seconds=0.3):
+    import time
+
+    end = time.time() + seconds
+    while time.time() < end:
+        app.update()
+        time.sleep(0.01)
+
+
+def test_minimize_default_does_not_use_native_path(app, monkeypatch):
     if app._titlebar is None:
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    monkeypatch.delenv("MENEDGER_NATIVE_MINIMIZE", raising=False)
+    monkeypatch.setattr(guiapp.sys, "argv", ["app"])
+    calls = []
+    monkeypatch.setattr(app, "_native_minimize", lambda: calls.append(1) or True)
+    app.update()
+    app._minimize()
+    _pump(app)
+    assert calls == []
+    assert app._minimized is True
+    assert app.state() == "iconic"
+    app.deiconify()
+
+
+def test_minimize_native_path_is_deferred_and_skips_frame(app, monkeypatch):
+    if app._titlebar is None:
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    monkeypatch.setenv("MENEDGER_NATIVE_MINIMIZE", "1")
     calls = []
     monkeypatch.setattr(app, "overrideredirect", lambda flag=None: calls.append(flag))
-    monkeypatch.setattr(app, "_native_minimize", lambda: True)
+    native = []
+    monkeypatch.setattr(app, "_native_minimize", lambda: native.append(1) or True)
     app._minimize()
+    assert native == []  # отложено: не внутри обработчика клика
+    _pump(app)
+    assert native == [1]
     assert calls == []
     assert app._minimized is False
 
 
-def test_minimize_falls_back_when_native_path_unavailable(app, monkeypatch):
+def test_minimize_native_falls_back_to_legacy(app, monkeypatch):
     if app._titlebar is None:
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
-    app.update()
+    monkeypatch.setenv("MENEDGER_NATIVE_MINIMIZE", "1")
     monkeypatch.setattr(app, "_native_minimize", lambda: False)
-    app._minimize()
     app.update()
+    app._minimize()
+    _pump(app)
     assert app._minimized is True
     assert app.state() == "iconic"
     app.deiconify()
+
+
+@pytest.mark.parametrize(
+    "env, argv, expected",
+    [
+        ({}, ["app"], False),
+        ({"MENEDGER_NATIVE_MINIMIZE": "1"}, ["app"], True),
+        ({}, ["app", "--native-minimize"], True),
+    ],
+)
+def test_native_minimize_enabled_policy(env, argv, expected):
+    assert guiapp._native_minimize_enabled(env, argv) is expected
 
 
 @pytest.mark.parametrize(
