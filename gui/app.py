@@ -4269,7 +4269,7 @@ class AuditDialog(ttk.Toplevel):
                 tk.Label(
                     frame,
                     text=text,
-                    bg="#ffffff",
+                    bg=fill,  # фон текста = цвет карточки: без «выделения» подложкой (раздел 10.73)
                     fg=_NEUTRAL_TEXT,
                     font=("", 9),
                     padx=_px(8),

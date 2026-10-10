@@ -1763,7 +1763,8 @@ def test_problems_dialog_each_reason_is_its_own_pill(app):
         collect(dialog._feed)
         assert pills
         for pill in pills:
-            assert pill.cget("fg") == guiapp._NEUTRAL_TEXT and pill.cget("bg") == "#ffffff"
+            assert pill.cget("fg") == guiapp._NEUTRAL_TEXT
+            assert pill.cget("bg") == guiapp._NEUTRAL_FILL  # раздел 10.73: фон текста = цвет карточки
     finally:
         dialog.destroy()
 
