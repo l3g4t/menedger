@@ -837,6 +837,74 @@ def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
         window.destroy()
 
 
+def _pump(window, seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        window.update()
+        time.sleep(0.01)
+
+
+def test_window_is_invisible_while_minimized_and_revealed_after_paint_settles(monkeypatch):
+    """Раздел 10.62: как у генератора — окно не показывается недорисованным.
+    Свёрнуто -> `-alpha 0`; восстановлено -> ждём, пока прорисовка затихнет, и
+    только потом `-alpha 1`."""
+    if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    monkeypatch.setattr(guiapp.App, "_is_iconic", lambda self: iconic[0])
+    iconic = [False]
+    window = guiapp.App()
+    try:
+        _pump(window, 0.2)
+        assert float(window.attributes("-alpha")) == 1.0
+        iconic[0] = True
+        window.event_generate("<Unmap>")
+        _pump(window, 0.15)
+        assert float(window.attributes("-alpha")) == 0.0  # свёрнуто — невидимо
+        _pump(window, 0.3)
+        assert float(window.attributes("-alpha")) == 0.0  # и остаётся таким, пока свёрнуто
+        iconic[0] = False  # восстановили с панели задач
+        window._note_paint()
+        _pump(window, 0.05)
+        assert float(window.attributes("-alpha")) == 0.0  # прорисовка ещё идёт
+        _pump(window, 0.5)
+        assert float(window.attributes("-alpha")) == 1.0  # затихла — показали
+        assert window._restore_poll is None
+    finally:
+        window.destroy()
+
+
+def test_window_is_never_left_invisible_if_paint_never_settles(monkeypatch):
+    if guiapp._use_native_frame(guiapp.os.environ, guiapp.sys.argv):
+        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
+    monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    monkeypatch.setattr(guiapp.App, "_is_iconic", lambda self: iconic[0])
+    monkeypatch.setattr(guiapp.App, "_REVEAL_MAX_SECONDS", 0.3)
+    iconic = [True]
+    window = guiapp.App()
+    try:
+        _pump(window, 0.1)
+        window.event_generate("<Unmap>")
+        _pump(window, 0.1)
+        assert float(window.attributes("-alpha")) == 0.0
+        iconic[0] = False
+        deadline = time.time() + 1.5
+        while time.time() < deadline and float(window.attributes("-alpha")) != 1.0:
+            window._note_paint()  # прорисовка «не затихает» — сработать должен предел
+            window.update()
+            time.sleep(0.01)
+        assert float(window.attributes("-alpha")) == 1.0
+    finally:
+        window.destroy()
+
+
+def test_hide_on_restore_is_off_outside_windows_and_can_be_disabled(app, monkeypatch):
+    assert not app._hide_on_restore_enabled()  # не Windows
+    monkeypatch.setattr(guiapp.sys, "platform", "win32")
+    monkeypatch.setenv("MENEDGER_NO_HIDE_ON_RESTORE", "1")
+    assert not app._hide_on_restore_enabled()
+
+
 def test_corner_mode_policy():
     """Раздел 10.60: режимы скругления углов — по переменным окружения и флагам."""
     assert guiapp._corner_mode({}, []) == "layered"

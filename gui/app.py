@@ -815,6 +815,8 @@ class App(ttk.Window):
         self._chrome_images: dict[tuple, tk.PhotoImage] = {}
         self._maximized = False
         self._minimized = False
+        self._restore_poll: str | None = None  # опрос «окно восстановлено?» (раздел 10.62)
+        self._last_paint = 0.0
         self._saved_geometry: str | None = None
         self._titlebar: TitleBar | None = None
         self._grip: tk.Label | None = None
@@ -988,6 +990,8 @@ class App(ttk.Window):
 
         self._install_region_corners(self, lambda: self._maximized)
         self.bind("<Map>", self._on_map, add="+")
+        self.bind("<Unmap>", self._on_unmap, add="+")
+        self.bind_all("<Expose>", self._note_paint, add="+")
         self.after(10, self._apply_taskbar_style)
         self.after(120, self._focus_window)
 
@@ -1147,6 +1151,81 @@ class App(ttk.Window):
         except Exception as error:
             self._dlog(f"native minimize failed: {error!r}")
             return False
+
+    # --- восстановление с панели задач: невидимым, пока не отрисуется ---------
+
+    _REVEAL_QUIET_SECONDS = 0.08  # столько нет событий прорисовки — окно готово
+    _REVEAL_MAX_SECONDS = 2.0  # дольше невидимым не держим никогда
+
+    def _hide_on_restore_enabled(self) -> bool:
+        return (
+            sys.platform == "win32"
+            and not self._native_frame
+            and not os.environ.get("MENEDGER_NO_HIDE_ON_RESTORE")
+            and "--no-hide-on-restore" not in sys.argv
+        )
+
+    def _is_iconic(self) -> bool:
+        """Окно сейчас свёрнуто (на Windows — спросить у самой системы)."""
+        if sys.platform == "win32":
+            apis = _win_apis()
+            if apis is not None:
+                try:
+                    hwnd = apis[0].GetParent(self.winfo_id())
+                    if hwnd:
+                        import ctypes
+
+                        return bool(ctypes.windll.user32.IsIconic(hwnd))
+                except Exception:
+                    pass
+        return self._window_state() == "iconic"
+
+    def _note_paint(self, _event: tk.Event | None = None) -> None:
+        self._last_paint = time.time()
+
+    def _on_unmap(self, event: tk.Event) -> None:
+        """Окно свёрнуто — делаем его полностью прозрачным (`-alpha 0`), чтобы
+        при восстановлении с панели задач пользователь не видел, как оно
+        дорисовывается по частям (проблема — раздел 10.60). Показываем обратно
+        только когда прорисовка затихла (`_poll_restore`)."""
+        if event.widget is not self or not self._hide_on_restore_enabled():
+            return
+        if self._restore_poll is not None or not self._is_iconic():
+            return
+        try:
+            self.attributes("-alpha", 0.0)
+        except tk.TclError:
+            return
+        self._dlog("свёрнуто: окно сделано невидимым до восстановления")
+        self._restore_poll = self.after(40, self._poll_restore, None)
+
+    def _poll_restore(self, restored_at: float | None) -> None:
+        """Пока окно свёрнуто — ждём; после восстановления — ждём тишины
+        прорисовки (но не дольше `_REVEAL_MAX_SECONDS`) и показываем окно. Любая
+        ошибка заканчивается показом окна: невидимое навсегда хуже недорисованного."""
+        self._restore_poll = None
+        try:
+            now = time.time()
+            if restored_at is None:
+                if self._is_iconic():
+                    self._restore_poll = self.after(40, self._poll_restore, None)
+                    return
+                restored_at = now
+                self._last_paint = now
+                self._dlog("восстановлено: жду, пока окно отрисуется")
+            quiet = now - self._last_paint >= self._REVEAL_QUIET_SECONDS
+            if quiet or now - restored_at >= self._REVEAL_MAX_SECONDS:
+                self.attributes("-alpha", 1.0)
+                self._dlog(f"окно показано через {(now - restored_at) * 1000:.0f} мс после восстановления")
+                return
+            self._restore_poll = self.after(25, self._poll_restore, restored_at)
+        except tk.TclError:
+            pass
+        except Exception:
+            try:
+                self.attributes("-alpha", 1.0)
+            except tk.TclError:
+                pass
 
     def _on_map(self, event: tk.Event) -> None:
         if event.widget is self and self._minimized:
