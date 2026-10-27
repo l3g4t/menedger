@@ -136,5 +136,7 @@ def test_pyinstaller_spec_bundles_the_wordlist():
     """Файл данных не виден статическому анализу импортов: без записи в datas
     его не будет в .exe, и проверка по rockyou молча перестанет работать (10.31)."""
     spec = (ROOT / "packaging" / "menedger.spec").read_text(encoding="utf-8")
-    assert "common_passwords.txt.gz" in spec and "assistant/data" in spec
-    assert (ROOT / "assistant" / "data" / "common_passwords.txt.gz").is_file()
+    # в datas попадают все файлы папки данных (rockyou и словари анализатора, 9.7)
+    assert '"assistant" / "data"' in spec and "assistant/data" in spec and ".gz" in spec and ".txt" in spec
+    for name in ("common_passwords.txt.gz", "words_en.txt.gz", "words_ru.txt.gz", "ru_common.txt"):
+        assert (ROOT / "assistant" / "data" / name).is_file()

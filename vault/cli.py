@@ -48,10 +48,10 @@ from vault.concurrency import (
 )
 from vault.storage import load_vault_file, save_vault_file
 
-from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, analyze_vault, format_report
+from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, analyze_vault, check_password, format_report
+from assistant.analyzer import RATE_FAST_HASH, RATE_ONLINE, RATE_SLOW_HASH, analyze, describe_match
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
 from assistant.generator import explain_password, generate_password
-from assistant.strength import estimate_entropy_bits, is_common_password
 
 
 def _prompt_secret(prompt: str = "Мастер-пароль: ") -> str:
@@ -147,13 +147,16 @@ def _prompt_new_master_password(prompt: str, confirm_prompt: str) -> str:
     # предупреждает и просит явно подтвердить решение, той же формой
     # y/N-подтверждения, что уже использует cmd_delete для необратимых
     # действий.
-    if is_common_password(master_password) or estimate_entropy_bits(master_password) < WEAK_ENTROPY_THRESHOLD_BITS:
+    analysis, weak = check_password(master_password)
+    if weak:
         print(
-            f"Внимание: мастер-пароль слабый (оценка энтропии: "
-            f"~{estimate_entropy_bits(master_password):.0f} бит, порог — "
+            f"Внимание: мастер-пароль слабый (оценка анализатора: "
+            f"~{analysis.bits:.0f} бит, порог — "
             f"{WEAK_ENTROPY_THRESHOLD_BITS:.0f}). Он защищает ВСЁ хранилище целиком.",
             file=sys.stderr,
         )
+        if analysis.warning:
+            print(analysis.warning, file=sys.stderr)
         answer = input("Всё равно продолжить с этим паролем? [y/N]: ").strip().lower()
         if answer not in ("y", "yes", "да"):
             print("Отменено.")
@@ -403,6 +406,34 @@ def cmd_generate(args: argparse.Namespace) -> None:
     print(explain_password(password), file=sys.stderr)
 
 
+def cmd_analyze(args: argparse.Namespace) -> None:
+    """Подробно оценить стойкость пароля (assistant.analyzer, раздел 9.7).
+
+    Не требует хранилища и мастер-пароля. Пароль вводится скрыто (getpass), а в
+    отчёт попадают только позиции и типы найденных шаблонов — не сами символы."""
+    password = getpass.getpass("Пароль для анализа: ")
+    if not password:
+        print("Пустой пароль.", file=sys.stderr)
+        raise SystemExit(1)
+    analysis = analyze(password, [args.username, args.site])
+    print(f"Длина: {len(password)} симв. Оценка: ~{analysis.bits:.0f} бит.")
+    print("Время подбора (в среднем порядок величины):")
+    print(f"  - онлайн, 100 попыток/с:                 {analysis.crack_time(RATE_ONLINE)}")
+    print(f"  - файл хранилища (Argon2id), 10 тыс./с:  {analysis.crack_time(RATE_SLOW_HASH)}")
+    print(f"  - утёкшая база, быстрые хеши, 10 млрд/с: {analysis.crack_time(RATE_FAST_HASH)}")
+    if analysis.leaked:
+        print("Пароль есть в списке утёкших паролей.")
+    found = [m for m in analysis.matches]
+    if found:
+        print("Как его разберёт атакующий:")
+        for match in found:
+            print(f"  - {describe_match(match)}")
+    if analysis.warning:
+        print(f"Что не так: {analysis.warning}")
+    for suggestion in analysis.suggestions:
+        print(f"Совет: {suggestion}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vault", description="Локальный менеджер паролей")
     parser.add_argument(
@@ -460,6 +491,13 @@ def build_parser() -> argparse.ArgumentParser:
         "audit", help="советник по безопасности: повторные/слабые/устаревшие пароли"
     )
     p_audit.set_defaults(func=cmd_audit)
+
+    p_analyze = subparsers.add_parser(
+        "analyze", help="подробно оценить стойкость пароля (слова, ряды клавиш, даты, время подбора)"
+    )
+    p_analyze.add_argument("--username", default="", help="логин (пароль, похожий на него, слабее)")
+    p_analyze.add_argument("--site", default="", help="название сайта")
+    p_analyze.set_defaults(func=cmd_analyze)
 
     p_generate = subparsers.add_parser("generate", help="сгенерировать надёжный пароль")
     p_generate.add_argument(

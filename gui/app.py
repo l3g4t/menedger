@@ -39,13 +39,14 @@ from tkinter import filedialog, messagebox, simpledialog
 import ttkbootstrap as ttk
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, AdvisorReport, analyze_vault
+from assistant.advisor import AdvisorReport, analyze_vault, check_password
+from assistant.analyzer import analyze as analyze_password
+from assistant.analyzer import summary as analysis_summary
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
-from assistant.generator import explain_password, generate_password
+from assistant.generator import generate_password
 from assistant.llm import Assistant
 from assistant.offline import plural as ru_plural
 from assistant.prompt import context_from_report, redact_secrets
-from assistant.strength import estimate_entropy_bits, is_common_password
 from assistant.wordlist import preload as preload_wordlist
 from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
@@ -1855,10 +1856,13 @@ class App(ttk.Window):
         icons = sorted(p.name for p in ICONS_DIR.glob("*.png")) if ICONS_DIR.exists() else []
         print(f"ICONS_DIR={ICONS_DIR} exists={ICONS_DIR.exists()} files={len(icons)}", file=sys.stderr)
         try:
-            from assistant.wordlist import wordlist_info
+            from assistant.analyzer import analyze as _analyze
+            from assistant.wordlist import default_dictionaries, wordlist_info
 
             count, sources = wordlist_info()
             print(f"WORDLIST passwords={count} sources={sources}", file=sys.stderr)
+            sizes = {d.name: d.size for d in default_dictionaries()}
+            print(f"DICTIONARIES {sizes} analyzer_bits={_analyze('Qwerty2024!').bits:.1f}", file=sys.stderr)
         except Exception as exc:  # диагностика не должна ронять приложение
             print(f"WORDLIST error: {exc!r}", file=sys.stderr)
         print(f"кэш иконок: {sorted(self._icons)}", file=sys.stderr)
@@ -2596,7 +2600,7 @@ class App(ttk.Window):
         )
         caption.pack(fill="x", anchor="w", pady=(_px(8), 0))
 
-        def update(password: str) -> None:
+        def update(password: str, user_inputs=()) -> None:
             if not password:
                 for segment in segments:
                     segment.configure(bg=_NEUTRAL_BORDER)
@@ -2604,29 +2608,26 @@ class App(ttk.Window):
                 caption.configure(text="")
                 return
 
-            bits = estimate_entropy_bits(password)
+            # Оценка — анализатор шаблонов (assistant/analyzer.py, раздел 9.7), а не
+            # формула «длина × алфавит»: она не видит слов, рядов клавиш и дат.
+            analysis = analyze_password(password, user_inputs)
+            bits = analysis.bits
             filled, label, color = _STRENGTH_LEVELS[0][1], _STRENGTH_LEVELS[0][2], _STRENGTH_LEVELS[0][3]
             for threshold, level_filled, level_label, level_color in _STRENGTH_LEVELS:
                 if bits >= threshold:
                     filled, label, color = level_filled, level_label, level_color
+            if analysis.leaked:
+                # Пароль из списка утёкших паролей (rockyou, раздел 9.6) подбирается
+                # мгновенно, как бы стойко он ни выглядел: шкала не должна показывать
+                # «Очень высокая» там, где диалог потом предупредит о слабом пароле.
+                filled, label, color = _STRENGTH_LEVELS[0][1], "В списке утечек", _STRENGTH_LEVELS[0][3]
 
             for index, segment in enumerate(segments):
                 segment.configure(bg=color if index < filled else _NEUTRAL_BORDER)
 
-            text = explain_password(password)
-            if is_common_password(password):
-                # Пароль из списка утёкших паролей (rockyou, раздел 9.6) подбирается
-                # мгновенно, как бы стойко он ни выглядел по формуле энтропии:
-                # шкала не должна показывать «Очень высокая» там, где диалог
-                # потом предупредит, что пароль слабый.
-                filled, label, color = _STRENGTH_LEVELS[0][1], "В списке утечек", _STRENGTH_LEVELS[0][3]
-                text = "Этот пароль есть в списке утёкших паролей (rockyou) — его подберут мгновенно."
-                for index, segment in enumerate(segments):
-                    segment.configure(bg=color if index < filled else _NEUTRAL_BORDER)
-
             badge_bg = _mix(color, "#ffffff", 0.85)
             badge.configure(text=label, background=badge_bg, foreground=color)
-            caption.configure(text=text)
+            caption.configure(text=analysis_summary(analysis))
 
         return update
 
@@ -3647,6 +3648,8 @@ class EntryDialog(ttk.Toplevel):
             form, textvariable=self._strength_var, wraplength=_px(320), bootstyle="secondary"
         ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(_px(6), 0))
         self._password_var.trace_add("write", self._update_strength)
+        self._site_var.trace_add("write", self._update_strength)
+        self._username_var.trace_add("write", self._update_strength)
 
         buttons = ttk.Frame(self, padding=(_px(16), 0, _px(16), _px(16)))
         buttons.pack(fill="x")
@@ -3671,7 +3674,8 @@ class EntryDialog(ttk.Toplevel):
 
     def _update_strength(self, *_args: object) -> None:
         password = self._password_var.get()
-        self._strength_var.set(explain_password(password) if password else "")
+        analysis = analyze_password(password, [self._site_var.get().strip(), self._username_var.get().strip()])
+        self._strength_var.set(analysis_summary(analysis))
 
     def _on_save(self) -> None:
         site = self._site_var.get().strip()
@@ -3986,7 +3990,7 @@ class CreateVaultDialog(ttk.Toplevel):
         # блокирует создание — только предупреждает: решение оставлено
         # за пользователем (как у советника — раздел 9.3, отчёт не
         # запрещает ничего сам по себе).
-        if is_common_password(password) or estimate_entropy_bits(password) < WEAK_ENTROPY_THRESHOLD_BITS:
+        if check_password(password)[1]:
             proceed = messagebox.askyesno(
                 "Слабый мастер-пароль",
                 "Этот пароль легко подобрать (см. оценку выше), а он "

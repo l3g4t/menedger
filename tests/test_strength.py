@@ -32,7 +32,14 @@ def test_alphabet_size_all_known_classes():
 
 def test_alphabet_size_unknown_characters_add_small_constant():
     # символ вне известных классов (не-ASCII) — консервативная добавка
-    assert alphabet_size("abcдеё") == len(LOWERCASE) + 1
+    assert alphabet_size("abc😀") == len(LOWERCASE) + 1
+
+
+def test_alphabet_size_counts_cyrillic_as_its_own_class():
+    # русский пароль — не «экзотика» (раздел 9.7): 33 строчные буквы
+    assert alphabet_size("пароль") == 33
+    assert alphabet_size("Пароль") == 66
+    assert alphabet_size("abcдеё") == len(LOWERCASE) + 33
 
 
 def test_estimate_entropy_bits_empty_password_is_zero():

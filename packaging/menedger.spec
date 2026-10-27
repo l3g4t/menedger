@@ -74,7 +74,11 @@ project_root = Path(SPECPATH).resolve().parent
 # Список утёкших паролей (assistant/wordlist.py, CLAUDE.md раздел 9.6) читается как
 # файл данных, а не импортируется — без явной записи в datas его не будет в .exe, и
 # проверка по rockyou молча перестанет работать (тот же урок, что с иконками, 10.31).
-datas.append((str(project_root / "assistant" / "data" / "common_passwords.txt.gz"), "assistant/data"))
+# Туда же — словари анализатора паролей (assistant/analyzer.py, раздел 9.7): английские
+# и русские слова и список частых русских слов. Берём все файлы папки, кроме README.
+for data_file in sorted((project_root / "assistant" / "data").iterdir()):
+    if data_file.suffix in (".gz", ".txt"):
+        datas.append((str(data_file), "assistant/data"))
 datas.append((str(project_root / "gui" / "icon.png"), "gui"))
 datas.append((str(project_root / "gui" / "icon.ico"), "gui"))
 

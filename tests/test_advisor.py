@@ -73,7 +73,7 @@ def test_detects_low_entropy_password():
     report = analyze_vault(data)
 
     assert len(report.weak_entries) == 1
-    assert any("энтропии" in reason for reason in report.weak_entries[0].reasons)
+    assert any("стойкости" in reason for reason in report.weak_entries[0].reasons)
 
 
 def test_detects_old_password():

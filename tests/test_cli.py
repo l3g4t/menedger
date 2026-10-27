@@ -454,3 +454,15 @@ def test_change_master_warns_about_weak_new_password(tmp_path, monkeypatch):
 def test_change_master_on_missing_vault_fails_cleanly(tmp_path, monkeypatch):
     code = _run(monkeypatch, ["--path", str(tmp_path / "none.vault"), "change-master"], secrets=[MASTER])
     assert code != 0
+
+
+def test_analyze_command_reports_without_revealing_the_password(monkeypatch, capsys):
+    code = _run(monkeypatch, ["analyze", "--username", "alice"], secrets=["Qwerty2024!"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Оценка" in out and "Argon2id" in out and "год" in out
+    assert "Qwerty" not in out and "2024" not in out
+
+
+def test_analyze_command_rejects_empty_password(monkeypatch, capsys):
+    assert _run(monkeypatch, ["analyze"], secrets=[""]) == 1

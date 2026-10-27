@@ -10,8 +10,8 @@ assistant.advisor — эвристический советник по безо�
 
 Ищет три типовых проблемы:
     1. Повторно используемые пароли между разными записями.
-    2. Слабые пароли (частые пароли, содержащие логин/сайт, низкая
-       оценка энтропии — см. assistant.strength).
+    2. Слабые пароли (утёкшие пароли, содержащие логин/сайт, низкая оценка
+       анализатора шаблонов — см. assistant.analyzer, раздел 9.7).
     3. "Устаревшие" пароли — не менявшиеся дольше порога.
 """
 
@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .strength import estimate_entropy_bits, is_common_password
+from .analyzer import Analysis, analyze
 
 # Порог "слабого" пароля в битах энтропии. ~50 бит — грубый ориентир:
 # 8-символьный пароль из большого алфавита (буквы + цифры + спецсимволы,
@@ -65,34 +65,62 @@ def _entry_label(entry: dict) -> str:
     return f"{entry['site']} ({entry['username']})"
 
 
+def is_weak(analysis: Analysis) -> bool:
+    """Слабый ли пароль: он есть в списке утёкших или анализатор оценивает его
+    ниже порога (`WEAK_ENTROPY_THRESHOLD_BITS`). Единая планка для записей,
+    мастер-пароля (GUI и CLI) и шкалы надёжности."""
+    return analysis.leaked or analysis.bits < WEAK_ENTROPY_THRESHOLD_BITS
+
+
+def check_password(password: str, user_inputs=()) -> tuple[Analysis, bool]:
+    """(результат анализа, слабый ли пароль) — для мест, где нужно и то и другое."""
+    analysis = analyze(password, user_inputs)
+    return analysis, is_weak(analysis)
+
+
+_PATTERN_NAMES = {
+    "dictionary": "слово из словаря",
+    "spatial": "ряд клавиш",
+    "sequence": "последовательность символов",
+    "repeat": "повтор",
+    "year": "год",
+    "date": "дата",
+}
+
+
 def _weakness_reasons(entry: dict) -> list[str]:
     """Собрать список причин, по которым пароль записи считается слабым
-    (пустой список — пароль не вызвал нареканий)."""
+    (пустой список — пароль не вызвал нареканий). Использует анализатор
+    (assistant/analyzer.py, раздел 9.7): он знает не только список утёкших
+    паролей, но и слова, ряды клавиш, повторы, годы, замены вида `@`→`a`."""
     password = entry["password"]
     reasons: list[str] = []
 
-    if is_common_password(password):
-        reasons.append("входит в список самых часто встречающихся (утёкших) паролей")
-
     username = entry.get("username", "")
     site = entry.get("site", "")
-    lowered = password.lower()
-
-    if username and username.lower() in lowered:
-        reasons.append("содержит имя пользователя/логин")
-
     # Берём только "имя" сайта до первой точки (example из example.com),
     # чтобы не ругаться на пароль из-за случайного совпадения с ".com".
     site_name = site.split(".")[0] if site else ""
+    analysis = analyze(password, [username, site_name if len(site_name) > 3 else ""])
+
+    if analysis.leaked:
+        reasons.append("входит в список самых часто встречающихся (утёкших) паролей")
+
+    lowered = password.lower()
+    if username and username.lower() in lowered:
+        reasons.append("содержит имя пользователя/логин")
     if site_name and len(site_name) > 3 and site_name.lower() in lowered:
         reasons.append("содержит название сайта")
 
-    bits = estimate_entropy_bits(password)
-    if bits < WEAK_ENTROPY_THRESHOLD_BITS:
+    if analysis.bits < WEAK_ENTROPY_THRESHOLD_BITS:
+        found = sorted({_PATTERN_NAMES[p] for p in analysis.patterns if p in _PATTERN_NAMES})
+        detail = f"; найдено: {', '.join(found)}" if found else ""
         reasons.append(
-            f"низкая оценка энтропии (~{bits:.0f} бит, порог "
-            f"{WEAK_ENTROPY_THRESHOLD_BITS:.0f})"
+            f"низкая оценка стойкости (~{analysis.bits:.0f} бит, порог "
+            f"{WEAK_ENTROPY_THRESHOLD_BITS:.0f}){detail}"
         )
+        if analysis.warning and not analysis.leaked:
+            reasons.append(analysis.warning.rstrip("."))
 
     return reasons
 
