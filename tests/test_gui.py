@@ -1815,3 +1815,102 @@ def test_view_dialog_native_frame_header_is_white_with_dark_blue_title(app):
         assert "цук" in dialog._header_title.cget("text")
     finally:
         dialog.destroy()
+
+
+# --- Очистка буфера обмена через 20 с в любом состоянии программы -------------
+
+
+def _wait(app, seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        app.update()
+        time.sleep(0.01)
+
+
+def _clipboard(app):
+    try:
+        return app.clipboard_get()
+    except tk.TclError:
+        return ""
+
+
+def test_clipboard_is_cleared_after_delay(app, monkeypatch):
+    monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 150)
+    app._copy_to_clipboard("Secret123!")
+    assert _clipboard(app) == "Secret123!"
+    _wait(app, 0.5)
+    assert _clipboard(app) == ""
+
+
+def test_clipboard_is_cleared_even_when_vault_is_locked(app, monkeypatch):
+    """Таймер живёт на главном окне: блокировка его не отменяет."""
+    monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 200)
+    _create_vault(app, monkeypatch)
+    app._copy_to_clipboard("Secret123!")
+    app._on_lock()
+    _wait(app, 0.6)
+    assert _clipboard(app) == ""
+
+
+def test_clipboard_is_cleared_after_dialog_that_copied_is_closed(app, monkeypatch):
+    monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 200)
+    generator = guiapp.GeneratorDialog(app, on_copy=app._copy_to_clipboard)
+    generator.update()
+    generator._on_copy_click()
+    assert _clipboard(app) != ""
+    generator.destroy()
+    _wait(app, 0.6)
+    assert _clipboard(app) == ""
+
+
+def test_clipboard_does_not_erase_what_user_copied_later(app, monkeypatch):
+    monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 150)
+    app._copy_to_clipboard("Secret123!")
+    app.clipboard_clear()
+    app.clipboard_append("чужой текст")
+    _wait(app, 0.5)
+    assert _clipboard(app) == "чужой текст"
+
+
+def test_new_copy_restarts_the_countdown(app, monkeypatch):
+    """Старый таймер не должен стереть свежее значение раньше срока."""
+    monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 400)
+    app._copy_to_clipboard("Secret123!")
+    _wait(app, 0.25)
+    app._copy_to_clipboard("Secret123!")  # то же значение, отсчёт с начала
+    _wait(app, 0.25)  # с первого копирования прошло 0.5 с > 0.4 с
+    assert _clipboard(app) == "Secret123!"
+    _wait(app, 0.4)
+    assert _clipboard(app) == ""
+
+
+def test_ctrl_c_in_entry_is_cleared_too(app, monkeypatch):
+    """Копирование из поля ввода (например, показанного мастер-пароля)."""
+    monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 200)
+    _create_vault(app, monkeypatch)
+    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog.update()
+    entry = _entries(dialog)[0]
+    entry.config(show="")
+    entry.insert(0, "Secret123!")
+    entry.selection_range(0, "end")
+    entry.focus_force()
+    entry.event_generate("<<Copy>>")
+    _wait(app, 0.1)
+    assert _clipboard(app) == "Secret123!"
+    _wait(app, 0.5)
+    assert _clipboard(app) == ""
+    dialog.destroy()
+
+
+def test_closing_the_app_clears_clipboard_immediately(app, monkeypatch):
+    app._copy_to_clipboard("Secret123!")
+    cleared = []
+    original_clear = app.clipboard_clear
+    monkeypatch.setattr(app, "clipboard_clear", lambda: (cleared.append(1), original_clear()))
+    with monkeypatch.context() as patch:
+        patch.setattr(guiapp.ttk.Window, "destroy", lambda self: None)  # окно не уничтожаем
+        app.destroy()
+    assert cleared
+    assert _clipboard(app) == ""
+    assert app._clipboard_timer is None

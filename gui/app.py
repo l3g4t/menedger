@@ -821,6 +821,10 @@ class App(ttk.Window):
         self._rounded_images: list[ImageTk.PhotoImage] = []
         self._rounded_style_names: set[str] = set()
 
+        # Очистка буфера обмена через 20 с (_arm_clipboard_clear).
+        self._clipboard_timer: str | None = None
+        self._clipboard_value: str | None = None
+
         self._setup_custom_styles()
         self._install_text_editing_shortcuts()
 
@@ -1781,6 +1785,10 @@ class App(ttk.Window):
         """Ctrl+C/V/X/A при русской раскладке и контекстное меню (правая
         кнопка) у всех полей ввода приложения (раздел 10.56)."""
         self.bind_all("<Control-KeyPress>", self._on_control_key, add="+")
+        # Всё, что скопировано из полей ввода (в том числе показанный
+        # «глазом» мастер-пароль), тоже очищается через 20 с.
+        self.bind_all("<<Copy>>", self._on_clipboard_event, add="+")
+        self.bind_all("<<Cut>>", self._on_clipboard_event, add="+")
         for widget_class in ("TEntry", "Entry"):
             self.bind_class(widget_class, "<Button-3>", self._show_edit_menu, add="+")
 
@@ -3209,15 +3217,68 @@ class App(ttk.Window):
     def _copy_to_clipboard(self, value: str) -> None:
         self.clipboard_clear()
         self.clipboard_append(value)
-        self.after(CLIPBOARD_CLEAR_DELAY_MS, self._maybe_clear_clipboard, value)
+        self._arm_clipboard_clear(value)
 
-    def _maybe_clear_clipboard(self, expected_value: str) -> None:
+    def _arm_clipboard_clear(self, value: str) -> None:
+        """Запланировать очистку буфера через `CLIPBOARD_CLEAR_DELAY_MS`.
+
+        Единая точка для ВСЕХ записей в буфер из программы: кнопки
+        «копировать», копирование из полей ввода (Ctrl+C, меню правой
+        кнопки), пузыри чата. Таймер живёт на главном окне, а не на
+        диалоге, поэтому закрытие диалога, блокировка и сворачивание его
+        не отменяют. Новая запись в буфер переводит отсчёт на себя: старый
+        таймер отменяется, иначе он стёр бы свежее значение раньше срока."""
+        if self._clipboard_timer is not None:
+            try:
+                self.after_cancel(self._clipboard_timer)
+            except tk.TclError:
+                pass
+        self._clipboard_value = value
+        self._clipboard_timer = self.after(CLIPBOARD_CLEAR_DELAY_MS, self._maybe_clear_clipboard)
+
+    def _maybe_clear_clipboard(self, *_args: object) -> None:
+        """Очистить буфер, если там всё ещё то, что положила программа (не
+        стирать то, что пользователь скопировал сам, уже после нас)."""
+        self._clipboard_timer = None
+        expected, self._clipboard_value = self._clipboard_value, None
+        if expected is None:
+            return
         try:
             current = self.clipboard_get()
         except tk.TclError:
             return  # буфер обмена уже пуст
-        if current == expected_value:
+        if current == expected:
             self.clipboard_clear()
+
+    def _on_clipboard_event(self, event: tk.Event) -> None:
+        """Ctrl+C / «Копировать» / «Вырезать» в поле ввода: класс виджета уже
+        положил текст в буфер (привязка к `all` срабатывает после класса),
+        читаем его на простое и берём под ту же очистку."""
+        def arm() -> None:
+            try:
+                value = self.clipboard_get()
+            except tk.TclError:
+                return
+            if value:
+                self._arm_clipboard_clear(value)
+
+        self.after_idle(arm)
+
+    def destroy(self) -> None:
+        """При закрытии программы буфер чистится сразу, не дожидаясь таймера:
+        после выхода таймера не будет, а ОС (Windows) оставляет скопированное
+        в буфере и после завершения процесса."""
+        if self._clipboard_timer is not None:
+            try:
+                self.after_cancel(self._clipboard_timer)
+            except tk.TclError:
+                pass
+            self._clipboard_timer = None
+        try:
+            self._maybe_clear_clipboard()
+        except tk.TclError:
+            pass
+        super().destroy()
 
     # ------------------------------------------------------------------
     # Советник по безопасности и генератор паролей
@@ -5067,8 +5128,7 @@ class AssistantDialog(ttk.Toplevel):
         return "break"
 
     def _copy_text(self, text: str) -> None:
-        self.clipboard_clear()
-        self.clipboard_append(text)
+        self._parent._copy_to_clipboard(text)
 
     def _add_message(self, role: str, text: str, time_text: str) -> None:
         """Добавить пузырь. Индикатор «печатает…» убирается и ответ рисуется в
