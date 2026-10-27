@@ -72,7 +72,7 @@ def _weakness_reasons(entry: dict) -> list[str]:
     reasons: list[str] = []
 
     if is_common_password(password):
-        reasons.append("входит в список самых часто встречающихся паролей")
+        reasons.append("входит в список самых часто встречающихся (утёкших) паролей")
 
     username = entry.get("username", "")
     site = entry.get("site", "")

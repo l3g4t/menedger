@@ -11,7 +11,8 @@ assistant.strength — общая логика оценки "силы" паро�
 ВАЖНОЕ ОГРАНИЧЕНИЕ (стоит проговорить на защите): это НЕ полноценный
 анализ стойкости пароля вроде zxcvbn. Мы не детектируем произвольные
 словарные слова или клавиатурные паттерны в общем виде — только
-конкретный небольшой список самых частых паролей (COMMON_PASSWORDS) и
+список самых частых утёкших паролей (COMMON_PASSWORDS и большой файл,
+assistant/wordlist.py, раздел 9.6) и
 вхождение логина/сайта в сам пароль. Формула энтропии ниже предполагает,
 что пароль — это НЕЗАВИСИМЫЕ СЛУЧАЙНЫЕ символы из своего алфавита; для
 пароля, придуманного человеком (а не сгенерированного нами), это
@@ -24,6 +25,8 @@ from __future__ import annotations
 
 import math
 import string
+
+from .wordlist import default_wordlist
 
 LOWERCASE = string.ascii_lowercase  # 26 символов
 UPPERCASE = string.ascii_uppercase  # 26 символов
@@ -82,5 +85,7 @@ def estimate_entropy_bits(password: str) -> float:
 
 
 def is_common_password(password: str) -> bool:
-    """Проверить пароль по небольшому списку самых частых утёкших паролей."""
-    return password.lower() in COMMON_PASSWORDS
+    """Проверить пароль по спискам утёкших паролей: короткому встроенному в код
+    (`COMMON_PASSWORDS`) и большому списку из файла — первый миллион rockyou.txt
+    и, если подключён, пользовательский (`assistant.wordlist`, раздел 9.6)."""
+    return password.lower() in COMMON_PASSWORDS or password in default_wordlist()

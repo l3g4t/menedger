@@ -46,6 +46,7 @@ from assistant.llm import Assistant
 from assistant.offline import plural as ru_plural
 from assistant.prompt import context_from_report, redact_secrets
 from assistant.strength import estimate_entropy_bits, is_common_password
+from assistant.wordlist import preload as preload_wordlist
 from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
 from vault.crypto import (
     InvalidMasterPasswordError,
@@ -960,6 +961,10 @@ class App(ttk.Window):
         self._clipboard_value: str | None = None
         self._clipboard_private = False  # положено через Win32 (без истории Win+V)
 
+        # Список утёкших паролей (assistant/wordlist.py, раздел 9.6) грузится в фоне ~1 с,
+        # чтобы первая проверка пароля не подвисала.
+        preload_wordlist()
+
         self._setup_custom_styles()
         self._install_text_editing_shortcuts()
 
@@ -1849,6 +1854,13 @@ class App(ttk.Window):
         )
         icons = sorted(p.name for p in ICONS_DIR.glob("*.png")) if ICONS_DIR.exists() else []
         print(f"ICONS_DIR={ICONS_DIR} exists={ICONS_DIR.exists()} files={len(icons)}", file=sys.stderr)
+        try:
+            from assistant.wordlist import wordlist_info
+
+            count, sources = wordlist_info()
+            print(f"WORDLIST passwords={count} sources={sources}", file=sys.stderr)
+        except Exception as exc:  # диагностика не должна ронять приложение
+            print(f"WORDLIST error: {exc!r}", file=sys.stderr)
         print(f"кэш иконок: {sorted(self._icons)}", file=sys.stderr)
         existing = set(self.tk.splitlist(self.tk.call("image", "names")))
         found = bad = 0

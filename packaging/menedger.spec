@@ -71,6 +71,10 @@ project_root = Path(SPECPATH).resolve().parent
 # поэтому файл нужно добавить в datas явно, иначе внутри собранного .exe
 # его просто не окажется и окно останется без иконки (без ошибки — файл
 # при отсутствии просто не подключается, см. ICON_PATH.exists() в app.py).
+# Список утёкших паролей (assistant/wordlist.py, CLAUDE.md раздел 9.6) читается как
+# файл данных, а не импортируется — без явной записи в datas его не будет в .exe, и
+# проверка по rockyou молча перестанет работать (тот же урок, что с иконками, 10.31).
+datas.append((str(project_root / "assistant" / "data" / "common_passwords.txt.gz"), "assistant/data"))
 datas.append((str(project_root / "gui" / "icon.png"), "gui"))
 datas.append((str(project_root / "gui" / "icon.ico"), "gui"))
 
