@@ -875,6 +875,23 @@ _MV_RED = "#e5806a"
 _MV_AMBER = "#d9a15f"
 _MV_AVATARS = ("#9a5b3c", "#3f5f86", "#2e4a66", "#7a6a3a", "#4a4a5e", "#3c6b5a", "#5a4a66")
 _MV_TAG_COLORS = ("#6fa3d8", "#d9a15f", "#7db58f", "#b58fc4", "#d98a8a", "#8fc4c4", "#c4c48f", "#8f9fc4")
+_MV_FIELD_FILL = "#0a1825"  # поля формы изменения записи (раздел 10.80)
+_MV_FIELD_LINE = "#293e56"
+_MV_NOTE_LINE = "#21344d"
+_MV_FOCUS_LINE = "#7a94b3"
+_MV_AMBER_TEXT = "#e7a25e"
+_MV_AMBER_BORDER = "#5b4a36"
+_MV_CHIP_LINE2 = "#233753"
+_MV_DASH = "#27435f"
+_MV_EDIT_TITLE = "#f4f8f9"
+_MV_EDIT_TEXT = "#eaf2fb"
+_MV_LABEL = "#8a9caf"
+_MV_SAVE_TEXT = "#0a1724"
+_MV_CANCEL_LINE = "#283f5a"
+_MV_HINT = "#8d9db3"
+_MV_SEP_EDIT = "#1c2d42"
+_MV_DROP_LINE = "#1d3347"
+_MV_DOT = "\u2219"  # «∙» — точка в поле пароля
 _MV_SEARCH_HINT = "Поиск"
 _MV_GROUP_TITLES = {"today": "Сегодня", "week": "На этой неделе", "earlier": "Ранее"}
 
@@ -922,6 +939,7 @@ class _Hits:
     def __init__(self, canvas: tk.Canvas) -> None:
         self.canvas = canvas
         self.items: list[tuple[float, float, float, float, Callable[[], None]]] = []
+        self.hit = False  # попал ли последний щелчок в кликабельную область
         canvas.bind("<Button-1>", self._click, add="+")
         canvas.bind("<Motion>", self._motion, add="+")
 
@@ -940,6 +958,7 @@ class _Hits:
 
     def _click(self, event: tk.Event) -> None:
         command = self._find(event)
+        self.hit = command is not None
         if command is not None:
             self.canvas.focus_set()
             command()
@@ -971,6 +990,20 @@ class MainView(tk.Frame):
         self._search_active = False
         self._pending: dict[str, str] = {}
         self._search_window: int | None = None
+        # форма изменения записи (раздел 10.80)
+        self.editing = False
+        self._edit_entry: dict | None = None  # None — новая запись
+        self._edit_orig: dict = {}
+        self._edit_tags: list[str] = []
+        self._edit_pw_visible = False
+        self._edit_entries: dict[str, tk.Entry] = {}
+        self._edit_items: dict[str, int] = {}
+        self._edit_used: set[str] = set()
+        self._ev: dict[str, tk.StringVar] = {}
+        self._focus: str | None = None
+        self._tag_input_open = False
+        self._tag_choice = 0
+        self._dot_font_cache = None
 
         line = max(1, _px(1))
         self.sidebar = tk.Canvas(self, width=_px(224), bg=_MV_SIDEBAR_BG, bd=0, highlightthickness=0)
@@ -989,6 +1022,7 @@ class MainView(tk.Frame):
 
         self._sidebar_hits, self._head_hits = _Hits(self.sidebar), _Hits(self.head)
         self._list_hits, self._detail_hits = _Hits(self.list), _Hits(self.detail)
+        self.detail.bind("<Button-1>", self._detail_click_miss, add="+")
 
         self._search_entry = tk.Entry(
             self.sidebar,
@@ -1170,6 +1204,9 @@ class MainView(tk.Frame):
         """Перечитать `app.data` и перерисовать всё; открытая запись остаётся открытой."""
         target = self.selected
         entries = self._entries()
+        if self.editing and self._edit_entry is not None and not any(e is self._edit_entry for e in entries):
+            same = [e for e in entries if _entry_key(e) == _entry_key(self._edit_entry)]
+            self._edit_entry = same[0] if same else self._edit_entry
         if target is not None and not any(e is target for e in entries):
             same = [e for e in entries if _entry_key(e) == _entry_key(target)]
             target = same[0] if same else None
@@ -1188,6 +1225,12 @@ class MainView(tk.Frame):
 
     def clear(self) -> None:
         """Блокировка хранилища: ничего не должно остаться на экране."""
+        self.end_edit()
+        for var in self._ev.values():
+            var.set("")
+        if self._ev:
+            self._note_text.delete("1.0", "end")
+        self._edit_tags, self._edit_orig = [], {}
         self.selected, self.password_visible = None, False
         self._mode, self._tag = "all", None
         self._search_active = False
@@ -1197,6 +1240,8 @@ class MainView(tk.Frame):
         self.redraw()
 
     def select(self, entry: dict | None) -> None:
+        if self.editing and entry is not self._edit_entry and not self._leave_edit_ok():
+            return
         if entry is not self.selected:
             self.password_visible = False
         self.selected = entry
@@ -1417,6 +1462,9 @@ class MainView(tk.Frame):
         c.delete("dyn")
         hits.clear()
         width, height = max(c.winfo_width(), _px(300)), max(c.winfo_height(), _px(300))
+        if self.editing and self.app.data is not None:
+            self._draw_edit(c, hits, width, height)
+            return
         entry = self.selected
         if entry is None or self.app.data is None:
             self._draw_empty(c, width, height)
@@ -1478,7 +1526,7 @@ class MainView(tk.Frame):
             below = 192 + 21
         word, color = _mv_strength(entry)
         n = len(password)
-        self._text(c, left, below, f"{word} · {n} {ru_plural(n, ('символ', 'символа', 'символов'))}", px=11, fill=color)
+        self._text(c, left, below, f"{word} · {n} {ru_plural(n, ('символ', 'символа', 'символов'))}", px=12, fill=color)
         edge = link(right, below - 5, "Копировать", lambda: self.app._copy_to_clipboard(entry["password"]))
         link(edge - 12, below - 5, "Скрыть" if self.password_visible else "Показать", self._toggle_password)
         y = below + 20
@@ -1515,6 +1563,445 @@ class MainView(tk.Frame):
         c.create_image(cx - _px(46), _px(mid + 88), image=self._rr(55, 19, None, "#233d54", 6), anchor="center", tags="dyn")
         self._text(c, cx / max(_UI_SCALE, 0.01) - 46, mid + 88, "Ctrl N", px=11, fill="#a4b5c8", anchor="center", mono=True)
         self._text(c, cx / max(_UI_SCALE, 0.01) - 14, mid + 88, "новая запись", px=11, fill="#6a7b8e")
+
+    # --- форма изменения записи (CLAUDE.md, раздел 10.80) ---------------------------------------
+
+    def _edit_fields(self) -> dict:
+        """Поля формы как их ждут `vault.records.apply_edit` и `new_entry`:
+        «Название» — это `site`, «Сайт» — `url`."""
+        return {
+            "site": self._ev["site"].get().strip(),
+            "url": self._ev["url"].get().strip(),
+            "username": self._ev["username"].get().strip(),
+            "password": self._ev["password"].get(),
+            "note": self._note_text.get("1.0", "end").strip(),
+            "tags": list(self._edit_tags),
+        }
+
+    def _dot_font(self):
+        """Моноширинный шрифт для поля пароля: размер подбирается так, чтобы шаг между
+        точками был как в макете (10,4 px при масштабе 1.0)."""
+        if self._dot_font_cache is None:
+            import tkinter.font as tkfont
+
+            available = set(tkfont.families())
+            family = next((f for f in ("Consolas", "DejaVu Sans Mono", "Courier New") if f in available), "TkFixedFont")
+            best, best_gap = 13, 1e9
+            for size in range(10, 25):
+                width = tkfont.Font(family=family, size=-_px(size)).measure(_MV_DOT)
+                gap = abs(width - _px(10.4))
+                if gap < best_gap:
+                    best, best_gap = size, gap
+            self._dot_font_cache = (family, -_px(best), "normal")
+        return self._dot_font_cache
+
+    def _ensure_edit_widgets(self) -> None:
+        if self._ev:
+            return
+        c = self.detail
+        for key in ("site", "url", "username", "password"):
+            self._ev[key] = tk.StringVar(master=c)
+        self._tag_var = tk.StringVar(master=c)
+
+        def entry(var, font, name):
+            widget = tk.Entry(
+                c, textvariable=var, bd=0, highlightthickness=0, relief="flat", bg=_MV_FIELD_FILL,
+                fg=_MV_EDIT_TEXT, insertbackground=_MV_EDIT_TEXT, selectbackground=_MV_SELECT,
+                selectforeground=_MV_EDIT_TEXT, font=font,
+            )
+            widget.bind("<FocusIn>", lambda _e, n=name: self._set_focus(n))
+            widget.bind("<FocusOut>", lambda _e, n=name: self._set_focus(None, only=n))
+            widget.bind("<Escape>", lambda _e: self._cancel_edit())
+            return widget
+
+        self._edit_entries = {
+            "site": entry(self._ev["site"], _mv_font(13), "site"),
+            "url": entry(self._ev["url"], _mv_font(13), "url"),
+            "username": entry(self._ev["username"], _mv_font(13), "username"),
+            "password": entry(self._ev["password"], self._dot_font(), "password"),
+        }
+        for widget in self._edit_entries.values():
+            widget.bind("<Return>", lambda _e: self._save_edit())
+        for var in self._ev.values():
+            var.trace_add("write", lambda *_a: self._on_edit_changed())
+        self._note_text = tk.Text(
+            c, wrap="word", bd=0, highlightthickness=0, relief="flat", bg=_MV_FIELD_FILL, fg=_MV_EDIT_TEXT,
+            insertbackground=_MV_EDIT_TEXT, selectbackground=_MV_SELECT, selectforeground=_MV_EDIT_TEXT,
+            font=_mv_font(13), padx=0, pady=0, undo=True,
+        )
+        self._note_text.bind("<FocusIn>", lambda _e: self._set_focus("note"))
+        self._note_text.bind("<FocusOut>", lambda _e: self._set_focus(None, only="note"))
+        self._note_text.bind("<Escape>", lambda _e: self._cancel_edit())
+        self._note_text.bind("<Tab>", lambda _e: (self._note_text.tk_focusNext().focus_set(), "break")[1])
+        self._tag_entry = tk.Entry(
+            c, textvariable=self._tag_var, bd=0, highlightthickness=0, relief="flat", bg=_MV_FIELD_FILL,
+            fg=_MV_EDIT_TEXT, insertbackground=_MV_EDIT_TEXT, selectbackground=_MV_SELECT,
+            selectforeground=_MV_EDIT_TEXT, font=_mv_font(12),
+        )
+        self._tag_entry.bind("<Return>", lambda _e: (self._tag_commit(), "break")[1])
+        self._tag_entry.bind("<Escape>", lambda _e: (self._close_tag_input(), "break")[1])
+        self._tag_entry.bind("<Down>", lambda _e: (self._tag_move(1), "break")[1])
+        self._tag_entry.bind("<Up>", lambda _e: (self._tag_move(-1), "break")[1])
+        self._tag_entry.bind("<FocusOut>", lambda _e: self.after(150, self._tag_focus_lost))
+        self._tag_var.trace_add("write", lambda *_a: self._on_tag_typed())
+
+    def _on_edit_changed(self) -> None:
+        if self.editing:
+            self._draw_detail()
+
+    def _set_focus(self, name: str | None, only: str | None = None) -> None:
+        if only is not None and self._focus != only:
+            return
+        if self._focus != name:
+            self._focus = name
+            if self.editing:
+                self._draw_detail()
+
+    def begin_edit(self, entry: dict | None = None) -> None:
+        """Открыть форму изменения (или новой записи, если `entry` is None) справа."""
+        if self.editing and not self._leave_edit_ok():
+            return
+        self._ensure_edit_widgets()
+        entry = entry or {}
+        self.editing = False  # пока значения подставляются, перерисовывать форму не надо
+        self._edit_entry = entry if entry else None
+        self._ev["site"].set(entry.get("site", ""))
+        self._ev["url"].set(entry.get("url", ""))
+        self._ev["username"].set(entry.get("username", ""))
+        self._ev["password"].set(entry.get("password", ""))
+        self._note_text.delete("1.0", "end")
+        self._note_text.insert("1.0", entry.get("note", ""))
+        self._edit_tags = normalize_tags(entry.get("tags", []) or [])
+        self._edit_pw_visible = False
+        self._tag_input_open = False
+        self._tag_var.set("")
+        self._focus = None
+        self.password_visible = False
+        self.selected = self._edit_entry
+        self.editing = True
+        self._edit_orig = self._edit_fields()
+        self._draw_list()
+        self._draw_detail()
+        target = self._edit_entries["password" if self._edit_entry else "site"]
+        self.after_idle(target.focus_set)
+
+    def _is_dirty(self) -> bool:
+        return self.editing and self._edit_fields() != self._edit_orig
+
+    def _leave_edit_ok(self) -> bool:
+        """Можно ли уйти с формы: если есть несохранённые правки — спрашиваем."""
+        if not self.editing:
+            return True
+        if self._is_dirty() and not messagebox.askyesno(
+            "Не сохранено", "Отменить несохранённые изменения?", parent=self.app
+        ):
+            return False
+        self.end_edit()
+        return True
+
+    def end_edit(self) -> None:
+        """Закрыть форму без сохранения (и без вопросов)."""
+        if not self.editing:
+            return
+        self.editing = False
+        self._tag_input_open = False
+        self._focus = None
+        for key in list(self._edit_items):
+            self._drop_window(key)
+        self.detail.focus_set()
+        self._draw_list()
+        self._draw_detail()
+
+    def finish_edit(self, entry: dict | None) -> None:
+        """Запись сохранена: форма закрывается, запись открыта в обычном виде."""
+        self.selected = entry
+        self.end_edit()
+        self.refresh()
+
+    def _cancel_edit(self) -> None:
+        self._leave_edit_ok()
+
+    def _save_edit(self) -> None:
+        fields = self._edit_fields()
+        if not fields["site"]:
+            messagebox.showerror("Ошибка", "Укажите название записи.", parent=self.app)
+            return
+        if not fields["password"]:
+            messagebox.showerror("Ошибка", "Пароль не может быть пустым.", parent=self.app)
+            return
+        self.app._store_entry(self._edit_entry, fields)
+
+    def _generate_password(self) -> None:
+        self._ev["password"].set(generate_password())
+        self._edit_pw_visible = True  # сразу показать, что сгенерировано
+        self._draw_detail()
+
+    def _toggle_edit_password(self) -> None:
+        self._edit_pw_visible = not self._edit_pw_visible
+        self._draw_detail()
+
+    # теги в форме
+
+    def _tag_matches(self) -> tuple[list[tuple[str, int]], str | None]:
+        """(подсказки, текст для «+ Создать тег»): существующие теги хранилища, которых
+        ещё нет у записи и которые содержат введённое; создать можно, если такого тега нет."""
+        query = " ".join(self._tag_var.get().split())
+        chosen = {t.casefold() for t in self._edit_tags}
+        existing = self.tag_counts()
+        found = [(n, k) for n, k in existing if n.casefold() not in chosen and query.casefold() in n.casefold()][:5]
+        known = {n.casefold() for n, _k in existing} | chosen
+        create = query if query and query.casefold() not in known else None
+        return found, create
+
+    def _on_tag_typed(self) -> None:
+        self._tag_choice = 0
+        if self.editing and self._tag_input_open:
+            self._draw_detail()
+
+    def _tag_move(self, step: int) -> None:
+        found, create = self._tag_matches()
+        total = len(found) + (1 if create else 0)
+        if total:
+            self._tag_choice = (self._tag_choice + step) % total
+            self._draw_detail()
+
+    def _tag_commit(self) -> None:
+        found, create = self._tag_matches()
+        if self._tag_choice < len(found):
+            self._add_tag(found[self._tag_choice][0])
+        elif create:
+            self._add_tag(create)
+        else:
+            self._close_tag_input()
+
+    def _add_tag(self, tag: str) -> None:
+        self._edit_tags = normalize_tags(self._edit_tags + [tag])
+        self._close_tag_input()
+
+    def _remove_tag(self, tag: str) -> None:
+        self._edit_tags = [t for t in self._edit_tags if t != tag]
+        self._draw_detail()
+
+    def _open_tag_input(self) -> None:
+        self._tag_input_open = True
+        self._tag_var.set("")
+        self._tag_choice = 0
+        self._draw_detail()
+        self.after_idle(self._tag_entry.focus_set)
+
+    def _close_tag_input(self) -> None:
+        if not self._tag_input_open:
+            return
+        self._tag_input_open = False
+        self._tag_var.set("")
+        self._drop_window("tag")
+        self._draw_detail()
+
+    def _tag_focus_lost(self) -> None:
+        # Щелчок по строке подсказки обрабатывается раньше (холст берёт фокус, затем
+        # выполняется команда); сюда доходит уход фокуса в другое место.
+        if self._tag_input_open and self.focus_get() is not self._tag_entry:
+            self._close_tag_input()
+
+    def _detail_click_miss(self, _event: tk.Event) -> None:
+        if self.editing and self._tag_input_open and not self._detail_hits.hit:
+            self._close_tag_input()
+
+    # окна-виджеты на холсте
+
+    def _put(self, key: str, widget: tk.Widget, x: float, y: float, width: float, height: float | None = None) -> None:
+        """Поставить настоящий виджет (поле ввода) на холст; окно не пересоздаётся при перерисовке,
+        иначе поле теряло бы фокус."""
+        self._edit_used.add(key)
+        options = {"window": widget, "anchor": "w" if height is None else "nw", "width": _px(width)}
+        if height is not None:
+            options["height"] = _px(height)
+        item = self._edit_items.get(key)
+        if item is None:
+            self._edit_items[key] = self.detail.create_window(_px(x), _px(y), tags="edwin", **options)
+        else:
+            self.detail.coords(item, _px(x), _px(y))
+            self.detail.itemconfigure(item, **{k: v for k, v in options.items() if k != "window"})
+
+    def _drop_window(self, key: str) -> None:
+        item = self._edit_items.pop(key, None)
+        if item is not None:
+            self.detail.delete(item)
+
+    def _dashed(self, w: float, h: float, color: str, radius: float):
+        """Скруглённая рамка пунктиром (кнопка «+ тег»)."""
+        W, H, R = _px(w), _px(h), _px(radius)
+        key = ("dashed", W, H, color, R)
+        if key not in self._images:
+            f = 4
+            big = Image.new("RGBA", (W * f, H * f), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            r = min(R, min(W, H) // 2) * f
+            pts: list[tuple[float, float]] = []
+            width_big, height_big = W * f - 1, H * f - 1
+
+            def arc(cx: float, cy: float, start: float) -> None:
+                for i in range(0, 91, 3):
+                    a = math.radians(start + i)
+                    pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+
+            arc(width_big - r, r, -90)
+            arc(width_big - r, height_big - r, 0)
+            arc(r, height_big - r, 90)
+            arc(r, r, 180)
+            pts.append(pts[0])
+            dash, travelled = 3 * f * max(1, _px(1)), 0.0
+            for a, b in zip(pts, pts[1:]):
+                length = math.dist(a, b)
+                if int(travelled // dash) % 2 == 0:
+                    draw.line([a, b], fill=color, width=max(1, _px(1)) * f)
+                travelled += length
+            self._images[key] = self.app._tk_image(big.resize((W, H), Image.LANCZOS))
+        return self._images[key]
+
+    def _link(self, c: tk.Canvas, hits: _Hits, x_right: float, y: float, label: str, command: Callable[[], None]) -> float:
+        import tkinter.font as tkfont
+
+        w = tkfont.Font(family=_mv_family(), size=-_px(11), weight="bold").measure(label) / max(_UI_SCALE, 0.01)
+        self._text(c, x_right, y, label, px=11, fill=_MV_LINK, bold=True, anchor="e")
+        hits.add(_px(x_right - w - 4), _px(y - 10), _px(x_right + 4), _px(y + 10), command)
+        return x_right - w
+
+    def _draw_edit(self, c: tk.Canvas, hits: _Hits, width: int, height: int) -> None:
+        import tkinter.font as tkfont
+
+        P = _px
+        scale = max(_UI_SCALE, 0.01)
+        left, right = 32, width / scale - 32
+        H = height / scale
+        fields = self._edit_fields()
+        new = self._edit_entry is None
+        self._edit_used = set()
+
+        name = fields["site"]
+        c.create_image(P(left), P(28), image=self._tile(name or "?", 44, _mv_color_for(name or "?", _MV_AVATARS), 11), anchor="nw", tags="dyn")
+        self._text(c, 91, 50.5, "Новая запись" if new else "Изменение записи", px=19, fill=_MV_EDIT_TITLE, bold=True)
+        pill = right - 119
+        c.create_image(P(pill), P(36), image=self._rr(119, 29, None, _MV_AMBER_BORDER, 14.5), anchor="nw", tags="dyn")
+        c.create_oval(P(pill + 13.3), P(47), P(pill + 20.3), P(54), fill=_MV_AMBER_TEXT, outline=_MV_AMBER_TEXT, tags="dyn")
+        self._text(c, pill + 28, 50.5, "Не сохранено", px=11, fill=_MV_AMBER_TEXT, bold=True)
+
+        def box(x: float, y: float, w: float, h: float, focus_key: str, line: str = _MV_FIELD_LINE) -> None:
+            border = _MV_FOCUS_LINE if self._focus == focus_key else line
+            c.create_image(P(x), P(y), image=self._rr(w, h, _MV_FIELD_FILL, border, 10), anchor="nw", tags="dyn")
+
+        def label(x: float, y: float, text: str) -> None:
+            self._text(c, x, y, text, px=11, fill=_MV_LABEL)
+
+        col = (right - left - 16) / 2
+        label(left, 106.5, "Название")
+        label(left + col + 16, 106.5, "Сайт")
+        box(left, 121, col, 42, "site")
+        box(left + col + 16, 121, col, 42, "url")
+        self._put("site", self._edit_entries["site"], left + 15, 142, col - 30)
+        self._put("url", self._edit_entries["url"], left + col + 31, 142, col - 30)
+
+        label(left, 189.5, "Логин")
+        box(left, 204, right - left, 42, "username")
+        self._put("username", self._edit_entries["username"], left + 15, 225, right - left - 30)
+
+        label(left, 272.5, "Пароль")
+        box(left, 287, right - left, 42, "password")
+        password_entry = self._edit_entries["password"]
+        password_entry.configure(show="" if self._edit_pw_visible else _MV_DOT)
+        self._put("password", password_entry, left + 15, 308, right - left - 30)
+        if fields["password"]:
+            word, color = _mv_strength({"password": fields["password"], "site": name, "username": fields["username"]})
+            n = len(fields["password"])
+            self._text(c, left, 345, f"{word} · {n} {ru_plural(n, ('символ', 'символа', 'символов'))}", px=12, fill=color)
+        edge = self._link(c, hits, right, 345, "Сгенерировать", self._generate_password)
+        self._link(c, hits, edge - 16, 345, "Скрыть" if self._edit_pw_visible else "Показать", self._toggle_edit_password)
+
+        note_h = 43 if self._tag_input_open else 75
+        label(left, 379.5, "Заметка")
+        box(left, 394, right - left, note_h, "note", line=_MV_NOTE_LINE)
+        self._put("note", self._note_text, left + 15, 394 + 13, right - left - 30, note_h - 18)
+
+        tags_label = 394 + note_h + 27
+        label(left, tags_label, "Теги")
+        chip_top = tags_label + 15
+        font = tkfont.Font(family=_mv_family(), size=-P(12))
+
+        def text_w(s: str) -> float:
+            return font.measure(s) / scale
+
+        x, row_top = left, chip_top
+        input_box = None
+        for tag in self._edit_tags:
+            chip_w = text_w(tag) + 40.4
+            if x + chip_w > right and x > left:
+                x, row_top = left, row_top + 38
+            c.create_image(P(x), P(row_top), image=self._rr(chip_w, 30, None, _MV_CHIP_LINE2, 10), anchor="nw", tags="dyn")
+            self._text(c, x + 13, row_top + 15, tag, px=12, fill="#d9e7f2")
+            self._text(c, x + chip_w - 15.1, row_top + 15, "×", px=12, fill="#8899ac", anchor="center")
+            hits.add(P(x + chip_w - 28), P(row_top), P(x + chip_w), P(row_top + 30), lambda t=tag: self._remove_tag(t))
+            x += chip_w + 8.4
+        if len(self._edit_tags) < 8:
+            if self._tag_input_open:
+                if x + 131.6 > right and x > left:
+                    x, row_top = left, row_top + 38
+                c.create_image(P(x), P(row_top), image=self._rr(131.6, 30, _MV_FIELD_FILL, _MV_FOCUS_LINE, 10), anchor="nw", tags="dyn")
+                self._put("tag", self._tag_entry, x + 13, row_top + 15, 131.6 - 26)
+                input_box = (x, row_top)
+            else:
+                add_w = text_w("+ тег") + 25.8
+                if x + add_w > right and x > left:
+                    x, row_top = left, row_top + 38
+                c.create_image(P(x), P(row_top), image=self._dashed(add_w, 30, _MV_DASH, 10), anchor="nw", tags="dyn")
+                self._text(c, x + 12.9, row_top + 15, "+ тег", px=12, fill=_MV_LINK)
+                hits.add(P(x), P(row_top), P(x + add_w), P(row_top + 30), self._open_tag_input)
+        if not self._tag_input_open:
+            self._drop_window("tag")
+
+        footer = max(H - 65.5, 634.5)
+        c.create_line(P(left), P(footer - 19), P(right), P(footer - 19), fill=_MV_SEP_EDIT, tags="dyn")
+        c.create_image(P(left), P(footer), image=self._rr(115, 42, _MV_CREAM, None, 10), anchor="nw", tags="dyn")
+        self._text(c, left + 57.5, footer + 21, "Сохранить", px=13, fill=_MV_SAVE_TEXT, bold=True, anchor="center")
+        hits.add(P(left), P(footer), P(left + 115), P(footer + 42), self._save_edit)
+        c.create_image(P(left + 125.6), P(footer), image=self._rr(95, 42, None, _MV_CANCEL_LINE, 10), anchor="nw", tags="dyn")
+        self._text(c, left + 125.6 + 47.5, footer + 21, "Отмена", px=13, fill=_MV_EDIT_TEXT, bold=True, anchor="center")
+        hits.add(P(left + 125.6), P(footer), P(left + 220.6), P(footer + 42), self._cancel_edit)
+        if not new:
+            self._text(c, right, footer + 21, "Старый пароль останется в истории", px=11, fill=_MV_HINT, anchor="e")
+
+        if self._tag_input_open and input_box is not None:
+            found, create = self._tag_matches()
+            bx, by = input_box[0] + 0.6, input_box[1] + 35.8
+            rows = len(found)
+            bh = 5.6 + 30 * rows + (1.6 + 37 if create else -1.4 + 5.6)
+            if not rows and not create:
+                bh = 0
+            if bh:
+                c.create_image(P(bx), P(by), image=self._rr(239, bh, _MV_FIELD_FILL, _MV_DROP_LINE, 12), anchor="nw", tags="dyn")
+                top = by + 5.6
+                for i, (tag, count) in enumerate(found):
+                    if i == self._tag_choice:
+                        c.create_image(P(bx + 4.5), P(top), image=self._rr(230, 28.6, _MV_SELECT, None, 8), anchor="nw", tags="dyn")
+                    mid = top + 14.3
+                    dot = _mv_color_for(tag, _MV_TAG_COLORS)
+                    c.create_oval(P(bx + 14.9), P(mid - 3.5), P(bx + 21.9), P(mid + 3.5), fill=dot, outline=dot, tags="dyn")
+                    self._text(c, bx + 32, mid, tag, px=12, fill=_MV_EDIT_TEXT)
+                    self._text(c, bx + 224.6, mid, str(count), px=11, fill="#7e97b1", anchor="e", mono=True)
+                    hits.add(P(bx + 4.5), P(top), P(bx + 234.5), P(top + 28.6), lambda t=tag: self._add_tag(t))
+                    top += 30
+                if create:
+                    sep = by + 5.6 + 30 * rows + 1.6
+                    if rows:
+                        c.create_line(P(bx + 10), P(sep), P(bx + 229), P(sep), fill=_MV_SEP_EDIT, tags="dyn")
+                    if rows == self._tag_choice:
+                        c.create_image(P(bx + 4.5), P(sep + 3), image=self._rr(230, 30, _MV_SELECT, None, 8), anchor="nw", tags="dyn")
+                    self._text(c, bx + 14.7, sep + 18, f"+ Создать тег «{create}»", px=12, fill=_MV_LINK)
+                    hits.add(P(bx + 4.5), P(sep + 3), P(bx + 234.5), P(sep + 33), lambda t=create: self._add_tag(t))
+
+        for key in list(self._edit_items):
+            if key not in self._edit_used:
+                self._drop_window(key)
+        c.configure(scrollregion=(0, 0, width, max(height, P(footer + 80))))
 
     # --- действия панели -------------------------------------------------------------------------
 
@@ -3650,36 +4137,30 @@ class App(ttk.Window):
     # ------------------------------------------------------------------
 
     def _on_add(self) -> None:
-        dialog = EntryDialog(self, title="Новая запись")
-        self.wait_window(dialog)
-        if dialog.result is None:
-            return
-        fields = dialog.result
-        entry = new_entry(
-            fields["site"],
-            fields["username"],
-            fields["password"],
-            url=fields["url"],
-            note=fields["note"],
-            tags=normalize_tags(fields["tags"]),
-        )
-        self.data.setdefault("entries", []).append(entry)
-        # Новая запись сразу открывается справа (если её не скрывает фильтр).
-        self._view.selected = entry
-        if self._save_vault():
-            self._view.refresh()
+        """«Новая запись» (кнопка и Ctrl N): форма открывается справа (раздел 10.80)."""
+        self._view.begin_edit(None)
 
     def _edit_entry(self, entry: dict) -> None:
-        """Карандаш в панели записи (раздел 10.79): тот же диалог, что и для новой
-        записи, с заполненными полями. Смена пароля, заметки и сайта/логина
-        попадает в историю записи (`vault.records.apply_edit`)."""
-        dialog = EntryDialog(self, title="Изменить запись", entry=entry)
-        self.wait_window(dialog)
-        if dialog.result is None:
-            return
-        apply_edit(entry, **dialog.result)
+        """Карандаш в панели записи: форма «Изменение записи» справа (раздел 10.80)."""
+        self._view.begin_edit(entry)
+
+    def _store_entry(self, entry: dict | None, fields: dict) -> None:
+        """Сохранить форму: `entry` None — новая запись, иначе правка. Смена пароля,
+        заметки и сайта/логина попадает в историю записи (`vault.records`)."""
+        if entry is None:
+            entry = new_entry(
+                fields["site"],
+                fields["username"],
+                fields["password"],
+                url=fields["url"],
+                note=fields["note"],
+                tags=normalize_tags(fields["tags"]),
+            )
+            self.data.setdefault("entries", []).append(entry)
+        else:
+            apply_edit(entry, **fields)
         self._save_vault()
-        self._view.refresh()
+        self._view.finish_edit(entry)
 
     def _delete_entry(self, entry: dict) -> None:
         confirmed = messagebox.askyesno(
@@ -3894,144 +4375,6 @@ class App(ttk.Window):
         self._apply_screen_size("unlock")
 
     def _on_close(self) -> None:
-        self.destroy()
-
-
-class EntryDialog(ttk.Toplevel):
-    """Модальный диалог новой записи и правки существующей (карандаш в панели
-    записи, раздел 10.79). `result` — словарь полей для `vault.records`
-    (`site`, `username`, `password`, `url`, `note`, `tags`) или None при отмене."""
-
-    def __init__(self, parent: App, title: str, entry: dict | None = None) -> None:
-        super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
-        parent._dialog_chrome(self, title)
-        self.transient(parent)
-        self.result: dict | None = None
-
-        form = ttk.Frame(self, padding=_px(16))
-        form.pack(fill="both", expand=True)
-
-        entry = entry or {}
-        self._site_var = tk.StringVar(value=entry.get("site", ""))
-        self._username_var = tk.StringVar(value=entry.get("username", ""))
-        self._password_var = tk.StringVar(value=entry.get("password", ""))
-        self._url_var = tk.StringVar(value=entry.get("url", ""))
-        self._tags_var = tk.StringVar(value=", ".join(entry.get("tags", []) or []))
-
-        fields = (
-            ("Сайт:", self._site_var, ""),
-            ("Адрес:", self._url_var, ""),
-            ("Логин:", self._username_var, ""),
-            ("Пароль:", self._password_var, "*"),
-        )
-        for row, (label, var, show) in enumerate(fields):
-            ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=_px(4))
-            box, field = parent._rounded_field(form, var, show=show, width=28)
-            box.grid(row=row, column=1, sticky="ew", pady=_px(4), padx=(_px(8), 0))
-            if row == 0:
-                field.focus_set()
-        form.columnconfigure(1, weight=1)
-
-        parent._styled(
-            ttk.Button(
-                form,
-                text="Сгенерировать",
-                command=self._on_generate,
-                **parent._icon_kwargs("dice", "dark"),
-            ),
-            parent._neutral_style(),
-        ).grid(row=len(fields), column=1, sticky="e", pady=(_px(4), 0))
-
-        # Оценщик надёжности (assistant.generator.explain_password) —
-        # перенесён сюда из отдельного GeneratorDialog: важно видеть
-        # оценку энтропии именно там, где пароль реально попадёт в
-        # сохраняемую запись, а не в оторванном от неё вспомогательном
-        # окне. Обновляется на каждое изменение self._password_var —
-        # и когда набран вручную, и когда подставлен "Сгенерировать".
-        self._strength_var = tk.StringVar()
-        ttk.Label(
-            form, textvariable=self._strength_var, wraplength=_px(320), bootstyle="secondary"
-        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(_px(6), _px(6)))
-
-        row = len(fields) + 2
-        ttk.Label(form, text="Теги:").grid(row=row, column=0, sticky="w", pady=_px(4))
-        tags_box, _tags_entry = parent._rounded_field(form, self._tags_var, width=28)
-        tags_box.grid(row=row, column=1, sticky="ew", pady=_px(4), padx=(_px(8), 0))
-        ttk.Label(form, text="через запятую", bootstyle="secondary").grid(
-            row=row + 1, column=1, sticky="w", padx=(_px(8), 0)
-        )
-
-        ttk.Label(form, text="Заметка:").grid(row=row + 2, column=0, sticky="nw", pady=_px(6))
-        note_box = ttk.Frame(form, padding=(_px(12), _px(8)))
-        parent._rounded_backdrop(
-            note_box,
-            _NEUTRAL_FILL,
-            corners=(True, True, True, True),
-            surface="#ffffff",
-            radius=_ROUNDED_RADIUS,
-            border_color=_NEUTRAL_BORDER,
-            border_width=1,
-            dynamic=True,
-        )
-        self._note_text = tk.Text(
-            note_box, width=28, height=3, wrap="word", bd=0, highlightthickness=0, relief="flat",
-            background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT, font=("", 10), undo=True,
-        )
-        self._note_text.pack(fill="both", expand=True)
-        self._note_text.insert("1.0", entry.get("note", ""))
-        note_box.grid(row=row + 2, column=1, sticky="ew", pady=_px(6), padx=(_px(8), 0))
-
-        self._password_var.trace_add("write", self._update_strength)
-        self._site_var.trace_add("write", self._update_strength)
-        self._username_var.trace_add("write", self._update_strength)
-        self._update_strength()
-
-        buttons = ttk.Frame(self, padding=(_px(16), 0, _px(16), _px(16)))
-        buttons.pack(fill="x")
-        parent._action_buttons(
-            buttons,
-            primary_text="Сохранить",
-            primary_command=self._on_save,
-            primary_icon="save",
-            cancel_command=self.destroy,
-            stretch=False,
-        )
-
-        parent._round_dialog_corners(self)
-        self.place_window_center()
-        self.grab_set()
-
-    def _on_generate(self) -> None:
-        # Быстрая генерация с параметрами по умолчанию — для тонкой
-        # настройки (длина, наборы символов) есть отдельный полноценный
-        # GeneratorDialog, вызываемый из главного окна.
-        self._password_var.set(generate_password())
-
-    def _update_strength(self, *_args: object) -> None:
-        password = self._password_var.get()
-        analysis = analyze_password(password, [self._site_var.get().strip(), self._username_var.get().strip()])
-        self._strength_var.set(analysis_summary(analysis))
-
-    def _on_save(self) -> None:
-        site = self._site_var.get().strip()
-        username = self._username_var.get().strip()
-        password = self._password_var.get()
-
-        if not site:
-            messagebox.showerror("Ошибка", "Укажите сайт.", parent=self)
-            return
-        if not password:
-            messagebox.showerror("Ошибка", "Пароль не может быть пустым.", parent=self)
-            return
-
-        self.result = {
-            "site": site,
-            "username": username,
-            "password": password,
-            "url": self._url_var.get().strip(),
-            "note": self._note_text.get("1.0", "end").strip(),
-            "tags": normalize_tags(self._tags_var.get()),
-        }
         self.destroy()
 
 

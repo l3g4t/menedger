@@ -52,6 +52,7 @@ import gui.app as guiapp  # noqa: E402
 os.environ.setdefault("MENEDGER_CUSTOM_FRAME", "1")
 
 MASTER = "StrongMasterPassword123"
+_RealCreateVaultDialog = guiapp.CreateVaultDialog  # _create_vault подменяет класс в модуле на фейк
 
 
 @pytest.fixture
@@ -214,9 +215,6 @@ def test_dialog_construction_does_not_raise(app, monkeypatch):
     _create_vault(app, monkeypatch)
     entry = {"site": "example.com", "username": "alice", "password": "p", "created_at": guiapp.now_iso()}
     app.data["entries"] = [entry]
-
-    dialog = guiapp.EntryDialog(app, title="test")
-    dialog.destroy()
 
     create_dialog = guiapp.CreateVaultDialog(app)
     create_dialog.destroy()
@@ -578,7 +576,6 @@ def test_other_dialogs_get_rounded_corner_overlays(app, monkeypatch):
     from assistant.advisor import AdvisorReport
 
     dialogs = [
-        guiapp.EntryDialog(app, "Новая запись"),
         guiapp.CreateVaultDialog(app),
         guiapp.AuditDialog(app, AdvisorReport()),
         guiapp.GeneratorDialog(app, lambda password: None),
@@ -614,7 +611,6 @@ def test_dialogs_show_key_color_only_in_rounded_corners(app, monkeypatch, tmp_pa
     allowed = 4 * (radius + 4) ** 2  # четыре квадрата угла с запасом
     dialogs = [
         guiapp.AssistantDialog(app),
-        guiapp.EntryDialog(app, "Новая запись"),
         guiapp.CreateVaultDialog(app),
         guiapp.AuditDialog(app, AdvisorReport()),
         guiapp.GeneratorDialog(app, lambda password: None),
@@ -641,7 +637,7 @@ def test_dialogs_show_key_color_only_in_rounded_corners(app, monkeypatch, tmp_pa
 def test_other_dialogs_have_no_overlays_without_transparency_support(app):
     if app._native_frame or guiapp.sys.platform == "win32":
         pytest.skip("только не-Windows с собственной рамкой")
-    dialog = guiapp.EntryDialog(app, "Новая запись")
+    dialog = guiapp.CreateVaultDialog(app)
     dialog.update()
     try:
         assert dialog._corner_overlay is None
@@ -999,7 +995,6 @@ def test_dialog_footer_buttons_have_equal_height_and_width(app):
     entry = {"site": "s", "username": "u", "password": "x", "created_at": "2026-09-27T10:00:00Z"}
     makers = [
         (lambda: guiapp.CreateVaultDialog(app), ("Создать", "Отмена")),
-        (lambda: guiapp.EntryDialog(app, "Новая запись"), ("Сохранить", "Отмена")),
     ]
     for make, (primary_text, cancel_text) in makers:
         dialog = make()
@@ -1073,7 +1068,7 @@ def test_ctrl_v_with_russian_layout_pastes_into_entry(app, monkeypatch):
     _create_vault(app, monkeypatch)
     app.clipboard_clear()
     app.clipboard_append("Secret123!")
-    dialog = guiapp.EntryDialog(app, "Новая запись")
+    dialog = _RealCreateVaultDialog(app)
     dialog.update()
     entry = _entries(dialog)[0]
     entry.focus_force()
@@ -1096,7 +1091,7 @@ def test_entry_context_menu_has_paste_entry(app, monkeypatch):
     _create_vault(app, monkeypatch)
     shown = []
     monkeypatch.setattr(guiapp.tk.Menu, "tk_popup", lambda self, x, y: shown.append(self))
-    dialog = guiapp.EntryDialog(app, "Новая запись")
+    dialog = _RealCreateVaultDialog(app)
     dialog.update()
     entry = _entries(dialog)[0]
 
@@ -1125,8 +1120,7 @@ def test_dialogs_give_keyboard_focus_to_their_input_field(app, monkeypatch):
     самом окне — иначе Ctrl+V сразу после открытия ничего не вставляет."""
     _create_vault(app, monkeypatch)
     dialogs = [
-        guiapp.EntryDialog(app, "Новая запись"),
-        guiapp.EntryDialog(app, "Новая запись"),
+        _RealCreateVaultDialog(app),
     ]
     for dialog in dialogs:
         _pump(dialog)
@@ -1663,7 +1657,7 @@ def test_ctrl_c_in_entry_is_cleared_too(app, monkeypatch):
     """Копирование из поля ввода (например, показанного мастер-пароля)."""
     monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 200)
     _create_vault(app, monkeypatch)
-    dialog = guiapp.EntryDialog(app, "Новая запись")
+    dialog = _RealCreateVaultDialog(app)
     dialog.update()
     entry = _entries(dialog)[0]
     entry.config(show="")
@@ -1822,7 +1816,7 @@ def test_entry_copy_goes_through_app_clipboard_and_hidden_fields_copy_nothing(ap
     copied = []
     monkeypatch.setattr(app, "_copy_to_clipboard", copied.append)
     _create_vault(app, monkeypatch)
-    dialog = guiapp.EntryDialog(app, "Новая запись")
+    dialog = _RealCreateVaultDialog(app)
     dialog.update()
     entry = _entries(dialog)[0]
     entry.insert(0, "Secret123!")
@@ -2237,95 +2231,211 @@ def test_main_view_has_reference_geometry(app, monkeypatch):
     assert (guiapp._MAIN_WINDOW_SIZE[0], guiapp._MAIN_WINDOW_SIZE[1]) == (1120, 700)
 
 
-def test_add_entry_dialog_result_creates_entry_with_history_and_selects_it(app, monkeypatch):
+
+
+# --- форма изменения записи справа, по референсу пользователя (CLAUDE.md, раздел 10.80) ---------------
+
+
+def _edit_entry_fixture(app, monkeypatch, **extra):
+    entry = _rec("GitHub", "dev@example.com", "Xk9#mP2$vL7qRt4Wz!", days=3, url="github.com",
+                 note="Токен для CI лежит в отдельной записи.", tags=["работа"], **extra)
+    others = [_rec("Hetzner", "admin@example.com", "Hz9#mP2$vL7qRt4Wz!", days=3, tags=["серверы"]),
+              _rec("Госуслуги", "snils", "Gu9#mP2$vL7qRt4Wz!", days=30, tags=["семья"]),
+              _rec("Облако", "u", "Cl9#mP2$vL7qRt4Wz!", days=30, tags=["серверы"])]
+    view = _open_main(app, monkeypatch, entry, *others)
+    return view, entry
+
+
+def test_edit_form_opens_in_the_right_panel_with_reference_texts_and_geometry(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    app._edit_entry(entry)
+    app.update()
+    assert view.editing and view.selected is entry
+    texts = _canvas_texts(view.detail)
+    for expected in ("Изменение записи", "Не сохранено", "Название", "Сайт", "Логин", "Пароль", "Заметка", "Теги",
+                     "работа", "+ тег", "Показать", "Сгенерировать", "Сохранить", "Отмена",
+                     "Старый пароль останется в истории"):
+        assert expected in texts, expected
+    assert any(t.startswith("Надёжный · 18 символов") for t in texts)
+    assert view._ev["site"].get() == "GitHub" and view._ev["url"].get() == "github.com"
+    assert view._ev["username"].get() == "dev@example.com" and view._edit_tags == ["работа"]
+    assert view._note_text.get("1.0", "end").strip() == "Токен для CI лежит в отдельной записи."
+    # координаты полей — как в макете (px макета × масштаб), проверяем центры полей и подпись «Заметка»
+    P = guiapp._px
+    for key, y in (("site", 142), ("username", 225), ("password", 308)):
+        assert view.detail.coords(view._edit_items[key])[1] == P(y), key
+    assert view.detail.coords(view._edit_items["note"])[1] == P(407)
+    assert not view._is_dirty()
+
+
+def test_edit_form_for_a_new_record_has_its_own_title_and_no_history_hint(app, monkeypatch):
     view = _open_main(app, monkeypatch)
-
-    class FakeEntryDialog(tk.Toplevel):
-        def __init__(self, parent, title, entry=None):
-            super().__init__(parent)
-            self.result = {
-                "site": "added.com", "username": "bob", "password": "pw12345Xy#", "url": "added.com",
-                "note": "заметка", "tags": ["Работа", "работа", "Деньги"],
-            }
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "EntryDialog", FakeEntryDialog)
     app._on_add()
     app.update()
+    texts = _canvas_texts(view.detail)
+    assert view.editing and view._edit_entry is None and view.selected is None
+    assert "Новая запись" in texts and "Изменение записи" not in texts
+    assert "Старый пароль останется в истории" not in texts
+    assert view._ev["site"].get() == "" and view._edit_tags == []
 
-    entry = app.data["entries"][0]
-    assert entry["url"] == "added.com" and entry["note"] == "заметка" and entry["tags"] == ["Работа", "Деньги"]
-    assert entry["history"][0]["event"] == "created"
-    assert view.selected is entry and "added.com" in _canvas_texts(view.detail)
 
-
-def test_edit_entry_changes_password_note_and_history(app, monkeypatch):
-    entry = _rec("example.com", "alice", "old-Pass#99xY", days=30)
+def test_edit_form_saves_by_real_click_and_writes_history(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
     entry["created_at"] = "2020-01-01T00:00:00Z"
-    view = _open_main(app, monkeypatch, entry)
-    view.select(entry)
-
-    class FakeEntryDialog(tk.Toplevel):
-        def __init__(self, parent, title, entry=None):
-            super().__init__(parent)
-            assert entry is not None and title == "Изменить запись"
-            self.result = {
-                "site": "example.com", "username": "alice", "password": "new-Pass#99xY", "url": "",
-                "note": "новая заметка", "tags": [],
-            }
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "EntryDialog", FakeEntryDialog)
-    app._edit_entry(entry)
-
-    assert entry["password"] == "new-Pass#99xY" and entry["created_at"] != "2020-01-01T00:00:00Z"
-    events = [h["event"] for h in entry["history"]]
-    assert "password" in events and "note_added" in events
-    assert view.selected is entry
+    view.begin_edit(entry)
+    app.update()
+    view._ev["password"].set("new-Pass#99xY-zq")
+    view._note_text.delete("1.0", "end")
+    view._note_text.insert("1.0", "новая заметка")
+    view._ev["site"].set("GitHub Inc")
+    _click_text(view.detail, "Сохранить")
+    app.update()
+    assert not view.editing and view.selected is not None
+    saved = view.selected
+    assert saved["password"] == "new-Pass#99xY-zq" and saved["site"] == "GitHub Inc" and saved["note"] == "новая заметка"
+    assert saved["created_at"] != "2020-01-01T00:00:00Z"
+    events = [h["event"] for h in saved["history"]]
+    assert "password" in events and "note_changed" in events and "edited" in events
+    assert "GitHub Inc" in _canvas_texts(view.detail) and "Показать" in _canvas_texts(view.detail)
 
 
-def test_edit_entry_cancelled_keeps_everything(app, monkeypatch):
-    entry = _rec("example.com", password="old-Pass#99xY")
-    snapshot = dict(entry)
-    _open_main(app, monkeypatch, entry)
-
-    class Cancelled(tk.Toplevel):
-        def __init__(self, parent, title, entry=None):
-            super().__init__(parent)
-            self.result = None
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "EntryDialog", Cancelled)
-    app._edit_entry(entry)
-    assert entry == snapshot
-
-
-def test_entry_dialog_prefills_fields_and_returns_all_of_them(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-    entry = _rec("example.com", "alice", "Secret-Pass#99xY", url="example.com", note="строка 1\nстрока 2", tags=["a", "b"])
-    dialog = guiapp.EntryDialog(app, "Изменить запись", entry=entry)
-    dialog.update()
-    try:
-        assert dialog._site_var.get() == "example.com" and dialog._url_var.get() == "example.com"
-        assert dialog._tags_var.get() == "a, b"
-        dialog._tags_var.set("работа; деньги, Работа")
-        dialog._on_save()
-        assert dialog.result == {
-            "site": "example.com", "username": "alice", "password": "Secret-Pass#99xY", "url": "example.com",
-            "note": "строка 1\nстрока 2", "tags": ["работа", "деньги"],
-        }
-    finally:
-        if dialog.winfo_exists():
-            dialog.destroy()
+def test_edit_form_save_of_new_record_creates_entry_with_history_and_selects_it(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+    app._on_add()
+    view._ev["site"].set("added.com")
+    view._ev["username"].set("bob")
+    view._ev["password"].set("pw12345Xy#-ab")
+    view._edit_tags = ["Работа"]
+    app.update()
+    _click_text(view.detail, "Сохранить")
+    app.update()
+    entry = app.data["entries"][0]
+    assert entry["site"] == "added.com" and entry["tags"] == ["Работа"] and entry["history"][0]["event"] == "created"
+    assert view.selected is entry and not view.editing
 
 
-def test_entry_dialog_requires_site_and_password(app, monkeypatch):
-    _create_vault(app, monkeypatch)
+def test_edit_form_requires_name_and_password(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
     errors = []
     monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a[1]))
-    dialog = guiapp.EntryDialog(app, "Новая запись")
-    dialog._on_save()
-    dialog._site_var.set("a.com")
-    dialog._on_save()
-    assert errors == ["Укажите сайт.", "Пароль не может быть пустым."] and dialog.result is None
-    dialog.destroy()
+    app._on_add()
+    view._save_edit()
+    view._ev["site"].set("a.com")
+    view._save_edit()
+    assert errors == ["Укажите название записи.", "Пароль не может быть пустым."]
+    assert view.editing and app.data["entries"] == []
+
+
+def test_edit_form_cancel_asks_only_when_something_changed(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    asked = []
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: asked.append(1) or False)
+    view.begin_edit(entry)
+    app.update()
+    _click_text(view.detail, "Отмена")  # ничего не менялось — закрывается без вопроса
+    assert not view.editing and asked == []
+    assert entry["password"] == "Xk9#mP2$vL7qRt4Wz!"
+
+    view.begin_edit(entry)
+    view._ev["username"].set("другой")
+    app.update()
+    _click_text(view.detail, "Отмена")  # есть правки, ответ «нет» — остаёмся в форме
+    assert view.editing and asked == [1]
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: True)
+    _click_text(view.detail, "Отмена")
+    assert not view.editing and entry["username"] == "dev@example.com"
+
+
+def test_edit_form_selecting_another_row_asks_when_dirty_and_keeps_form_on_no(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    other = next(e for e in app.data["entries"] if e["site"] == "Hetzner")
+    view.begin_edit(entry)
+    view._ev["site"].set("Изменено")
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: False)
+    view.select(other)
+    assert view.editing and view.selected is entry
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: True)
+    view.select(other)
+    assert not view.editing and view.selected is other and entry["site"] == "GitHub"
+
+
+def test_edit_form_password_strength_show_and_generate(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    view.begin_edit(entry)
+    app.update()
+    assert str(view._edit_entries["password"].cget("show")) == guiapp._MV_DOT
+    _click_text(view.detail, "Показать")
+    assert str(view._edit_entries["password"].cget("show")) == "" and "Скрыть" in _canvas_texts(view.detail)
+    view._ev["password"].set("password1")
+    app.update()
+    assert any(t.startswith("Слабый") for t in _canvas_texts(view.detail))
+    _click_text(view.detail, "Сгенерировать")
+    assert view._ev["password"].get() != "password1" and len(view._ev["password"].get()) >= 12
+    assert view._edit_pw_visible
+
+
+def test_edit_form_tag_input_suggests_existing_tags_by_count_and_offers_to_create(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    view.begin_edit(entry)
+    app.update()
+    _click_text(view.detail, "+ тег")
+    assert view._tag_input_open
+    view._tag_var.set("се")
+    app.update()
+    found, create = view._tag_matches()
+    assert found == [("серверы", 2), ("семья", 1)] and create == "се"  # «работа» уже у записи, больше — выше
+    texts = _canvas_texts(view.detail)
+    assert "серверы" in texts and "семья" in texts and "+ Создать тег «се»" in texts
+    # заметка сжимается в одну строку, чтобы подсказки поместились (как в макете)
+    assert int(view.detail.itemcget(view._edit_items["note"], "height")) == guiapp._px(43 - 18)
+    view._tag_move(1)
+    view._tag_commit()  # вторая подсказка — «семья»
+    assert view._edit_tags == ["работа", "семья"] and not view._tag_input_open
+
+
+def test_edit_form_tag_create_remove_and_enter_adds_highlighted_suggestion(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    view.begin_edit(entry)
+    view._open_tag_input()
+    view._tag_var.set("новый")
+    app.update()
+    assert view._tag_matches() == ([], "новый")
+    view._tag_commit()
+    assert view._edit_tags == ["работа", "новый"]
+    _click_text(view.detail, "×", 1)  # крестик второго тега
+    assert view._edit_tags == ["работа"]
+    view._open_tag_input()
+    view._tag_var.set("сер")
+    view._tag_commit()  # подсвечена первая подсказка
+    assert view._edit_tags == ["работа", "серверы"]
+
+
+def test_edit_form_escape_in_tag_input_closes_only_the_input(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    view.begin_edit(entry)
+    view._open_tag_input()
+    app.update()
+    view._tag_entry.event_generate("<Escape>")
+    assert not view._tag_input_open and view.editing
+
+
+def test_edit_form_is_closed_and_cleared_on_lock(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    view.begin_edit(entry)
+    view._ev["password"].set("Secret-Pass#99xY")
+    app._on_lock()
+    app.update()
+    assert not view.editing and view._ev["password"].get() == "" and view._edit_tags == []
+    assert not view._edit_items
+    assert not any("Secret" in t for t in _canvas_texts(view.detail))
+
+
+def test_edit_form_marks_focused_field_with_light_border(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    view.begin_edit(entry)
+    app.update()
+    view._set_focus("password")
+    app.update()
+    assert view._focus == "password"
+    view._set_focus(None, only="site")  # потеря фокуса другим полем ничего не сбрасывает
+    assert view._focus == "password"
