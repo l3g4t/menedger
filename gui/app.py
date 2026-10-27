@@ -425,6 +425,139 @@ def _corner_mode(env: "os._Environ[str] | dict", argv: list[str]) -> str:
     return "native"
 
 
+# --- Буфер обмена Windows: без истории (Win+V) и облачного буфера ------------
+# Tk кладёт текст в буфер обычным образом, и Windows сохраняет его в историю
+# буфера (Win+V) и, при включённой синхронизации, отправляет в облако учётной
+# записи Microsoft. Для паролей это обход очистки через 20 секунд. Приложения
+# отключают это форматами-«метками», которые кладут в буфер рядом с текстом
+# (документация Microsoft «Clipboard formats», раздел про историю буфера):
+# наличие "ExcludeClipboardContentFromMonitorProcessing" исключает запись из
+# всех «мониторов» буфера, а DWORD 0 в "CanIncludeInClipboardHistory" и
+# "CanUploadToCloudClipboard" — из истории и из облака.
+_CF_UNICODETEXT = 13
+_GMEM_MOVEABLE = 0x0002
+_CLIPBOARD_PRIVACY_FORMATS = (
+    "ExcludeClipboardContentFromMonitorProcessing",
+    "CanIncludeInClipboardHistory",
+    "CanUploadToCloudClipboard",
+)
+
+
+def _win_clipboard_apis():
+    """`(user32, kernel32)` с описанными типами (64-битные описатели!) или None
+    вне Windows."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32.GetParent.restype = wintypes.HWND
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.CloseClipboard.restype = wintypes.BOOL
+        user32.CloseClipboard.argtypes = []
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.argtypes = []
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.RegisterClipboardFormatW.restype = wintypes.UINT
+        user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.restype = ctypes.c_void_p
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        return user32, kernel32
+    except Exception:
+        return None
+
+
+def _win_open_clipboard(user32, hwnd, sleep=time.sleep) -> bool:
+    """Буфер может быть занят другой программой (например, менеджером
+    буфера) — несколько коротких попыток."""
+    for _ in range(10):
+        if user32.OpenClipboard(hwnd):
+            return True
+        sleep(0.01)
+    return False
+
+
+def _win_clipboard_set(text: str, hwnd, apis=None, memmove=None, sleep=time.sleep) -> bool:
+    """Положить текст в буфер Windows ТАК, чтобы он не попал в историю (Win+V) и
+    в облачный буфер. True — получилось; False — вне Windows или при любой
+    ошибке (вызывающий код тогда использует обычный буфер Tk)."""
+    apis = apis if apis is not None else _win_clipboard_apis()
+    if apis is None:
+        return False
+    user32, kernel32 = apis
+    if memmove is None:
+        import ctypes
+
+        memmove = ctypes.memmove
+
+    def allocate(data: bytes):
+        handle = kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+        if not handle:
+            return None
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            kernel32.GlobalFree(handle)
+            return None
+        memmove(pointer, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        return handle
+
+    try:
+        if not _win_open_clipboard(user32, hwnd, sleep):
+            return False
+        try:
+            user32.EmptyClipboard()
+            handle = allocate((text + "\0").encode("utf-16-le"))
+            if handle is None:
+                return False
+            if not user32.SetClipboardData(_CF_UNICODETEXT, handle):
+                kernel32.GlobalFree(handle)  # владельцем стал бы буфер только при успехе
+                return False
+            # Метки конфиденциальности: сбой здесь не отменяет копирование
+            # (текст уже в буфере), но тогда запись может попасть в историю.
+            for name in _CLIPBOARD_PRIVACY_FORMATS:
+                fmt = user32.RegisterClipboardFormatW(name)
+                flag = allocate(b"\x00\x00\x00\x00")
+                if fmt and flag is not None and not user32.SetClipboardData(fmt, flag):
+                    kernel32.GlobalFree(flag)
+            return True
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return False
+
+
+def _win_clipboard_empty(hwnd, apis=None, sleep=time.sleep) -> bool:
+    """Очистить буфер Windows напрямую (`EmptyClipboard`). Нужно, когда текст
+    положен через `_win_clipboard_set`: у Tk о нём нет записи, и его
+    `clipboard clear` мог бы ничего не сделать."""
+    apis = apis if apis is not None else _win_clipboard_apis()
+    if apis is None:
+        return False
+    user32, _kernel32 = apis
+    try:
+        if not _win_open_clipboard(user32, hwnd, sleep):
+            return False
+        try:
+            return bool(user32.EmptyClipboard())
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return False
+
+
 def _win_apis():
     """`(user32, gdi32)` с описанными типами аргументов или None вне Windows."""
     if sys.platform != "win32":
@@ -824,6 +957,7 @@ class App(ttk.Window):
         # Очистка буфера обмена через 20 с (_arm_clipboard_clear).
         self._clipboard_timer: str | None = None
         self._clipboard_value: str | None = None
+        self._clipboard_private = False  # положено через Win32 (без истории Win+V)
 
         self._setup_custom_styles()
         self._install_text_editing_shortcuts()
@@ -1785,12 +1919,13 @@ class App(ttk.Window):
         """Ctrl+C/V/X/A при русской раскладке и контекстное меню (правая
         кнопка) у всех полей ввода приложения (раздел 10.56)."""
         self.bind_all("<Control-KeyPress>", self._on_control_key, add="+")
-        # Всё, что скопировано из полей ввода (в том числе показанный
-        # «глазом» мастер-пароль), тоже очищается через 20 с.
-        self.bind_all("<<Copy>>", self._on_clipboard_event, add="+")
-        self.bind_all("<<Cut>>", self._on_clipboard_event, add="+")
         for widget_class in ("TEntry", "Entry"):
             self.bind_class(widget_class, "<Button-3>", self._show_edit_menu, add="+")
+            # Копирование и вырезание из полей идёт через наш буфер (метки
+            # конфиденциальности + очистка через 20 с, раздел 10.76); без `add`
+            # привязка ЗАМЕНЯЕТ стандартную привязку класса.
+            self.bind_class(widget_class, "<<Copy>>", self._on_entry_copy)
+            self.bind_class(widget_class, "<<Cut>>", self._on_entry_cut)
 
     def _on_control_key(self, event: tk.Event) -> str | None:
         virtual = self._CYRILLIC_CONTROL_KEYS.get(event.keysym)
@@ -3214,9 +3349,23 @@ class App(ttk.Window):
         if self._save_vault():
             self._refresh_tree()
 
+    def _clipboard_hwnd(self):
+        """Описатель окна верхнего уровня (владелец буфера в Win32)."""
+        apis = _win_clipboard_apis()
+        if apis is None:
+            return None
+        try:
+            return apis[0].GetParent(self.winfo_id()) or self.winfo_id()
+        except Exception:
+            return self.winfo_id()
+
     def _copy_to_clipboard(self, value: str) -> None:
-        self.clipboard_clear()
-        self.clipboard_append(value)
+        # На Windows — через Win32 с метками «не в историю, не в облако»
+        # (см. _win_clipboard_set); иначе или при сбое — обычный буфер Tk.
+        self._clipboard_private = _win_clipboard_set(value, self._clipboard_hwnd())
+        if not self._clipboard_private:
+            self.clipboard_clear()
+            self.clipboard_append(value)
         self._arm_clipboard_clear(value)
 
     def _arm_clipboard_clear(self, value: str) -> None:
@@ -3248,21 +3397,33 @@ class App(ttk.Window):
         except tk.TclError:
             return  # буфер обмена уже пуст
         if current == expected:
+            if self._clipboard_private and _win_clipboard_empty(self._clipboard_hwnd()):
+                return
             self.clipboard_clear()
 
-    def _on_clipboard_event(self, event: tk.Event) -> None:
-        """Ctrl+C / «Копировать» / «Вырезать» в поле ввода: класс виджета уже
-        положил текст в буфер (привязка к `all` срабатывает после класса),
-        читаем его на простое и берём под ту же очистку."""
-        def arm() -> None:
-            try:
-                value = self.clipboard_get()
-            except tk.TclError:
-                return
-            if value:
-                self._arm_clipboard_clear(value)
+    def _on_entry_copy(self, event: tk.Event, cut: bool = False) -> str:
+        """Ctrl+C / «Копировать» / «Вырезать» в поле ввода — вместо стандартного
+        обработчика Tk, который писал бы прямо в буфер Windows (с историей
+        Win+V). Текст идёт через `_copy_to_clipboard`: те же метки
+        конфиденциальности и та же очистка через 20 с. Из скрытого поля
+        (`show="*"`) не копируется ничего: в буфер попали бы звёздочки, а
+        настоящий текст копировать оттуда незачем (его показывает «глаз»)."""
+        widget = event.widget
+        try:
+            if str(widget.cget("show")):
+                return "break"
+            first, last = widget.index("sel.first"), widget.index("sel.last")
+        except tk.TclError:
+            return "break"  # нет выделения
+        text = widget.get()[first:last]
+        if text:
+            self._copy_to_clipboard(text)
+            if cut and str(widget.cget("state")) == "normal":
+                widget.delete(first, last)
+        return "break"
 
-        self.after_idle(arm)
+    def _on_entry_cut(self, event: tk.Event) -> str:
+        return self._on_entry_copy(event, cut=True)
 
     def destroy(self) -> None:
         """При закрытии программы буфер чистится сразу, не дожидаясь таймера:

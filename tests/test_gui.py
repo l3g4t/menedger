@@ -1914,3 +1914,152 @@ def test_closing_the_app_clears_clipboard_immediately(app, monkeypatch):
     assert cleared
     assert _clipboard(app) == ""
     assert app._clipboard_timer is None
+
+
+# --- Буфер Windows без истории Win+V и облака (Win32-слой, поддельные API) -----
+
+
+class _FakeUser32:
+    def __init__(self, open_results=(True,), set_ok=True):
+        self.calls = []
+        self.open_results = list(open_results)
+        self.set_ok = set_ok
+        self.formats = {}
+
+    def GetParent(self, hwnd):
+        return hwnd + 1
+
+    def OpenClipboard(self, hwnd):
+        self.calls.append(("open", hwnd))
+        return self.open_results.pop(0) if len(self.open_results) > 1 else self.open_results[0]
+
+    def CloseClipboard(self):
+        self.calls.append(("close",))
+        return True
+
+    def EmptyClipboard(self):
+        self.calls.append(("empty",))
+        return True
+
+    def RegisterClipboardFormatW(self, name):
+        self.formats.setdefault(name, 0xC000 + len(self.formats))
+        return self.formats[name]
+
+    def SetClipboardData(self, fmt, handle):
+        self.calls.append(("set", fmt, handle))
+        return handle if self.set_ok else 0
+
+
+class _FakeKernel32:
+    def __init__(self):
+        self.calls = []
+        self.next_handle = 100
+
+    def GlobalAlloc(self, flags, size):
+        self.next_handle += 1
+        self.calls.append(("alloc", self.next_handle, size))
+        return self.next_handle
+
+    def GlobalLock(self, handle):
+        return handle * 1000
+
+    def GlobalUnlock(self, handle):
+        return True
+
+    def GlobalFree(self, handle):
+        self.calls.append(("free", handle))
+
+
+def _win_set(text="Secret123!", **kwargs):
+    user32, kernel32 = _FakeUser32(**kwargs), _FakeKernel32()
+    written = {}
+    ok = guiapp._win_clipboard_set(
+        text, 7, apis=(user32, kernel32),
+        memmove=lambda pointer, data, size: written.__setitem__(pointer // 1000, bytes(data)),
+        sleep=lambda _s: None,
+    )
+    return ok, user32, kernel32, written
+
+
+def test_win_clipboard_set_marks_text_as_private():
+    """Текст + три метки (не в историю Win+V, не в облако, не в мониторы)."""
+    ok, user32, _kernel32, written = _win_set()
+    assert ok
+    assert user32.calls[0] == ("open", 7) and user32.calls[1] == ("empty",) and user32.calls[-1] == ("close",)
+    set_calls = [c for c in user32.calls if c[0] == "set"]
+    assert set_calls[0][1] == guiapp._CF_UNICODETEXT
+    assert set(user32.formats) == set(guiapp._CLIPBOARD_PRIVACY_FORMATS)
+    assert {c[1] for c in set_calls[1:]} == set(user32.formats.values())
+    assert written[set_calls[0][2]] == "Secret123!\0".encode("utf-16-le")
+    for call in set_calls[1:]:
+        assert written[call[2]] == b"\x00\x00\x00\x00"  # DWORD 0
+
+
+def test_win_clipboard_set_retries_when_clipboard_is_busy():
+    ok, user32, _k, _w = _win_set(open_results=(False, False, True))
+    assert ok
+    assert [c for c in user32.calls if c[0] == "open"] == [("open", 7)] * 3
+
+
+def test_win_clipboard_set_gives_up_and_never_leaves_clipboard_open():
+    ok, user32, _k, _w = _win_set(open_results=(False,))
+    assert not ok
+    assert ("close",) not in user32.calls  # не открывали — не закрываем
+    ok, user32, kernel32, _w = _win_set(set_ok=False)
+    assert not ok
+    assert user32.calls[-1] == ("close",)
+    assert any(c[0] == "free" for c in kernel32.calls)  # память не утекла
+
+
+def test_win_clipboard_is_noop_off_windows():
+    if sys.platform != "win32":
+        assert guiapp._win_clipboard_set("x", 0) is False
+        assert guiapp._win_clipboard_empty(0) is False
+
+
+def test_win_clipboard_empty_uses_emptyclipboard():
+    user32 = _FakeUser32()
+    assert guiapp._win_clipboard_empty(7, apis=(user32, _FakeKernel32()), sleep=lambda _s: None)
+    assert user32.calls == [("open", 7), ("empty",), ("close",)]
+
+
+def test_copy_goes_through_win32_when_available_and_is_cleared_through_it(app, monkeypatch):
+    monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 150)
+    events = []
+    monkeypatch.setattr(guiapp, "_win_clipboard_set", lambda text, hwnd, **k: (events.append(("set", text)), True)[1])
+    monkeypatch.setattr(guiapp, "_win_clipboard_empty", lambda hwnd, **k: (events.append(("empty",)), True)[1])
+    app.clipboard_clear()
+    app.clipboard_append("Secret123!")  # имитация: Win32-слой «положил» текст
+    app._copy_to_clipboard("Secret123!")
+    assert events == [("set", "Secret123!")]
+    _wait(app, 0.5)
+    assert events == [("set", "Secret123!"), ("empty",)]
+
+
+def test_copy_falls_back_to_tk_clipboard_if_win32_fails(app, monkeypatch):
+    monkeypatch.setattr(guiapp, "_win_clipboard_set", lambda text, hwnd, **k: False)
+    app._copy_to_clipboard("Secret123!")
+    assert _clipboard(app) == "Secret123!"
+    assert app._clipboard_private is False
+
+
+def test_entry_copy_goes_through_app_clipboard_and_hidden_fields_copy_nothing(app, monkeypatch):
+    copied = []
+    monkeypatch.setattr(app, "_copy_to_clipboard", copied.append)
+    _create_vault(app, monkeypatch)
+    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog.update()
+    entry = _entries(dialog)[0]
+    entry.insert(0, "Secret123!")
+    entry.selection_range(0, "end")
+    entry.config(show="*")
+    entry.event_generate("<<Copy>>")
+    assert copied == []  # скрытое поле: звёздочки в буфер не кладём
+    entry.config(show="")
+    entry.selection_range(0, "end")
+    entry.event_generate("<<Copy>>")
+    assert copied == ["Secret123!"]
+    entry.selection_range(0, 6)
+    entry.event_generate("<<Cut>>")
+    assert copied[-1] == "Secret" and entry.get() == "123!"
+    dialog.destroy()
