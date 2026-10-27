@@ -54,6 +54,7 @@ from vault.crypto import (
     decrypt_vault,
     encrypt_vault,
 )
+from vault.concurrency import ConcurrentChangeError, Snapshot, VaultBusyError, VaultLock, save_merged
 from vault.storage import load_vault_file, save_vault_file
 
 # Тема ttkbootstrap — "bootstrap-light": светлая, плоская, с синим
@@ -983,6 +984,9 @@ class App(ttk.Window):
 
         self.vault_path: Path | None = None
         self.master_password: str | None = None
+        # Снимок файла на момент последнего чтения/записи нами — база для слияния,
+        # если хранилище тем временем изменил другой процесс (раздел 5.1).
+        self._snapshot: Snapshot | None = None
         # Помощник (раздел 9.4): модель грузится при первом вопросе; история чата
         # живёт только пока хранилище открыто (сбрасывается при блокировке).
         self._assistant = Assistant()
@@ -2941,6 +2945,7 @@ class App(ttk.Window):
         self.vault_path = path
         self.master_password = password
         self.data = data
+        self._snapshot = Snapshot.of(data, blob)
         self._password_var.set("")
         self._unlock_status.config(text="")
         self._show_main()
@@ -2974,6 +2979,7 @@ class App(ttk.Window):
         self.vault_path = path
         self.master_password = password
         self.data = data
+        self._snapshot = Snapshot.of(data, blob)
         self._password_var.set("")
         self._unlock_status.config(text="")
         messagebox.showinfo("Готово", f"Хранилище создано: {path}", parent=self)
@@ -3268,15 +3274,37 @@ class App(ttk.Window):
         return entries[index]
 
     def _save_vault(self) -> bool:
-        """Перешифровать и сохранить self.data. При ошибке показывает
-        сообщение и возвращает False — вызывающий код не должен считать
-        операцию завершённой."""
+        """Сохранить self.data, не затерев изменения других процессов
+        (раздел 5.1). Если файл тем временем изменили (например, добавили запись
+        через CLI), версии объединяются, а `self.data` заменяется результатом.
+        При ошибке показывает сообщение и возвращает False — вызывающий код не
+        должен считать операцию завершённой."""
+        base = self._snapshot or Snapshot(data={"entries": []}, fingerprint=None)
         try:
-            blob = encrypt_vault(self.data, self.master_password)
-            save_vault_file(self.vault_path, blob)
+            merged, snapshot, external = save_merged(self.vault_path, self.master_password, self.data, base)
+        except ConcurrentChangeError as exc:
+            messagebox.showerror(
+                "Хранилище изменено",
+                f"{exc}\n\nНичего не записано, чтобы не потерять чужие данные. "
+                "Закройте хранилище и откройте его заново, затем повторите действие.",
+                parent=self,
+            )
+            return False
+        except VaultBusyError as exc:
+            messagebox.showerror("Хранилище занято", str(exc), parent=self)
+            return False
         except OSError as exc:
             messagebox.showerror("Ошибка", f"Не удалось сохранить хранилище: {exc}", parent=self)
             return False
+        self.data, self._snapshot = merged, snapshot
+        if external:
+            self._refresh_tree()
+            messagebox.showinfo(
+                "Хранилище обновлено",
+                "Пока хранилище было открыто, его изменили в другом окне или через командную строку.\n"
+                "Изменения объединены с вашими — ничего не потеряно.",
+                parent=self,
+            )
         return True
 
     # ------------------------------------------------------------------
@@ -3481,8 +3509,17 @@ class App(ttk.Window):
         if not self._save_vault():
             return
         try:
-            blob = change_master_password(load_vault_file(self.vault_path), old_password, new_password)
-            save_vault_file(self.vault_path, blob)
+            # Под блокировкой (раздел 5.1): свежий файл читается и сразу пишется,
+            # чтобы между этими шагами другой процесс не успел добавить запись.
+            with VaultLock(self.vault_path):
+                blob = change_master_password(load_vault_file(self.vault_path), old_password, new_password)
+                save_vault_file(self.vault_path, blob)
+                # Данные в памяти — ровно то, что теперь в файле (в том числе
+                # записи, добавленные другим процессом за секунды до этого).
+                data = decrypt_vault(blob, new_password)
+        except VaultBusyError as exc:
+            messagebox.showerror("Хранилище занято", str(exc), parent=self)
+            return
         except InvalidMasterPasswordError:
             messagebox.showerror("Ошибка", "Неверный текущий мастер-пароль.", parent=self)
             return
@@ -3494,6 +3531,9 @@ class App(ttk.Window):
             return
 
         self.master_password = new_password
+        self.data = data
+        self._snapshot = Snapshot.of(data, blob)
+        self._refresh_tree()
         messagebox.showinfo(
             "Мастер-пароль изменён",
             "Хранилище перешифровано новым мастер-паролем.\n\n"
@@ -3522,6 +3562,7 @@ class App(ttk.Window):
         # компромисс, с которым живёт и CLI, пока процесс не завершится.
         self.master_password = None
         self.data = None
+        self._snapshot = None
         self.vault_path = None
         self._assistant_history = []
         self._main_frame.pack_forget()

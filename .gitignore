@@ -8,6 +8,7 @@ venv/
 
 # Хранилище паролей — никогда не должно попасть в git
 *.vault
+*.vault.lock
 vault.db
 vault.bin
 

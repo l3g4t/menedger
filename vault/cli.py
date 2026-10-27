@@ -39,6 +39,13 @@ from vault.crypto import (
     decrypt_vault,
     encrypt_vault,
 )
+from vault.concurrency import (
+    ConcurrentChangeError,
+    Snapshot,
+    VaultBusyError,
+    VaultLock,
+    save_merged,
+)
 from vault.storage import load_vault_file, save_vault_file
 
 from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, analyze_vault, format_report
@@ -63,6 +70,13 @@ def _open_vault(path: Path, master_password: str) -> dict:
     """Прочитать и расшифровать хранилище, превращая внутренние
     исключения vault.crypto в понятные сообщения для пользователя CLI.
     """
+    return _open_vault_with_snapshot(path, master_password)[0]
+
+
+def _open_vault_with_snapshot(path: Path, master_password: str) -> tuple[dict, Snapshot]:
+    """То же, что `_open_vault`, плюс снимок состояния файла на момент чтения —
+    он нужен командам, которые потом ПИШУТ в хранилище (`_save`): по нему
+    видно, не изменил ли файл кто-то ещё, пока мы ждали ввода (раздел 5.1)."""
     if not path.exists():
         print(
             f"Хранилище не найдено: {path}\n"
@@ -74,7 +88,7 @@ def _open_vault(path: Path, master_password: str) -> dict:
     blob = load_vault_file(path)
 
     try:
-        return decrypt_vault(blob, master_password)
+        data = decrypt_vault(blob, master_password)
     except InvalidMasterPasswordError:
         # Намеренно единственное сообщение для пользователя — как и
         # требует CLAUDE.md, раздел 4: снаружи не должно быть заметно,
@@ -84,6 +98,26 @@ def _open_vault(path: Path, master_password: str) -> dict:
     except VaultFormatError as exc:
         print(f"Файл повреждён или это не файл хранилища: {exc}", file=sys.stderr)
         raise SystemExit(1)
+    return data, Snapshot.of(data, blob)
+
+
+def _save(path: Path, master_password: str, data: dict, base: Snapshot) -> None:
+    """Сохранить изменённые данные, не затерев то, что за это время записал
+    другой процесс (GUI, второе окно терминала): см. vault.concurrency."""
+    try:
+        _merged, _snapshot, external = save_merged(path, master_password, data, base)
+    except ConcurrentChangeError as exc:
+        print(f"{exc} Ничего не записано, чтобы не потерять данные. Повторите команду.", file=sys.stderr)
+        raise SystemExit(1)
+    except VaultBusyError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
+    if external:
+        print(
+            "Замечание: хранилище изменили, пока вы работали (другое окно или программа). "
+            "Изменения объединены, ничего не потеряно.",
+            file=sys.stderr,
+        )
 
 
 def _prompt_new_master_password(prompt: str, confirm_prompt: str) -> str:
@@ -160,9 +194,16 @@ def cmd_change_master(args: argparse.Namespace) -> None:
         print("Новый мастер-пароль совпадает с текущим — менять нечего.", file=sys.stderr)
         raise SystemExit(1)
 
-    blob = change_master_password(load_vault_file(path), old_password, new_password)
-    # Запись атомарная (раздел 5): при сбое на диске останется старый файл.
-    save_vault_file(path, blob)
+    # Под блокировкой (раздел 5.1): читаем свежий файл и сразу пишем, чтобы между
+    # чтением и записью другой процесс не успел добавить запись. Запись атомарная
+    # (раздел 5): при сбое на диске останется старый файл.
+    try:
+        with VaultLock(path):
+            blob = change_master_password(load_vault_file(path), old_password, new_password)
+            save_vault_file(path, blob)
+    except VaultBusyError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1)
     print("Мастер-пароль изменён. Хранилище перешифровано заново.")
     print(
         "Внимание: старые резервные копии файла по-прежнему открываются СТАРЫМ паролем — "
@@ -175,7 +216,7 @@ def cmd_add(args: argparse.Namespace) -> None:
     """Добавить новую запись (сайт/логин/пароль) в существующее хранилище."""
     path = Path(args.path)
     master_password = _prompt_secret()
-    data = _open_vault(path, master_password)
+    data, base = _open_vault_with_snapshot(path, master_password)
 
     username = args.username or input("Имя пользователя/логин: ")
     password = _prompt_secret("Пароль для сохранения: ")
@@ -194,8 +235,7 @@ def cmd_add(args: argparse.Namespace) -> None:
 
     # Полное перешифрование всего хранилища с новыми salt/nonce — см.
     # CLAUDE.md, раздел 3 ("Почему nonce обязан быть уникальным").
-    blob = encrypt_vault(data, master_password)
-    save_vault_file(path, blob)
+    _save(path, master_password, data, base)
     print(f"Запись для «{args.site}» добавлена.")
 
 
@@ -263,7 +303,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     """
     path = Path(args.path)
     master_password = _prompt_secret()
-    data = _open_vault(path, master_password)
+    data, base = _open_vault_with_snapshot(path, master_password)
 
     matches = _find_matches(data, args.site, args.username)
     if not matches:
@@ -287,8 +327,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     entry["password"] = new_password
     entry["created_at"] = now_iso()
 
-    blob = encrypt_vault(data, master_password)
-    save_vault_file(path, blob)
+    _save(path, master_password, data, base)
     print(f"Пароль для «{entry['site']}» ({entry['username']}) обновлён.")
 
 
@@ -300,7 +339,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
     важно не допустить одной опечаткой)."""
     path = Path(args.path)
     master_password = _prompt_secret()
-    data = _open_vault(path, master_password)
+    data, base = _open_vault_with_snapshot(path, master_password)
 
     matches = _find_matches(data, args.site, args.username)
     if not matches:
@@ -325,8 +364,7 @@ def cmd_delete(args: argparse.Namespace) -> None:
     matched_ids = {id(entry) for entry in matches}
     data["entries"] = [e for e in data.get("entries", []) if id(e) not in matched_ids]
 
-    blob = encrypt_vault(data, master_password)
-    save_vault_file(path, blob)
+    _save(path, master_password, data, base)
     print(f"Удалено записей: {len(matches)}.")
 
 

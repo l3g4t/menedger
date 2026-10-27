@@ -2063,3 +2063,112 @@ def test_entry_copy_goes_through_app_clipboard_and_hidden_fields_copy_nothing(ap
     entry.event_generate("<<Cut>>")
     assert copied[-1] == "Secret" and entry.get() == "123!"
     dialog.destroy()
+
+
+# --- Потерянное обновление: GUI и CLI пишут в один файл (раздел 5.1) ----------
+
+
+def _disk_sites(app, password=MASTER):
+    from vault.crypto import decrypt_vault
+    from vault.storage import load_vault_file
+
+    return [e["site"] for e in decrypt_vault(load_vault_file(app.vault_path), password)["entries"]]
+
+
+def _external_add(app, site, password=MASTER):
+    """Имитация «CLI добавил запись, пока GUI открыт»."""
+    from vault.crypto import decrypt_vault, encrypt_vault
+    from vault.storage import load_vault_file, save_vault_file
+
+    data = decrypt_vault(load_vault_file(app.vault_path), password)
+    data["entries"].append({"site": site, "username": "cli", "password": "x", "created_at": "2026-02-01T00:00:00Z"})
+    save_vault_file(app.vault_path, encrypt_vault(data, password))
+
+
+def _entry(site):
+    return {"site": site, "username": "gui", "password": "y", "created_at": "2026-01-01T00:00:00Z"}
+
+
+def test_gui_save_does_not_erase_entry_added_by_cli(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    infos = []
+    monkeypatch.setattr(guiapp.messagebox, "showinfo", lambda *a, **k: infos.append(a))
+    app.data["entries"].append(_entry("first.com"))
+    assert app._save_vault()
+    assert infos == []  # чужих изменений не было — окна нет
+
+    _external_add(app, "from-cli.com")  # CLI записал, GUI об этом не знает
+    app.data["entries"].append(_entry("second.com"))
+    assert app._save_vault()
+
+    assert sorted(_disk_sites(app)) == ["first.com", "from-cli.com", "second.com"]
+    assert sorted(e["site"] for e in app.data["entries"]) == ["first.com", "from-cli.com", "second.com"]
+    assert len(app._tree.get_children()) == 3  # список обновился
+    assert infos and "объединены" in infos[0][1]
+
+
+def test_gui_deleting_entry_still_works_after_merge(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    app.data["entries"].extend([_entry("a.com"), _entry("b.com")])
+    assert app._save_vault()
+    _external_add(app, "from-cli.com")
+    app.data["entries"] = [e for e in app.data["entries"] if e["site"] != "a.com"]
+    assert app._save_vault()
+    assert sorted(_disk_sites(app)) == ["b.com", "from-cli.com"]
+
+
+def test_gui_save_refuses_to_overwrite_file_with_other_master_password(app, monkeypatch):
+    from vault.crypto import encrypt_vault
+    from vault.storage import load_vault_file, save_vault_file
+
+    _create_vault(app, monkeypatch)
+    errors = []
+    monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a))
+    foreign = encrypt_vault({"entries": [_entry("secret.com")]}, "совсем другой мастер-пароль")
+    save_vault_file(app.vault_path, foreign)
+    app.data["entries"].append(_entry("mine.com"))
+
+    assert app._save_vault() is False
+    assert load_vault_file(app.vault_path) == foreign  # чужой файл не затёрт
+    assert errors and "Хранилище изменено" in errors[0][0]
+
+
+def test_gui_reports_busy_vault(app, monkeypatch):
+    from vault.concurrency import VaultBusyError
+
+    _create_vault(app, monkeypatch)
+    errors = []
+    monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a))
+
+    def busy(*args, **kwargs):
+        raise VaultBusyError("занято")
+
+    monkeypatch.setattr(guiapp, "save_merged", busy)
+    assert app._save_vault() is False
+    assert errors and errors[0][0] == "Хранилище занято"
+
+
+def test_change_master_keeps_entry_added_by_cli_and_resyncs_snapshot(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    app.data["entries"].append(_entry("mine.com"))
+    assert app._save_vault()
+    _external_add(app, "from-cli.com")
+    monkeypatch.setattr(guiapp.messagebox, "showinfo", lambda *a, **k: None)
+    _fake_change_dialog(monkeypatch, MASTER, NEW_MASTER)
+
+    app._on_change_master()
+
+    assert sorted(_disk_sites(app, NEW_MASTER)) == ["from-cli.com", "mine.com"]
+    assert sorted(e["site"] for e in app.data["entries"]) == ["from-cli.com", "mine.com"]
+    # снимок согласован с файлом: следующее сохранение не считает файл «чужим»
+    infos = []
+    monkeypatch.setattr(guiapp.messagebox, "showinfo", lambda *a, **k: infos.append(a))
+    assert app._save_vault()
+    assert infos == []
+
+
+def test_lock_clears_snapshot(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    assert app._snapshot is not None
+    app._on_lock()
+    assert app._snapshot is None
