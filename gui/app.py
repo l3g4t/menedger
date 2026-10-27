@@ -196,12 +196,11 @@ def _px(value: float) -> int:
 _MASTER_FIELD_WIDTH = 260  # px
 _MASTER_FIELD_HEIGHT = 38  # px
 
-# Диалог просмотра записи: высота плиток-полей и квадратных кнопок рядом с
-# ними — одна и та же, чтобы ряд читался как единая группа (раздел 10.42).
-_VIEW_FIELD_HEIGHT = 36  # px
+# Панель записи справа в главном окне (раздел 10.78): ширина и размер кнопок-иконок.
+_DETAIL_WIDTH = 300  # px
+_DETAIL_BUTTON_SIZE = 30  # px, квадратные кнопки-иконки (копировать, глаз, карандаш, корзина)
 _GENERATOR_FIELD_HEIGHT = 42  # px, поле пароля генератора и кнопка копирования
 _NEW_PASSWORD_CONTENT_WIDTH = 360  # px — ширина содержимого диалога нового пароля (раздел 10.51)
-_VIEW_CONTENT_WIDTH = 330  # px — ширина тела диалога (без нижних кнопок её задавать нечем)
 _VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (разделы 10.45–10.46)
 # Экран разблокировки (раздел 10.46): высота полей ввода и ВСЕХ кнопок на
 # нём одна — иначе кнопка рядом с полем выше/ниже него.
@@ -211,8 +210,8 @@ _UNLOCK_CONTROL_HEIGHT = 42  # px
 # главный экран.
 _UNLOCK_MARGIN_X = 40  # px
 _UNLOCK_MARGIN_Y = 24  # px
-_MAIN_WINDOW_SIZE = (980, 640)  # px
-_MAIN_MIN_SIZE = (760, 460)  # px
+_MAIN_WINDOW_SIZE = (1080, 640)  # px
+_MAIN_MIN_SIZE = (900, 460)  # px
 # Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
 # этого цвета окно не рисует. Яркий и нигде больше в интерфейсе не встречается.
 _WINDOW_KEY_COLOR = "#fe00fe"
@@ -881,6 +880,11 @@ class TitleBar(tk.Frame):
         self._drag_offset = None
 
 
+def _entry_key(entry: dict) -> tuple[str, str, str]:
+    """Чем запись узнаётся после слияния с чужими изменениями, когда объекты пересозданы."""
+    return (entry.get("site", ""), entry.get("username", ""), entry.get("created_at", ""))
+
+
 class App(ttk.Window):
     """Главное окно приложения.
 
@@ -983,7 +987,11 @@ class App(ttk.Window):
         # Тот же приём, для аватаров списка записей (`_site_avatar`,
         # раздел 10.12) — тоже на экземпляр, а не на модуль, по той же
         # причине (см. комментарий выше про self._icons).
-        self._avatar_images: dict[tuple[str, str], ImageTk.PhotoImage] = {}
+        self._avatar_images: dict[tuple[str, str, int], ImageTk.PhotoImage] = {}
+        # Запись, открытая в панели справа (раздел 10.78), и показан ли её пароль.
+        self._detail_entry: dict | None = None
+        self._detail_password_visible = False
+        self._select_after_refresh: dict | None = None
         # Тот же приём — для цветных кружков-маркеров категорий находок
         # в `AuditDialog` (раздел 10.24).
         self._advisor_markers: dict[str, ImageTk.PhotoImage] = {}
@@ -2006,10 +2014,10 @@ class App(ttk.Window):
         `self._icon(...)` падал с `TypeError: 'PhotoImage' object is not
         callable`.
 
-        Диалоги (EntryDialog, ViewEntryDialog, GeneratorDialog) не
+        Диалоги (EntryDialog, GeneratorDialog) не
         наследуются от App, но все получают ссылку на неё как parent —
         поэтому зовут этот метод как `parent._icon_kwargs(...)`, тем же
-        способом, каким ViewEntryDialog уже дёргает
+        способом, каким диалоги уже дёргают
         `parent._copy_to_clipboard(...)`. Если файла нет, тихо
         возвращает None — отсутствие иконки не должно ронять кнопку.
         """
@@ -2036,7 +2044,7 @@ class App(ttk.Window):
             return {}
         return {"image": image, "compound": "left"}
 
-    def _site_avatar(self, site: str) -> ImageTk.PhotoImage:
+    def _site_avatar(self, site: str, base_size: int = 28) -> ImageTk.PhotoImage:
         """Цветной кружок с первой буквой сайта — раздел 10.12. Цвет и
         буква зависят только от `site`, поэтому одна и та же запись
         рисуется одинаково от показа к показу; кэш (`self._avatar_
@@ -2062,9 +2070,9 @@ class App(ttk.Window):
         # цвета из маленькой палитры этого достаточно (это не
         # криптография, а просто разбрасывание по цветам).
         color = _AVATAR_PALETTE[sum(map(ord, site)) % len(_AVATAR_PALETTE)]
-        cache_key = (letter, color)
+        cache_key = (letter, color, base_size)
         if cache_key not in self._avatar_images:
-            size, factor = _px(28), 4
+            size, factor = _px(base_size), 4
             big = Image.new("RGBA", (size * factor, size * factor), (0, 0, 0, 0))
             draw = ImageDraw.Draw(big)
             draw.ellipse([0, 0, size * factor - 1, size * factor - 1], fill=color)
@@ -3142,7 +3150,15 @@ class App(ttk.Window):
         # а небольшой отступ (`padding`) внутри рамки не даёт собственной
         # (прямоугольной) рамке `Entry` вылезти за скруглённые углы
         # подложки.
-        search_row = ttk.Frame(content, padding=(_px(6), _px(4)))
+        # Под панелью инструментов — два столбца: список записей и справа панель
+        # выбранной записи (раздел 10.78) вместо отдельного окна просмотра.
+        columns_row = ttk.Frame(content)
+        columns_row.pack(fill="both", expand=True)
+        list_column = ttk.Frame(columns_row)
+        list_column.pack(side="left", fill="both", expand=True)
+        self._build_detail_panel(columns_row)
+
+        search_row = ttk.Frame(list_column, padding=(_px(6), _px(4)))
         search_row.pack(fill="x", pady=(_px(12), _px(8)))
         self._rounded_backdrop(
             search_row,
@@ -3189,7 +3205,7 @@ class App(ttk.Window):
         # добавляем скруглённую по всем четырём углам подложку СНАРУЖИ, с
         # небольшим отступом, чтобы прямые углы самого `Treeview` не
         # вылезали за скруглённые углы подложки.
-        table_wrap = ttk.Frame(content, padding=_px(6))
+        table_wrap = ttk.Frame(list_column, padding=_px(6))
         table_wrap.pack(fill="both", expand=True)
         self._rounded_backdrop(
             table_wrap,
@@ -3218,16 +3234,13 @@ class App(ttk.Window):
         self._tree.column("#0", width=_px(44), stretch=False, anchor="center")
         self._tree.heading("site", text="Сайт")
         self._tree.heading("username", text="Логин")
-        self._tree.column("site", width=_px(280))
-        self._tree.column("username", width=_px(220))
+        self._tree.column("site", width=_px(150))
+        self._tree.column("username", width=_px(150))
         self._tree.tag_configure("evenrow", background=_TREE_ROW_COLORS["evenrow"])
         self._tree.tag_configure("oddrow", background=_TREE_ROW_COLORS["oddrow"])
         self._tree.pack(fill="both", expand=True)
-        # Двойной клик по строке — по-прежнему открывает запись (просмотр
-        # логина/пароля/даты, см. ViewEntryDialog), теперь наравне с
-        # кнопкой "Просмотр" на панели инструментов, а не единственным
-        # способом это сделать.
-        self._tree.bind("<Double-1>", lambda _event: self._on_view_selected())
+        # Выбор строки открывает запись в панели справа (раздел 10.78).
+        self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         return page
 
@@ -3251,8 +3264,14 @@ class App(ttk.Window):
         self._refresh_tree()
 
     def _refresh_tree(self) -> None:
+        # Какую запись показывать после перестройки списка: только что
+        # добавленную, иначе ту, что была открыта в панели (раздел 10.78).
+        target = self._select_after_refresh or self._detail_entry
+        self._select_after_refresh = None
         self._tree.delete(*self._tree.get_children())
         if self.data is None:
+            self._detail_entry = None
+            self._render_detail()
             return
 
         raw_query = self._search_var.get()
@@ -3262,6 +3281,8 @@ class App(ttk.Window):
         # в обход событий фокуса (как делают tests/test_gui.py).
         query = "" if raw_query == _SEARCH_PLACEHOLDER else raw_query.strip().lower()
         visible_position = 0
+        same_iid: str | None = None  # та же запись (тот же объект)
+        similar_iid: str | None = None  # запись с тем же сайтом/логином/датой (данные пересобраны слиянием)
         for index, entry in enumerate(self.data.get("entries", [])):
             haystack = f"{entry['site']} {entry['username']}".lower()
             if query and query not in haystack:
@@ -3283,7 +3304,163 @@ class App(ttk.Window):
                 values=(entry["site"], entry["username"]),
                 tags=(tag,),
             )
+            if target is not None:
+                if entry is target:
+                    same_iid = str(index)
+                elif similar_iid is None and _entry_key(entry) == _entry_key(target):
+                    similar_iid = str(index)
             visible_position += 1
+
+        chosen = same_iid or similar_iid
+        if chosen is not None:
+            self._tree.selection_set(chosen)
+            self._tree.see(chosen)
+            self._detail_entry = self.data["entries"][int(chosen)]
+        else:
+            self._detail_entry = None  # запись исчезла (удалена или скрыта поиском)
+        self._render_detail()
+
+    def _on_tree_select(self, _event: object = None) -> None:
+        """Выбор строки списка: показать запись в панели справа."""
+        entry = self._selected_entry()
+        if entry is not self._detail_entry:
+            self._detail_password_visible = False  # новая запись — пароль снова скрыт
+        self._detail_entry = entry
+        self._render_detail()
+
+    def _build_detail_panel(self, parent: ttk.Frame) -> None:
+        """Панель выбранной записи справа от списка (раздел 10.78): аватар и
+        сайт, логин, пароль (скрыт точками), дата, кнопки копирования, показа
+        пароля, смены пароля и удаления. Строится один раз, дальше
+        `_render_detail` только меняет тексты и переключает «пусто»/«запись»."""
+        panel = ttk.Frame(parent, padding=_px(16), width=_px(_DETAIL_WIDTH))
+        panel.pack_propagate(False)
+        panel.pack(side="left", fill="y", padx=(_px(16), 0), pady=(_px(12), 0))
+        self._rounded_backdrop(
+            panel,
+            "#ffffff",
+            corners=(True, True, True, True),
+            surface="#ffffff",
+            radius=_ROUNDED_RADIUS,
+            border_color=_NEUTRAL_BORDER,
+            border_width=1,
+            dynamic=True,
+        )
+        text_width = _px(_DETAIL_WIDTH - 32 - 24)  # ширина текста внутри плитки
+        self._detail_empty = ttk.Label(
+            panel,
+            text="Выберите запись в списке,\nчтобы увидеть логин и пароль",
+            justify="center",
+            foreground=_SEARCH_PLACEHOLDER_COLOR,
+        )
+        self._detail_empty.pack(expand=True)
+
+        body = ttk.Frame(panel)
+        self._detail_body = body
+        icon_style = self._rounded_button_style(
+            "Rounded.IconToggleSquare",
+            _NEUTRAL_FILL,
+            _NEUTRAL_TEXT,
+            border_color=_NEUTRAL_BORDER,
+            padding=(0, 0),
+            element_padding=0,
+        )
+
+        def icon_button(row: ttk.Frame, icon_name: str, command: Callable[[], None]) -> ttk.Button:
+            side = _px(_DETAIL_BUTTON_SIZE)
+            cell = ttk.Frame(row, width=side, height=side)
+            cell.pack_propagate(False)
+            cell.pack(side="right", padx=(_px(4), 0))
+            # compound="image": кнопка без текста (раздел 10.44).
+            button = ttk.Button(
+                cell, command=command, **{**self._icon_kwargs(icon_name, "dark", center=True), "compound": "image"}
+            )
+            self._styled(button, icon_style).pack(fill="both", expand=True)
+            return button
+
+        header = ttk.Frame(body)
+        header.pack(fill="x")
+        self._detail_avatar = tk.Label(header, bd=0, highlightthickness=0, background="#ffffff")
+        self._detail_avatar.pack(side="left", padx=(0, _px(10)))
+        self._detail_delete = icon_button(header, "trash", self._on_detail_delete)
+        self._detail_site = ttk.Label(
+            header, font=("", 13, "bold"), foreground=_SIDEBAR_BG, wraplength=_px(_DETAIL_WIDTH - 32 - 40 - 40 - 14)
+        )
+        self._detail_site.pack(side="left", fill="x", expand=True)
+
+        def field(caption: str) -> tuple[ttk.Frame, ttk.Label]:
+            caption_row = ttk.Frame(body, height=_px(_DETAIL_BUTTON_SIZE))
+            caption_row.pack(fill="x", pady=(_px(14), _px(4)))
+            ttk.Label(caption_row, text=caption.upper(), font=("", 8, "bold"), bootstyle="secondary").pack(
+                side="left"
+            )
+            tile = ttk.Frame(body, padding=(_px(10), _px(7)))
+            tile.pack(fill="x")
+            self._rounded_backdrop(
+                tile,
+                _NEUTRAL_FILL,
+                corners=(True, True, True, True),
+                surface="#ffffff",
+                radius=_ROUNDED_RADIUS,
+                border_color=_NEUTRAL_BORDER,
+                border_width=1,
+                dynamic=True,
+            )
+            # Длинное значение (почта, пароль) переносится, а не обрезается.
+            label = ttk.Label(
+                tile, background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT, wraplength=text_width, justify="left"
+            )
+            label.pack(anchor="w")
+            return caption_row, label
+
+        login_caption, self._detail_login = field("Логин")
+        icon_button(login_caption, "copy", self._on_detail_copy_login)
+        password_caption, self._detail_password = field("Пароль")
+        icon_button(password_caption, "copy", self._on_detail_copy_password)
+        icon_button(password_caption, "pencil", self._on_detail_change_password)
+        self._detail_eye = icon_button(password_caption, "eye", self._on_detail_toggle_password)
+        _, self._detail_date = field("Создан / изменён")
+
+    def _render_detail(self) -> None:
+        """Показать в панели справа `self._detail_entry` (или подсказку, если записи нет)."""
+        entry = self._detail_entry
+        if entry is None or self.data is None:
+            self._detail_password_visible = False
+            self._detail_body.pack_forget()
+            self._detail_empty.pack(expand=True)
+            return
+        self._detail_empty.pack_forget()
+        self._detail_body.pack(fill="both", expand=True)
+        self._detail_avatar.configure(image=self._site_avatar(entry["site"], 40))
+        self._detail_site.configure(text=entry["site"])
+        self._detail_login.configure(text=entry["username"] or "—")
+        password = entry["password"]
+        self._detail_password.configure(text=password if self._detail_password_visible else "•" * len(password))
+        try:
+            created = datetime.strptime(entry["created_at"], CREATED_AT_FORMAT).strftime("%d.%m.%Y")
+        except (KeyError, ValueError):
+            created = entry.get("created_at", "—")
+        self._detail_date.configure(text=created)
+
+    def _on_detail_toggle_password(self) -> None:
+        self._detail_password_visible = not self._detail_password_visible
+        self._render_detail()
+
+    def _on_detail_copy_login(self) -> None:
+        if self._detail_entry is not None:
+            self._copy_to_clipboard(self._detail_entry["username"])
+
+    def _on_detail_copy_password(self) -> None:
+        if self._detail_entry is not None:
+            self._copy_to_clipboard(self._detail_entry["password"])
+
+    def _on_detail_change_password(self) -> None:
+        if self._detail_entry is not None:
+            self._on_update_entry(self._detail_entry)
+
+    def _on_detail_delete(self) -> None:
+        if self._detail_entry is not None:
+            self._delete_entry(self._detail_entry)
 
     def _selected_entry(self) -> dict | None:
         selection = self._tree.selection()
@@ -3342,23 +3519,18 @@ class App(ttk.Window):
             return
 
         site, username, password = dialog.result
-        self.data.setdefault("entries", []).append(
-            {
-                "site": site,
-                "username": username,
-                "password": password,
-                "created_at": now_iso(),
-            }
-        )
+        new_entry = {
+            "site": site,
+            "username": username,
+            "password": password,
+            "created_at": now_iso(),
+        }
+        self.data.setdefault("entries", []).append(new_entry)
+        # Новая запись сразу открывается в панели справа (раздел 10.78); если
+        # она скрыта поиском, панель просто очистится.
+        self._select_after_refresh = new_entry
         if self._save_vault():
             self._refresh_tree()
-
-    def _on_view_selected(self) -> None:
-        entry = self._selected_entry()
-        if entry is None:
-            messagebox.showinfo("Нет выбора", "Сначала выберите запись в списке.", parent=self)
-            return
-        ViewEntryDialog(self, entry)
 
     def _on_update_entry(self, entry: dict) -> None:
         """Сменить пароль записи. created_at обновляется на текущий
@@ -3375,6 +3547,7 @@ class App(ttk.Window):
         entry["password"] = new_password
         entry["created_at"] = now_iso()
         self._save_vault()
+        self._refresh_tree()  # панель справа покажет новую дату
 
     def _on_delete_selected(self) -> None:
         entry = self._selected_entry()
@@ -3589,6 +3762,8 @@ class App(ttk.Window):
         self._snapshot = None
         self.vault_path = None
         self._assistant_history = []
+        self._detail_entry = None
+        self._render_detail()  # панель записи не должна хранить пароль на экране после блокировки
         self._main_frame.pack_forget()
         self._unlock_frame.pack(fill="both", expand=True)
         self._set_chrome_theme("dark")
@@ -4112,206 +4287,6 @@ class NewPasswordDialog(ttk.Toplevel):
             return
         self.result = password
         self.destroy()
-
-
-class ViewEntryDialog(ttk.Toplevel):
-    """Просмотр одной записи целиком: логин/пароль/дата + действия
-    (раздел 10.9) — тёмная "шапка" с названием записи + белое тело с
-    полями как read-only "плитками" (тот же язык, что и карточка
-    главного экрана, раздел 10.8) вместо прежней плоской формы
-    label/label в grid."""
-
-    def __init__(self, parent: App, entry: dict) -> None:
-        title = f"Запись — {entry['site']}"
-        super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
-        # Скруглённые углы САМОГО окна (раздел 10.45): только на Windows
-        # (`-transparentcolor`), только с собственной рамкой. Иначе — как раньше.
-        rounded = (not parent._native_frame) and _enable_transparent_corners(self)
-        key = _WINDOW_KEY_COLOR if rounded else None
-        parent._dialog_chrome(self, title, theme="dark", bar=False, border=not rounded, rounded=False)
-        if rounded:
-            # Всё, что не закрыто шапкой/телом, — прозрачно, а не серый квадрат.
-            self.configure(background=_WINDOW_KEY_COLOR)
-        self._parent = parent
-        self._entry = entry
-        self.transient(parent)
-
-        # Собранные, но ещё НЕ вызванные функции перерисовки скруглённых
-        # подложек (`_rounded_backdrop`, раздел 10.9) — вызываются все
-        # разом в самом конце, ПОСЛЕ `update_idletasks()`, когда у всех
-        # фреймов уже точно сложился итоговый размер (см. подробное
-        # объяснение бага в докстринге `_rounded_backdrop`).
-        pending_backdrops: list[Callable[[], None]] = []
-
-        # Шапка — ОДНА тёмная полоса высотой в строку заголовка: иконка,
-        # название записи и крестик. Раньше это были две полосы подряд
-        # (строка с крестиком + шапка с иконкой и названием).
-        window_radius = _px(_VIEW_WINDOW_RADIUS) if rounded else 0
-        header = ttk.Frame(self)
-        header.pack(fill="x")
-        # Со своей рамкой шапка тёмная (она заменяет строку заголовка); с системной
-        # заголовок рисует ОС, и наша полоса — белая с тёмно-синим текстом
-        # (раздел 10.75): тёмная плашка только под текстом выглядела выделением.
-        header_fill = "#ffffff" if parent._native_frame else _SIDEBAR_BG
-        pending_backdrops.append(
-            parent._rounded_backdrop(
-                header,
-                header_fill,
-                corners=(rounded, rounded, False, False),
-                surface=_WINDOW_KEY_COLOR if rounded else "#ffffff",
-                radius=_VIEW_WINDOW_RADIUS,
-                key=key,
-            )
-        )
-        if parent._native_frame:
-            # Системная рамка: заголовок и крестик рисует сама ОС, у нас — только
-            # компактная белая полоса с иконкой и названием тёмно-синим цветом.
-            brand = ttk.Frame(header, padding=(_px(16), _px(6)))
-            brand.pack(fill="x")
-            if hasattr(parent, "_icon_image_tiny"):
-                tk.Label(
-                    brand, image=parent._icon_image_tiny, bd=0, highlightthickness=0, background="#ffffff"
-                ).pack(side="left", padx=(0, _px(8)))
-            self._header_title = tk.Label(
-                brand, text=title, background="#ffffff", foreground=_SIDEBAR_BG, font=("", 11, "bold"), bd=0
-            )
-            self._header_title.pack(side="left")
-        else:
-            bar = TitleBar(header, parent, self, title, theme="dark", controls=("close",), show_title=True)
-            # Отступ по бокам = радиус: углы окна остаются за подложкой шапки,
-            # а не закрыты прямоугольными краями строки заголовка.
-            bar.pack(fill="x", padx=(window_radius, window_radius))
-            bar._title_label.configure(foreground="#ffffff", font=("", 10, "bold"))
-            bar._title_label.pack_configure(padx=(_px(8), 0))
-            if hasattr(parent, "_icon_image_tiny"):
-                tk.Label(
-                    bar, image=parent._icon_image_tiny, bd=0, highlightthickness=0, background=_SIDEBAR_BG
-                ).pack(side="left", padx=(_px(12), 0), before=bar._title_label)
-
-        body = ttk.Frame(self, padding=_px(20))
-        body.pack(fill="both", expand=True)
-        # Без нижних кнопок ширину диалога больше ничто не задаёт — "распорка"
-        # фиксированной ширины. Фон — белый, как у тела: у Tk минимальная
-        # высота такого фрейма 1px, и с фоном по умолчанию он рисовал бы
-        # серую линию под шапкой.
-        tk.Frame(
-            body, width=_px(_VIEW_CONTENT_WIDTH), height=0, bd=0, highlightthickness=0, background="#ffffff"
-        ).pack()
-        pending_backdrops.append(
-            parent._rounded_backdrop(
-                body,
-                "#ffffff",
-                corners=(False, False, rounded, rounded),
-                surface=_WINDOW_KEY_COLOR if rounded else "#ffffff",
-                radius=_VIEW_WINDOW_RADIUS,
-                # Рамка окна (вместо `highlightthickness`, который у скруглённого
-                # окна дал бы прямоугольные углы).
-                border_color=_CHROME_BORDER if rounded else None,
-                border_width=1 if rounded else 0,
-                key=key,
-            )
-        )
-
-        # Квадратные кнопки РОВНО высоты поля (`_VIEW_FIELD_HEIGHT`) с нулевым
-        # внутренним padding — тот же приём, что у кнопки-"глаза" в
-        # `CreateVaultDialog` (разделы 10.22–10.23): размер задаёт
-        # контейнер, а не содержимое кнопки.
-        icon_button_style = parent._rounded_button_style(
-            "Rounded.IconToggleSquare",
-            _NEUTRAL_FILL,
-            _NEUTRAL_TEXT,
-            border_color=_NEUTRAL_BORDER,
-            padding=(0, 0),
-            element_padding=0,
-        )
-        field_height = _px(_VIEW_FIELD_HEIGHT)
-
-        def field_row(label_text: str, value: str) -> tuple[ttk.Label, ttk.Frame]:
-            ttk.Label(body, text=label_text.upper(), font=("", 8, "bold"), bootstyle="secondary").pack(
-                fill="x", anchor="w", pady=(_px(10), _px(2))
-            )
-            row = ttk.Frame(body)
-            row.pack(fill="x")
-            # Фиксированная высота плитки (а не "по тексту"): иначе она ниже
-            # соседних кнопок и ряд выглядит рваным.
-            box = ttk.Frame(row, padding=(_px(10), 0), height=field_height)
-            box.pack_propagate(False)
-            box.pack(side="left", fill="x", expand=True)
-            pending_backdrops.append(
-                parent._rounded_backdrop(
-                    box,
-                    _NEUTRAL_FILL,
-                    corners=(True, True, True, True),
-                    surface="#ffffff",
-                    radius=_ROUNDED_RADIUS,
-                    border_color=_NEUTRAL_BORDER,
-                    border_width=1,
-                )
-            )
-            value_label = ttk.Label(box, text=value, background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT)
-            value_label.pack(side="left", fill="y")
-            return value_label, row
-
-        def add_icon_button(row: ttk.Frame, icon_name: str, command) -> None:
-            cell = ttk.Frame(row, width=field_height, height=field_height)
-            cell.pack_propagate(False)
-            cell.pack(side="left", padx=(_px(6), 0))
-            parent._styled(
-                # compound="image": кнопка БЕЗ текста — иначе ttk при
-                # compound="left" всё равно оставляет место под текст и сдвигает
-                # значок влево от центра (раздел 10.44).
-                ttk.Button(cell, command=command, **{**parent._icon_kwargs(icon_name, "dark", center=True), "compound": "image"}),
-                icon_button_style,
-            ).pack(fill="both", expand=True)
-
-        field_row("Сайт", entry["site"])
-
-        _, login_row = field_row("Логин", entry["username"])
-        add_icon_button(login_row, "copy", lambda: parent._copy_to_clipboard(entry["username"]))
-
-        # Пароль замаскирован точками по умолчанию — тот же смысл, что
-        # у show="*" в полях ввода мастер-пароля (раздел 10.7): не
-        # показывать секрет на экране, пока пользователь явно не
-        # попросил кнопкой-"глазом". "Сменить пароль" (иконка-карандаш)
-        # перенесена сюда, в строку самого поля, с прежнего отдельного
-        # широкого места в футере — по запросу пользователя, раздел 10.9.
-        self._password_visible = False
-        masked = "•" * len(entry["password"])
-        password_label, password_row = field_row("Пароль", masked)
-        add_icon_button(password_row, "eye", lambda: self._toggle_password(password_label))
-        add_icon_button(password_row, "pencil", self._on_update)
-        add_icon_button(password_row, "copy", lambda: parent._copy_to_clipboard(entry["password"]))
-
-        created_at = datetime.strptime(entry["created_at"], CREATED_AT_FORMAT)
-        field_row("Создан / изменён", created_at.strftime("%d.%m.%Y"))
-
-        # Синхронно досчитать геометрию ВСЕГО уже построенного диалога —
-        # и только ПОСЛЕ этого перерисовать скруглённые подложки под их
-        # настоящий итоговый размер (см. докстринг `_rounded_backdrop`,
-        # раздел 10.9, о том, почему делать это раньше — в частности,
-        # через `after_idle` сразу в момент создания каждого фрейма —
-        # не работает). Финальный размер плиток с кнопкой рядом на Windows
-        # подхватывает перерисовка по `<Configure>` — раздел 10.27.
-        self.update_idletasks()
-        for redraw in pending_backdrops:
-            redraw()
-
-        self.place_window_center()
-        self.grab_set()
-
-    def _toggle_password(self, label: ttk.Label) -> None:
-        self._password_visible = not self._password_visible
-        password = self._entry["password"]
-        label.configure(text=password if self._password_visible else "•" * len(password))
-
-    def _on_update(self) -> None:
-        # Сначала закрываем это окно (снимаем его модальный grab) — и
-        # только потом открываем следующий диалог поверх главного окна.
-        # Одновременные grab у двух Toplevel-ов, не связанных отношением
-        # родитель/потомок, в Tkinter приводят к путанице с фокусом.
-        self.destroy()
-        self._parent._on_update_entry(self._entry)
-        self._parent._refresh_tree()
 
 
 def _check_badge_image(size: int, color: str) -> Image.Image:

@@ -291,9 +291,6 @@ def test_dialog_construction_does_not_raise(app, monkeypatch):
     create_dialog = guiapp.CreateVaultDialog(app)
     create_dialog.destroy()
 
-    view = guiapp.ViewEntryDialog(app, entry)
-    view.destroy()
-
     # Отчёт со всеми тремя категориями находок — проверяет, что все
     # ветки построения фида (`add_reused_row`/`add_issue_row`) строятся
     # без ошибок, а не только "пустой" отчёт.
@@ -604,22 +601,153 @@ def test_default_window_uses_system_frame(monkeypatch):
         window.destroy()
 
 
-def test_view_dialog_compact_layout_without_footer_buttons(app):
-    """Раздел 10.42: у диалога просмотра нет нижних кнопок "Закрыть"/
-    "Копировать пароль", а поля и кнопки рядом с ними одной высоты."""
-    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
-    dialog = guiapp.ViewEntryDialog(app, entry)
-    dialog.update()
-    try:
-        texts = [w.cget("text") for w in _find_widgets_by_class(dialog, "TButton")]
-        assert "Закрыть" not in texts
-        assert "Копировать пароль" not in texts
-        buttons = _find_widgets_by_class(dialog, "TButton")
-        assert len(buttons) == 4  # копировать логин; глаз, карандаш, копировать пароль
-        heights = {b.winfo_height() for b in buttons} | {b.winfo_width() for b in buttons}
-        assert heights == {guiapp._px(guiapp._VIEW_FIELD_HEIGHT)}
-    finally:
-        dialog.destroy()
+def _open_in_panel(app, monkeypatch, *entries):
+    """Создать хранилище с записями и выбрать первую — она откроется в панели справа."""
+    _create_vault(app, monkeypatch)
+    app.data["entries"] = list(entries)
+    app._refresh_tree()
+    app._tree.selection_set("0")
+    app.update()
+
+
+def _panel_entry(site="example.com", password="secret"):
+    return {"site": site, "username": "alice", "password": password, "created_at": "2026-09-27T10:00:00Z"}
+
+
+def test_selecting_a_row_opens_the_entry_in_the_right_panel(app, monkeypatch):
+    """Раздел 10.78: запись открывается справа в главном окне, а не отдельным окном."""
+    _create_vault(app, monkeypatch)
+    app.data["entries"] = [_panel_entry("one.com", "first"), _panel_entry("two.com", "second")]
+    app._refresh_tree()
+    app.update()
+    assert app._detail_empty.winfo_ismapped() and not app._detail_body.winfo_ismapped()
+
+    app._tree.selection_set("1")
+    app.update()
+
+    assert not app._detail_empty.winfo_ismapped() and app._detail_body.winfo_ismapped()
+    assert app._detail_site.cget("text") == "two.com"
+    assert app._detail_login.cget("text") == "alice"
+    assert app._detail_date.cget("text") == "27.09.2026"
+    # пароль скрыт точками, пока не нажат «глаз»
+    assert app._detail_password.cget("text") == "•" * len("second")
+    app._detail_eye.invoke()
+    assert app._detail_password.cget("text") == "second"
+    app._detail_eye.invoke()
+    assert app._detail_password.cget("text") == "•" * len("second")
+
+
+def test_panel_hides_password_again_when_another_entry_is_selected(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    app.data["entries"] = [_panel_entry("one.com", "first"), _panel_entry("two.com", "second")]
+    app._refresh_tree()
+    app._tree.selection_set("0")
+    app.update()
+    app._detail_eye.invoke()
+    assert app._detail_password.cget("text") == "first"
+
+    app._tree.selection_set("1")
+    app.update()
+
+    assert app._detail_password.cget("text") == "•" * len("second")
+
+
+def test_panel_buttons_copy_login_and_password(app, monkeypatch):
+    _open_in_panel(app, monkeypatch, _panel_entry())
+    copied = []
+    monkeypatch.setattr(app, "_copy_to_clipboard", copied.append)
+
+    app._on_detail_copy_login()
+    app._on_detail_copy_password()
+
+    assert copied == ["alice", "secret"]
+
+
+def test_panel_buttons_are_image_only_square_and_equal(app, monkeypatch):
+    _open_in_panel(app, monkeypatch, _panel_entry())
+    buttons = [b for b in _find_widgets_by_class(app._detail_body, "TButton")]
+    assert len(buttons) == 5  # удалить; копировать логин; глаз, карандаш, копировать пароль
+    for button in buttons:
+        assert str(button.cget("compound")) == "image"
+        assert button.winfo_width() == button.winfo_height() == guiapp._px(guiapp._DETAIL_BUTTON_SIZE)
+
+
+def test_panel_delete_button_removes_the_entry_and_clears_the_panel(app, monkeypatch):
+    _open_in_panel(app, monkeypatch, _panel_entry("one.com"), _panel_entry("two.com"))
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: True)
+
+    app._detail_delete.invoke()
+    app.update()
+
+    assert [e["site"] for e in app.data["entries"]] == ["two.com"]
+    assert app._detail_entry is None and app._detail_empty.winfo_ismapped()
+
+
+def test_panel_change_password_updates_the_panel(app, monkeypatch):
+    _open_in_panel(app, monkeypatch, _panel_entry())
+    monkeypatch.setattr(app, "_save_vault", lambda: True)
+
+    class FakeDialog(tk.Toplevel):
+        def __init__(self, parent, entry):
+            super().__init__(parent)
+            self.result = "brand-new-pass"
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "NewPasswordDialog", FakeDialog)
+    app._on_detail_change_password()
+    app.update()
+
+    assert app.data["entries"][0]["password"] == "brand-new-pass"
+    assert app._detail_entry is app.data["entries"][0]
+    assert app._detail_entry["created_at"] != "2026-09-27T10:00:00Z"
+    assert app._tree.selection() == ("0",)  # запись осталась выбранной после перестройки списка
+
+
+def test_new_entry_is_selected_and_shown_after_adding(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+
+    class FakeEntryDialog(tk.Toplevel):
+        def __init__(self, parent, title):
+            super().__init__(parent)
+            self.result = ("added.com", "bob", "pw12345")
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "EntryDialog", FakeEntryDialog)
+    app._on_add()
+    app.update()
+
+    assert app._detail_site.cget("text") == "added.com"
+    assert app._selected_entry()["site"] == "added.com"
+
+
+def test_panel_follows_entry_after_merge_replaces_objects(app, monkeypatch):
+    """После слияния с чужими изменениями записи — новые объекты; панель находит нужную по ключу."""
+    _open_in_panel(app, monkeypatch, _panel_entry("one.com"), _panel_entry("two.com"))
+    app._tree.selection_set("1")
+    app.update()
+    app.data = {"entries": [dict(e) for e in app.data["entries"]]}
+
+    app._refresh_tree()
+    app.update()
+
+    assert app._detail_entry is app.data["entries"][1]
+    assert app._detail_site.cget("text") == "two.com"
+
+
+def test_panel_clears_when_search_hides_the_entry_and_on_lock(app, monkeypatch):
+    _open_in_panel(app, monkeypatch, _panel_entry("one.com"), _panel_entry("two.com"))
+    app._search_var.set("two")
+    app.update()
+    assert app._detail_entry is None
+
+    app._search_var.set(guiapp._SEARCH_PLACEHOLDER)
+    app._tree.selection_set("0")
+    app.update()
+    assert app._detail_site.cget("text") == "one.com"
+    app._on_lock()
+    app.update()
+    assert app._detail_entry is None
+    assert not app._detail_body.winfo_ismapped()
 
 
 def test_keyed_rounded_rect_has_hard_edges_and_key_outside_corners():
@@ -649,34 +777,6 @@ def test_keyed_rounded_rect_has_hard_edges_and_key_outside_corners():
                 assert a == b
 
 
-def test_view_dialog_rounded_window_mode(app, monkeypatch):
-    """Раздел 10.45: при поддержке прозрачных углов фон окна — ключевой цвет,
-    а у шапки скруглены верхние углы (диалог собирается без ошибок)."""
-    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda window: True)
-    if app._native_frame:
-        pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
-    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
-    dialog = guiapp.ViewEntryDialog(app, entry)
-    dialog.update()
-    try:
-        assert dialog.cget("background").lower() == guiapp._WINDOW_KEY_COLOR
-        assert int(dialog.cget("highlightthickness")) == 0
-    finally:
-        dialog.destroy()
-
-
-def test_view_dialog_plain_mode_keeps_square_window_border(app):
-    if app._native_frame or guiapp.sys.platform == "win32":
-        pytest.skip("только не-Windows с собственной рамкой")
-    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
-    dialog = guiapp.ViewEntryDialog(app, entry)
-    dialog.update()
-    try:
-        assert int(dialog.cget("highlightthickness")) == 1
-    finally:
-        dialog.destroy()
-
-
 def test_recenter_glyph_moves_visible_part_to_canvas_center():
     from PIL import Image
 
@@ -686,18 +786,6 @@ def test_recenter_glyph_moves_visible_part_to_canvas_center():
             icon.putpixel((x, y), (0, 0, 0, 255))
     box = guiapp._recenter_glyph(icon).split()[3].getbbox()
     assert ((box[0] + box[2] - 1) / 2, (box[1] + box[3] - 1) / 2) == (10.5, 10.5)
-
-
-def test_view_dialog_icon_buttons_are_image_only_and_square(app):
-    entry = {"site": "example.com", "username": "alice", "password": "secret", "created_at": "2026-09-27T10:00:00Z"}
-    dialog = guiapp.ViewEntryDialog(app, entry)
-    dialog.update()
-    try:
-        for button in _find_widgets_by_class(dialog, "TButton"):
-            assert str(button.cget("compound")) == "image"
-            assert button.winfo_width() == button.winfo_height()
-    finally:
-        dialog.destroy()
 
 
 def test_other_dialogs_get_rounded_corner_overlays(app, monkeypatch):
@@ -1798,21 +1886,6 @@ def test_problems_dialog_scrollbar_hidden_when_everything_fits(app):
         dialog.update()
         dialog.update()
         assert dialog._feed_scroll.winfo_ismapped()
-    finally:
-        dialog.destroy()
-
-
-def test_view_dialog_native_frame_header_is_white_with_dark_blue_title(app):
-    """Раздел 10.75: с системной рамкой название записи — тёмно-синим на белом, а не
-    белым на тёмной плашке под текстом."""
-    entry = {"site": "цук", "username": "u", "password": "p", "created_at": "2026-01-01T00:00:00Z"}
-    app._native_frame = True
-    dialog = guiapp.ViewEntryDialog(app, entry)
-    try:
-        dialog.update()
-        assert dialog._header_title.cget("bg") == "#ffffff"
-        assert dialog._header_title.cget("fg") == guiapp._SIDEBAR_BG
-        assert "цук" in dialog._header_title.cget("text")
     finally:
         dialog.destroy()
 
