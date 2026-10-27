@@ -2613,9 +2613,20 @@ class App(ttk.Window):
             for index, segment in enumerate(segments):
                 segment.configure(bg=color if index < filled else _NEUTRAL_BORDER)
 
+            text = explain_password(password)
+            if is_common_password(password):
+                # Пароль из списка утёкших паролей (rockyou, раздел 9.6) подбирается
+                # мгновенно, как бы стойко он ни выглядел по формуле энтропии:
+                # шкала не должна показывать «Очень высокая» там, где диалог
+                # потом предупредит, что пароль слабый.
+                filled, label, color = _STRENGTH_LEVELS[0][1], "В списке утечек", _STRENGTH_LEVELS[0][3]
+                text = "Этот пароль есть в списке утёкших паролей (rockyou) — его подберут мгновенно."
+                for index, segment in enumerate(segments):
+                    segment.configure(bg=color if index < filled else _NEUTRAL_BORDER)
+
             badge_bg = _mix(color, "#ffffff", 0.85)
             badge.configure(text=label, background=badge_bg, foreground=color)
-            caption.configure(text=explain_password(password))
+            caption.configure(text=text)
 
         return update
 

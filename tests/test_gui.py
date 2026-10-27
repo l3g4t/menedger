@@ -2172,3 +2172,18 @@ def test_lock_clears_snapshot(app, monkeypatch):
     assert app._snapshot is not None
     app._on_lock()
     assert app._snapshot is None
+
+
+def test_strength_meter_shows_leaked_password_as_weak_despite_high_entropy(app):
+    """Раздел 9.6: пароль из rockyou не должен получать «Очень высокая» по формуле."""
+    frame = ttk_frame = guiapp.ttk.Frame(app)
+    update = app._build_strength_meter(frame)
+    leaked = "aaaaaaaaaaaaaaaaaaaa"  # 94 бита по формуле, но есть в rockyou
+    update(leaked)
+    labels = [w.cget("text") for w in _find_widgets_by_class(frame, "TLabel")]
+    assert "В списке утечек" in labels
+    assert any("списке утёкших" in text for text in labels)
+    update("hX7#qLm2!vRt9@Zk")  # случайный пароль — обычная оценка
+    labels = [w.cget("text") for w in _find_widgets_by_class(frame, "TLabel")]
+    assert "В списке утечек" not in labels
+    ttk_frame.destroy()
