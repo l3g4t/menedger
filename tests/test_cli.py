@@ -466,3 +466,18 @@ def test_analyze_command_reports_without_revealing_the_password(monkeypatch, cap
 
 def test_analyze_command_rejects_empty_password(monkeypatch, capsys):
     assert _run(monkeypatch, ["analyze"], secrets=[""]) == 1
+
+
+def test_add_and_update_write_history_like_the_gui(tmp_path, monkeypatch):
+    """Раздел 10.79: записи из CLI тоже получают историю (создана / пароль изменён)."""
+    from vault.crypto import decrypt_vault
+    from vault.storage import load_vault_file
+
+    vault_path = tmp_path / "test.vault"
+    _run(monkeypatch, ["--path", str(vault_path), "create"], secrets=[MASTER, MASTER])
+    _run(monkeypatch, ["--path", str(vault_path), "add", "example.com", "--username", "alice"], secrets=[MASTER, "old-password"])
+    _run(monkeypatch, ["--path", str(vault_path), "update", "example.com"], secrets=[MASTER, "new-password"])
+
+    entry = decrypt_vault(load_vault_file(vault_path), MASTER)["entries"][0]
+    assert [h["event"] for h in entry["history"]] == ["created", "password"]
+    assert entry["created_at"] == entry["history"][-1]["at"]

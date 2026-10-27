@@ -341,7 +341,7 @@ def test_answers_do_not_claim_missing_features():
     assert "облачная синхронизация включена" not in texts
     master_change = next(e for e in FAQ if e.id == "master-change")
     assert "пока нет" not in master_change.answer  # смена мастер-пароля уже есть (раздел 3.1)
-    assert "Мастер-пароль" in master_change.answer and "перешифру" in master_change.answer
+    assert "мастер-пароль" in master_change.answer.lower() and "перешифру" in master_change.answer
 
 
 def test_related_question_is_offered_only_when_scores_are_close():

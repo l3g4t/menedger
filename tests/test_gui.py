@@ -169,79 +169,9 @@ def test_unlock_correct_master_password(app, monkeypatch):
     assert app.master_password == MASTER
 
 
-def test_add_entry_and_refresh_tree(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-
-    app.data.setdefault("entries", []).append(
-        {
-            "site": "example.com",
-            "username": "alice",
-            "password": "hunter2",
-            "created_at": guiapp.now_iso(),
-        }
-    )
-    assert app._save_vault()
-    app._refresh_tree()
-
-    children = app._tree.get_children()
-    assert len(children) == 1
-    assert app._tree.item(children[0], "values") == ("example.com", "alice")
-
-
-def test_search_filters_tree(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-    app.data["entries"] = [
-        {"site": "example.com", "username": "alice", "password": "p1", "created_at": guiapp.now_iso()},
-        {"site": "other.com", "username": "bob", "password": "p2", "created_at": guiapp.now_iso()},
-    ]
-    app._refresh_tree()
-    assert len(app._tree.get_children()) == 2
-
-    app._search_var.set("example")
-    app._refresh_tree()
-    children = app._tree.get_children()
-    assert len(children) == 1
-    assert app._tree.item(children[0], "values")[0] == "example.com"
-
-
-def test_selected_entry_returns_correct_record(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-    app.data["entries"] = [
-        {"site": "a.com", "username": "u1", "password": "p1", "created_at": guiapp.now_iso()},
-        {"site": "b.com", "username": "u2", "password": "p2", "created_at": guiapp.now_iso()},
-    ]
-    app._refresh_tree()
-
-    children = app._tree.get_children()
-    app._tree.selection_set(children[1])
-
-    entry = app._selected_entry()
-    assert entry["site"] == "b.com"
-
-
 def test_selected_entry_returns_none_without_selection(app, monkeypatch):
     _create_vault(app, monkeypatch)
     assert app._selected_entry() is None
-
-
-def test_update_entry_changes_password_and_created_at(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-    entry = {"site": "example.com", "username": "alice", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
-    app.data["entries"] = [entry]
-
-    # `_on_update_entry` открывает `NewPasswordDialog` (раздел 10.51) — подменяем
-    # на фейк по тому же принципу, что и `CreateVaultDialog` в `_create_vault`.
-    class _FakeNewPasswordDialog(tk.Toplevel):
-        def __init__(self, parent, entry):
-            super().__init__(parent)
-            self.result = "new-password"
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "NewPasswordDialog", _FakeNewPasswordDialog)
-    app._on_update_entry(entry)
-
-    assert entry["password"] == "new-password"
-    assert entry["created_at"] != "2020-01-01T00:00:00Z"
 
 
 def test_delete_entry_removes_from_data(app, monkeypatch):
@@ -461,7 +391,7 @@ def test_titlebar_theme_follows_screen(app, monkeypatch):
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
     assert app._titlebar._theme == "dark"
     _create_vault(app, monkeypatch)
-    assert app._titlebar._theme == "light"
+    assert app._titlebar._theme == "main"
     app._on_lock()
     assert app._titlebar._theme == "dark"
 
@@ -599,155 +529,6 @@ def test_default_window_uses_system_frame(monkeypatch):
         assert not window.overrideredirect()
     finally:
         window.destroy()
-
-
-def _open_in_panel(app, monkeypatch, *entries):
-    """Создать хранилище с записями и выбрать первую — она откроется в панели справа."""
-    _create_vault(app, monkeypatch)
-    app.data["entries"] = list(entries)
-    app._refresh_tree()
-    app._tree.selection_set("0")
-    app.update()
-
-
-def _panel_entry(site="example.com", password="secret"):
-    return {"site": site, "username": "alice", "password": password, "created_at": "2026-09-27T10:00:00Z"}
-
-
-def test_selecting_a_row_opens_the_entry_in_the_right_panel(app, monkeypatch):
-    """Раздел 10.78: запись открывается справа в главном окне, а не отдельным окном."""
-    _create_vault(app, monkeypatch)
-    app.data["entries"] = [_panel_entry("one.com", "first"), _panel_entry("two.com", "second")]
-    app._refresh_tree()
-    app.update()
-    assert app._detail_empty.winfo_ismapped() and not app._detail_body.winfo_ismapped()
-
-    app._tree.selection_set("1")
-    app.update()
-
-    assert not app._detail_empty.winfo_ismapped() and app._detail_body.winfo_ismapped()
-    assert app._detail_site.cget("text") == "two.com"
-    assert app._detail_login.cget("text") == "alice"
-    assert app._detail_date.cget("text") == "27.09.2026"
-    # пароль скрыт точками, пока не нажат «глаз»
-    assert app._detail_password.cget("text") == "•" * len("second")
-    app._detail_eye.invoke()
-    assert app._detail_password.cget("text") == "second"
-    app._detail_eye.invoke()
-    assert app._detail_password.cget("text") == "•" * len("second")
-
-
-def test_panel_hides_password_again_when_another_entry_is_selected(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-    app.data["entries"] = [_panel_entry("one.com", "first"), _panel_entry("two.com", "second")]
-    app._refresh_tree()
-    app._tree.selection_set("0")
-    app.update()
-    app._detail_eye.invoke()
-    assert app._detail_password.cget("text") == "first"
-
-    app._tree.selection_set("1")
-    app.update()
-
-    assert app._detail_password.cget("text") == "•" * len("second")
-
-
-def test_panel_buttons_copy_login_and_password(app, monkeypatch):
-    _open_in_panel(app, monkeypatch, _panel_entry())
-    copied = []
-    monkeypatch.setattr(app, "_copy_to_clipboard", copied.append)
-
-    app._on_detail_copy_login()
-    app._on_detail_copy_password()
-
-    assert copied == ["alice", "secret"]
-
-
-def test_panel_buttons_are_image_only_square_and_equal(app, monkeypatch):
-    _open_in_panel(app, monkeypatch, _panel_entry())
-    buttons = [b for b in _find_widgets_by_class(app._detail_body, "TButton")]
-    assert len(buttons) == 5  # удалить; копировать логин; глаз, карандаш, копировать пароль
-    for button in buttons:
-        assert str(button.cget("compound")) == "image"
-        assert button.winfo_width() == button.winfo_height() == guiapp._px(guiapp._DETAIL_BUTTON_SIZE)
-
-
-def test_panel_delete_button_removes_the_entry_and_clears_the_panel(app, monkeypatch):
-    _open_in_panel(app, monkeypatch, _panel_entry("one.com"), _panel_entry("two.com"))
-    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: True)
-
-    app._detail_delete.invoke()
-    app.update()
-
-    assert [e["site"] for e in app.data["entries"]] == ["two.com"]
-    assert app._detail_entry is None and app._detail_empty.winfo_ismapped()
-
-
-def test_panel_change_password_updates_the_panel(app, monkeypatch):
-    _open_in_panel(app, monkeypatch, _panel_entry())
-    monkeypatch.setattr(app, "_save_vault", lambda: True)
-
-    class FakeDialog(tk.Toplevel):
-        def __init__(self, parent, entry):
-            super().__init__(parent)
-            self.result = "brand-new-pass"
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "NewPasswordDialog", FakeDialog)
-    app._on_detail_change_password()
-    app.update()
-
-    assert app.data["entries"][0]["password"] == "brand-new-pass"
-    assert app._detail_entry is app.data["entries"][0]
-    assert app._detail_entry["created_at"] != "2026-09-27T10:00:00Z"
-    assert app._tree.selection() == ("0",)  # запись осталась выбранной после перестройки списка
-
-
-def test_new_entry_is_selected_and_shown_after_adding(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-
-    class FakeEntryDialog(tk.Toplevel):
-        def __init__(self, parent, title):
-            super().__init__(parent)
-            self.result = ("added.com", "bob", "pw12345")
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "EntryDialog", FakeEntryDialog)
-    app._on_add()
-    app.update()
-
-    assert app._detail_site.cget("text") == "added.com"
-    assert app._selected_entry()["site"] == "added.com"
-
-
-def test_panel_follows_entry_after_merge_replaces_objects(app, monkeypatch):
-    """После слияния с чужими изменениями записи — новые объекты; панель находит нужную по ключу."""
-    _open_in_panel(app, monkeypatch, _panel_entry("one.com"), _panel_entry("two.com"))
-    app._tree.selection_set("1")
-    app.update()
-    app.data = {"entries": [dict(e) for e in app.data["entries"]]}
-
-    app._refresh_tree()
-    app.update()
-
-    assert app._detail_entry is app.data["entries"][1]
-    assert app._detail_site.cget("text") == "two.com"
-
-
-def test_panel_clears_when_search_hides_the_entry_and_on_lock(app, monkeypatch):
-    _open_in_panel(app, monkeypatch, _panel_entry("one.com"), _panel_entry("two.com"))
-    app._search_var.set("two")
-    app.update()
-    assert app._detail_entry is None
-
-    app._search_var.set(guiapp._SEARCH_PLACEHOLDER)
-    app._tree.selection_set("0")
-    app.update()
-    assert app._detail_site.cget("text") == "one.com"
-    app._on_lock()
-    app.update()
-    assert app._detail_entry is None
-    assert not app._detail_body.winfo_ismapped()
 
 
 def test_keyed_rounded_rect_has_hard_edges_and_key_outside_corners():
@@ -936,7 +717,7 @@ def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
         window.data = {"entries": []}
         window._show_main()
         window.update()
-        assert window.cget("background").lower() == guiapp._PAGE_BG  # главный экран — светлый фон
+        assert window.cget("background").lower() == guiapp._theme_window_bg("main")  # главный экран — фон панели записи
         assert len(window._window_corners) >= 4
         assert [label.photo for label in window._window_corners] != unlock_photos  # цвета другого экрана
         window._toggle_maximize()
@@ -1212,60 +993,11 @@ def test_corner_overlays_do_not_cover_close_button_hover(app, monkeypatch):
         dialog.destroy()
 
 
-def test_update_entry_cancelled_dialog_keeps_password(app, monkeypatch):
-    _create_vault(app, monkeypatch)
-    entry = {"site": "example.com", "username": "alice", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
-    app.data["entries"] = [entry]
-
-    class _CancelledDialog(tk.Toplevel):
-        def __init__(self, parent, entry):
-            super().__init__(parent)
-            self.result = None
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "NewPasswordDialog", _CancelledDialog)
-    app._on_update_entry(entry)
-
-    assert entry["password"] == "old"
-    assert entry["created_at"] == "2020-01-01T00:00:00Z"
-
-
-def test_new_password_dialog_rejects_empty_and_returns_password(app):
-    """Раздел 10.51: диалог нового пароля не принимает пустой ввод и
-    возвращает введённое через `.result`."""
-    entry = {"site": "цук", "username": "цукен", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
-    dialog = guiapp.NewPasswordDialog(app, entry)
-    dialog.update()
-    try:
-        dialog._on_submit()  # пусто
-        assert dialog.result is None
-        assert "Введите" in dialog._status_label.cget("text")
-        dialog._password_var.set("Brand-new-Passw0rd!")
-        dialog._on_submit()
-        assert dialog.result == "Brand-new-Passw0rd!"
-    finally:
-        if dialog.winfo_exists():
-            dialog.destroy()
-
-
-def test_new_password_dialog_eye_toggles_visibility(app):
-    entry = {"site": "цук", "username": "цукен", "password": "old", "created_at": "2020-01-01T00:00:00Z"}
-    dialog = guiapp.NewPasswordDialog(app, entry)
-    dialog.update()
-    try:
-        assert str(dialog._password_entry.cget("show")) == "*"
-        dialog._on_toggle_visibility()
-        assert str(dialog._password_entry.cget("show")) == ""
-    finally:
-        dialog.destroy()
-
-
 def test_dialog_footer_buttons_have_equal_height_and_width(app):
     """Раздел 10.52: «Сохранить»/«Создать» и «Отмена» в подвале диалогов — одного
     размера (раньше кнопка с иконкой была выше)."""
     entry = {"site": "s", "username": "u", "password": "x", "created_at": "2026-09-27T10:00:00Z"}
     makers = [
-        (lambda: guiapp.NewPasswordDialog(app, entry), ("Сохранить", "Отмена")),
         (lambda: guiapp.CreateVaultDialog(app), ("Создать", "Отмена")),
         (lambda: guiapp.EntryDialog(app, "Новая запись"), ("Сохранить", "Отмена")),
     ]
@@ -1341,7 +1073,7 @@ def test_ctrl_v_with_russian_layout_pastes_into_entry(app, monkeypatch):
     _create_vault(app, monkeypatch)
     app.clipboard_clear()
     app.clipboard_append("Secret123!")
-    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog = guiapp.EntryDialog(app, "Новая запись")
     dialog.update()
     entry = _entries(dialog)[0]
     entry.focus_force()
@@ -1364,7 +1096,7 @@ def test_entry_context_menu_has_paste_entry(app, monkeypatch):
     _create_vault(app, monkeypatch)
     shown = []
     monkeypatch.setattr(guiapp.tk.Menu, "tk_popup", lambda self, x, y: shown.append(self))
-    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog = guiapp.EntryDialog(app, "Новая запись")
     dialog.update()
     entry = _entries(dialog)[0]
 
@@ -1393,7 +1125,7 @@ def test_dialogs_give_keyboard_focus_to_their_input_field(app, monkeypatch):
     самом окне — иначе Ctrl+V сразу после открытия ничего не вставляет."""
     _create_vault(app, monkeypatch)
     dialogs = [
-        guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"}),
+        guiapp.EntryDialog(app, "Новая запись"),
         guiapp.EntryDialog(app, "Новая запись"),
     ]
     for dialog in dialogs:
@@ -1759,36 +1491,6 @@ def test_change_master_does_nothing_when_vault_is_locked(app, monkeypatch):
     assert app.master_password is None
 
 
-def test_change_master_button_is_in_the_top_row_and_not_squeezed(app, monkeypatch):
-    """По просьбе пользователя кнопка — в верхнем ряду над списком (раздел 10.66),
-    не в сайдбаре; и все кнопки ряда получают свою полную ширину (раньше при
-    окне 980 px пятая кнопка сплющивалась — урок раздела 10.8)."""
-    _create_vault(app, monkeypatch)
-    app.update()
-    buttons = _find_widgets_by_class(app._main_frame, "TButton")
-    master = [b for b in buttons if b.cget("text") == "Мастер-пароль"]
-    assert len(master) == 1
-    sidebar_texts = {"Все записи", "Помощник", "Заблокировать"}
-    sidebar_x = min(b.winfo_rootx() for b in buttons if b.cget("text") in sidebar_texts)
-    assert master[0].winfo_rootx() > sidebar_x + app.winfo_width() // 4  # правее сайдбара
-    top_row = [b for b in buttons if b.cget("text") in ("Добавить", "Удалить", "Мастер-пароль")]
-    assert len(top_row) == 3
-    top_y = min(b.winfo_rooty() for b in top_row)
-    assert all(abs(b.winfo_rooty() - top_y) < 5 for b in top_row)  # в одном ряду
-    for button in top_row:
-        assert button.winfo_width() >= button.winfo_reqwidth() - 1, button.cget("text")
-    # Раздел 10.68: три кнопки одной ширины и стоят вплотную друг к другу.
-    ordered = sorted(top_row, key=lambda b: b.winfo_rootx())
-    assert [b.cget("text") for b in ordered] == ["Добавить", "Удалить", "Мастер-пароль"]
-    assert len({b.winfo_width() for b in top_row}) == 1
-    for left, right in zip(ordered, ordered[1:]):
-        gap = right.winfo_rootx() - (left.winfo_rootx() + left.winfo_width())
-        assert 0 <= gap <= guiapp._px(12), gap
-    # «Проблемы» (бывший «Советник») и «Генератор» — только в левой панели (разделы 10.67, 10.69).
-    for name in ("Проблемы", "Генератор"):
-        assert len([b for b in buttons if b.cget("text") == name]) == 1
-
-
 # --- окно «Проблемы» в современном виде (CLAUDE.md, раздел 10.70) ---------------
 
 
@@ -1961,7 +1663,7 @@ def test_ctrl_c_in_entry_is_cleared_too(app, monkeypatch):
     """Копирование из поля ввода (например, показанного мастер-пароля)."""
     monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 200)
     _create_vault(app, monkeypatch)
-    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog = guiapp.EntryDialog(app, "Новая запись")
     dialog.update()
     entry = _entries(dialog)[0]
     entry.config(show="")
@@ -2120,7 +1822,7 @@ def test_entry_copy_goes_through_app_clipboard_and_hidden_fields_copy_nothing(ap
     copied = []
     monkeypatch.setattr(app, "_copy_to_clipboard", copied.append)
     _create_vault(app, monkeypatch)
-    dialog = guiapp.NewPasswordDialog(app, {"site": "x.com", "username": "u"})
+    dialog = guiapp.EntryDialog(app, "Новая запись")
     dialog.update()
     entry = _entries(dialog)[0]
     entry.insert(0, "Secret123!")
@@ -2176,7 +1878,7 @@ def test_gui_save_does_not_erase_entry_added_by_cli(app, monkeypatch):
 
     assert sorted(_disk_sites(app)) == ["first.com", "from-cli.com", "second.com"]
     assert sorted(e["site"] for e in app.data["entries"]) == ["first.com", "from-cli.com", "second.com"]
-    assert len(app._tree.get_children()) == 3  # список обновился
+    assert len(app._view.visible()) == 3  # список обновился
     assert infos and "объединены" in infos[0][1]
 
 
@@ -2260,3 +1962,370 @@ def test_strength_meter_shows_leaked_password_as_weak_despite_high_entropy(app):
     labels = [w.cget("text") for w in _find_widgets_by_class(frame, "TLabel")]
     assert "В списке утечек" not in labels
     ttk_frame.destroy()
+
+
+# --- главный экран строго по референсу (CLAUDE.md, раздел 10.79) --------------------------------
+
+
+def _canvas_texts(canvas):
+    return [canvas.itemcget(i, "text") for i in canvas.find_withtag("dyn") if canvas.type(i) == "text"]
+
+
+def _text_item(canvas, text):
+    for item in canvas.find_withtag("dyn"):
+        if canvas.type(item) == "text" and canvas.itemcget(item, "text") == text:
+            return item
+    raise AssertionError(f"нет текста {text!r}: {_canvas_texts(canvas)}")
+
+
+def _click_text(canvas, text, nth=0):
+    """Настоящий щелчок мышью по надписи на холсте (проверяет и область нажатия)."""
+    items = [
+        i for i in canvas.find_withtag("dyn") if canvas.type(i) == "text" and canvas.itemcget(i, "text") == text
+    ]
+    x0, y0, x1, y1 = canvas.bbox(sorted(items, key=lambda i: canvas.bbox(i)[1])[nth])
+    canvas.event_generate("<Button-1>", x=(x0 + x1) // 2, y=(y0 + y1) // 2)
+    canvas.update()
+
+
+def _iso_ago(days):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(guiapp.CREATED_AT_FORMAT)
+
+
+def _rec(site, username="alice", password="Xk9#mP2$vL7qRt4Wz!", days=0, **extra):
+    from vault.records import new_entry
+
+    return new_entry(site, username, password, now=_iso_ago(days), **extra)
+
+
+def _open_main(app, monkeypatch, *entries):
+    _create_vault(app, monkeypatch)
+    app.data["entries"] = list(entries)
+    app._refresh_tree()
+    app.update()
+    return app._view
+
+
+def test_main_view_groups_entries_by_last_activity_newest_first(app, monkeypatch):
+    view = _open_main(
+        app, monkeypatch, _rec("old.com", days=100), _rec("week.com", days=3), _rec("today.com"), _rec("today2.com")
+    )
+    texts = _canvas_texts(view.list)
+    assert [t for t in texts if t in ("Сегодня", "На этой неделе", "Ранее")] == ["Сегодня", "На этой неделе", "Ранее"]
+    sites = [t for t in texts if t.endswith(".com")]
+    assert sites[-2:] == ["week.com", "old.com"] and set(sites[:2]) == {"today.com", "today2.com"}
+    assert view.title_text() == "Все записи"
+    sidebar = _canvas_texts(view.sidebar)
+    assert "Личное" in sidebar and "4 записи" in sidebar
+
+
+def test_main_view_empty_state_then_entry_details(app, monkeypatch):
+    entry = _rec("github.com", "dev@example.com", url="github.com", note="Токен для CI", tags=["работа"])
+    view = _open_main(app, monkeypatch, entry)
+    assert "Запись не выбрана" in _canvas_texts(view.detail)
+    assert "Ctrl N" in _canvas_texts(view.detail)
+
+    view.select(entry)
+    texts = _canvas_texts(view.detail)
+    for expected in ("github.com", "Логин", "dev@example.com", "Пароль", "Заметка", "Токен для CI", "ИСТОРИЯ", "Показать"):
+        assert expected in texts, expected
+    assert any(t.endswith("символов") or t.endswith("символа") for t in texts)  # «Надёжный · 18 символов»
+    assert any("— создана" in t for t in texts)
+    assert entry["password"] not in texts  # пароль скрыт точками
+
+
+def test_main_view_note_and_url_sections_are_absent_without_data(app, monkeypatch):
+    entry = _rec("plain.com")
+    view = _open_main(app, monkeypatch, entry)
+    view.select(entry)
+    texts = _canvas_texts(view.detail)
+    assert "Заметка" not in texts and "ИСТОРИЯ" in texts
+
+
+def test_main_view_password_show_hide_by_real_click_and_reset_on_other_entry(app, monkeypatch):
+    first, second = _rec("one.com", password="first-Pass#99xY"), _rec("two.com", password="second-Pass#99xY", days=1)
+    view = _open_main(app, monkeypatch, first, second)
+    view.select(first)
+    app.update()
+    _click_text(view.detail, "Показать")
+    assert first["password"] in _canvas_texts(view.detail) and "Скрыть" in _canvas_texts(view.detail)
+    _click_text(view.detail, "Скрыть")
+    assert first["password"] not in _canvas_texts(view.detail)
+
+    _click_text(view.detail, "Показать")
+    view.select(second)  # другая запись — пароль снова скрыт
+    assert second["password"] not in _canvas_texts(view.detail) and not view.password_visible
+
+
+def test_main_view_copy_buttons_copy_login_and_password(app, monkeypatch):
+    entry = _rec("example.com", "alice", "Secret-Pass#99xY")
+    view = _open_main(app, monkeypatch, entry)
+    view.select(entry)
+    app.update()
+    copied = []
+    monkeypatch.setattr(app, "_copy_to_clipboard", copied.append)
+    _click_text(view.detail, "Копировать", 0)  # верхняя — логин
+    _click_text(view.detail, "Копировать", 1)  # нижняя — пароль
+    assert copied == ["alice", "Secret-Pass#99xY"]
+
+
+def test_main_view_click_on_a_row_selects_it(app, monkeypatch):
+    first, second = _rec("one.com"), _rec("two.com", days=1)
+    view = _open_main(app, monkeypatch, first, second)
+    _click_text(view.list, "two.com")
+    assert view.selected is second
+    assert "two.com" in _canvas_texts(view.detail)
+
+
+def test_main_view_arrow_keys_move_selection(app, monkeypatch):
+    first, second = _rec("one.com"), _rec("two.com", days=1)
+    view = _open_main(app, monkeypatch, first, second)
+    view._move_selection(1)
+    assert view.selected is first
+    view._move_selection(1)
+    assert view.selected is second
+    view._move_selection(1)
+    assert view.selected is second  # дальше конца не уходит
+
+
+def test_main_view_search_filters_and_hint_is_not_a_query(app, monkeypatch):
+    view = _open_main(app, monkeypatch, _rec("example.com"), _rec("other.com", "bob"))
+    assert len(view.visible()) == 2  # «Поиск» в поле — подсказка, а не запрос
+    view._search_var.set("example")
+    assert [e["site"] for _, e in view.visible()] == ["example.com"]
+    view._search_var.set("BOB")  # без учёта регистра, ищет и по логину
+    assert [e["site"] for _, e in view.visible()] == ["other.com"]
+    view._search_var.set("")
+    assert len(view.visible()) == 2
+
+
+def test_main_view_ctrl_k_focuses_search_and_ctrl_n_adds(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+    added, focused = [], []
+    monkeypatch.setattr(app, "_on_add", lambda: added.append(1))
+    monkeypatch.setattr(view, "focus_search", lambda: focused.append(1))
+    monkeypatch.setattr(view, "winfo_ismapped", lambda: True)  # в Xvfb окно может быть не «видно» из-за соседних тестов
+
+    class Event:
+        keysym = "k"
+
+    view._on_control_key(Event())
+    assert focused == [1]
+    Event.keysym = "Cyrillic_el"  # Ctrl+Д при русской раскладке — та же клавиша K
+    view._on_control_key(Event())
+    assert focused == [1, 1]
+    Event.keysym = "Cyrillic_te"  # Ctrl+Е — клавиша N
+    view._on_control_key(Event())
+    assert added == [1]
+
+
+def test_main_view_filters_favorites_recent_and_tags(app, monkeypatch):
+    fav = _rec("fav.com", favorite=True, tags=["Работа"], days=50)
+    new = _rec("new.com", tags=["Деньги"])
+    view = _open_main(app, monkeypatch, fav, new, _rec("plain.com", days=60))
+    assert view.tag_counts() == [("Деньги", 1), ("Работа", 1)]
+    view.set_filter("fav")
+    assert [e["site"] for _, e in view.visible()] == ["fav.com"] and view.title_text() == "Избранное"
+    view.set_filter("recent")
+    assert [e["site"] for _, e in view.visible()] == ["new.com"] and view.title_text() == "Недавние"
+    view.set_filter("tag", "работа")  # без учёта регистра
+    assert [e["site"] for _, e in view.visible()] == ["fav.com"]
+    view.set_filter("all")
+    assert len(view.visible()) == 3
+    sidebar = _canvas_texts(view.sidebar)
+    assert "Избранное" in sidebar and "Недавние" in sidebar and "Теги" in sidebar
+
+
+def test_main_view_filter_click_in_sidebar(app, monkeypatch):
+    view = _open_main(app, monkeypatch, _rec("fav.com", favorite=True), _rec("plain.com"))
+    _click_text(view.sidebar, "Избранное")
+    assert view._mode == "fav" and [e["site"] for _, e in view.visible()] == ["fav.com"]
+
+
+def test_main_view_selection_dropped_when_filter_hides_the_entry(app, monkeypatch):
+    one, two = _rec("one.com"), _rec("two.com", days=1)
+    view = _open_main(app, monkeypatch, one, two)
+    view.select(one)
+    view._search_var.set("two")
+    assert view.selected is None
+    assert "Запись не выбрана" in _canvas_texts(view.detail)
+
+
+def test_main_view_follows_entry_after_merge_replaces_objects(app, monkeypatch):
+    one, two = _rec("one.com"), _rec("two.com", days=1)
+    view = _open_main(app, monkeypatch, one, two)
+    view.select(two)
+    app.data = {"entries": [dict(e) for e in app.data["entries"]]}
+    app._refresh_tree()
+    assert view.selected is app.data["entries"][1]
+
+
+def test_main_view_favorite_toggle_is_saved(app, monkeypatch):
+    entry = _rec("example.com")
+    view = _open_main(app, monkeypatch, entry)
+    assert app._save_vault()
+    view.select(entry)
+    view._toggle_favorite()
+    assert entry["favorite"] is True
+    from vault.crypto import decrypt_vault
+    from vault.storage import load_vault_file
+
+    on_disk = decrypt_vault(load_vault_file(app.vault_path), MASTER)["entries"][0]
+    assert on_disk["favorite"] is True
+    view._toggle_favorite()
+    assert "favorite" not in entry
+
+
+def test_main_view_lock_leaves_nothing_on_screen(app, monkeypatch):
+    entry = _rec("secret-site.com", password="Visible-Pass#99xY")
+    view = _open_main(app, monkeypatch, entry)
+    view.select(entry)
+    view._toggle_password()
+    view._search_var.set("secret")
+    app._on_lock()
+    app.update()
+    assert view.selected is None and not view.password_visible and view._mode == "all"
+    for canvas in (view.list, view.detail, view.sidebar, view.head):
+        texts = _canvas_texts(canvas)
+        assert not any("secret-site" in t or "Visible-Pass" in t for t in texts), texts
+
+
+def test_main_view_brand_menu_has_problems_master_password_and_lock(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+    shown = []
+    monkeypatch.setattr(guiapp.tk.Menu, "tk_popup", lambda self, x, y: shown.append(self))
+    _click_text(view.sidebar, "Личное")
+    menu = shown[0]
+    labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1) if menu.type(i) == "command"]
+    assert labels[0] == "Проблемы" and labels[1].startswith("Сменить мастер-пароль")
+    assert labels[2].startswith("Заблокировать")
+
+
+def test_main_view_new_entry_button_and_pills_open_dialogs(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+    calls = []
+    monkeypatch.setattr(app, "_on_add", lambda: calls.append("add"))
+    monkeypatch.setattr(app, "_on_assistant", lambda: calls.append("assistant"))
+    monkeypatch.setattr(app, "_on_generate_standalone", lambda: calls.append("generator"))
+    for label in ("Новая запись", "Помощник", "Генератор"):
+        _click_text(view.head, label)
+    assert calls == ["add", "assistant", "generator"]
+
+
+def test_main_view_weak_password_is_marked_weak(app, monkeypatch):
+    weak, strong = _rec("weak.com", password="password1"), _rec("strong.com", password="Xk9#mP2$vL7qRt4Wz!", days=1)
+    view = _open_main(app, monkeypatch, weak, strong)
+    view.select(weak)
+    assert any(t.startswith("Слабый") for t in _canvas_texts(view.detail))
+    view.select(strong)
+    assert any(t.startswith("Надёжный") for t in _canvas_texts(view.detail))
+
+
+def test_main_view_footer_shows_saved_time(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+    assert app._save_vault()
+    assert any(t.startswith("Сохранено в ") for t in _canvas_texts(view.sidebar))
+
+
+def test_main_view_has_reference_geometry(app, monkeypatch):
+    """Раздел 10.79: ширина боковой панели и столбца списка — как в референсе (224 и 375 px)."""
+    view = _open_main(app, monkeypatch)
+    assert view.sidebar.winfo_width() == guiapp._px(224)
+    assert view.head.winfo_width() == guiapp._px(375)
+    assert (guiapp._MAIN_WINDOW_SIZE[0], guiapp._MAIN_WINDOW_SIZE[1]) == (1120, 700)
+
+
+def test_add_entry_dialog_result_creates_entry_with_history_and_selects_it(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+
+    class FakeEntryDialog(tk.Toplevel):
+        def __init__(self, parent, title, entry=None):
+            super().__init__(parent)
+            self.result = {
+                "site": "added.com", "username": "bob", "password": "pw12345Xy#", "url": "added.com",
+                "note": "заметка", "tags": ["Работа", "работа", "Деньги"],
+            }
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "EntryDialog", FakeEntryDialog)
+    app._on_add()
+    app.update()
+
+    entry = app.data["entries"][0]
+    assert entry["url"] == "added.com" and entry["note"] == "заметка" and entry["tags"] == ["Работа", "Деньги"]
+    assert entry["history"][0]["event"] == "created"
+    assert view.selected is entry and "added.com" in _canvas_texts(view.detail)
+
+
+def test_edit_entry_changes_password_note_and_history(app, monkeypatch):
+    entry = _rec("example.com", "alice", "old-Pass#99xY", days=30)
+    entry["created_at"] = "2020-01-01T00:00:00Z"
+    view = _open_main(app, monkeypatch, entry)
+    view.select(entry)
+
+    class FakeEntryDialog(tk.Toplevel):
+        def __init__(self, parent, title, entry=None):
+            super().__init__(parent)
+            assert entry is not None and title == "Изменить запись"
+            self.result = {
+                "site": "example.com", "username": "alice", "password": "new-Pass#99xY", "url": "",
+                "note": "новая заметка", "tags": [],
+            }
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "EntryDialog", FakeEntryDialog)
+    app._edit_entry(entry)
+
+    assert entry["password"] == "new-Pass#99xY" and entry["created_at"] != "2020-01-01T00:00:00Z"
+    events = [h["event"] for h in entry["history"]]
+    assert "password" in events and "note_added" in events
+    assert view.selected is entry
+
+
+def test_edit_entry_cancelled_keeps_everything(app, monkeypatch):
+    entry = _rec("example.com", password="old-Pass#99xY")
+    snapshot = dict(entry)
+    _open_main(app, monkeypatch, entry)
+
+    class Cancelled(tk.Toplevel):
+        def __init__(self, parent, title, entry=None):
+            super().__init__(parent)
+            self.result = None
+            self.after(0, self.destroy)
+
+    monkeypatch.setattr(guiapp, "EntryDialog", Cancelled)
+    app._edit_entry(entry)
+    assert entry == snapshot
+
+
+def test_entry_dialog_prefills_fields_and_returns_all_of_them(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    entry = _rec("example.com", "alice", "Secret-Pass#99xY", url="example.com", note="строка 1\nстрока 2", tags=["a", "b"])
+    dialog = guiapp.EntryDialog(app, "Изменить запись", entry=entry)
+    dialog.update()
+    try:
+        assert dialog._site_var.get() == "example.com" and dialog._url_var.get() == "example.com"
+        assert dialog._tags_var.get() == "a, b"
+        dialog._tags_var.set("работа; деньги, Работа")
+        dialog._on_save()
+        assert dialog.result == {
+            "site": "example.com", "username": "alice", "password": "Secret-Pass#99xY", "url": "example.com",
+            "note": "строка 1\nстрока 2", "tags": ["работа", "деньги"],
+        }
+    finally:
+        if dialog.winfo_exists():
+            dialog.destroy()
+
+
+def test_entry_dialog_requires_site_and_password(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    errors = []
+    monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a[1]))
+    dialog = guiapp.EntryDialog(app, "Новая запись")
+    dialog._on_save()
+    dialog._site_var.set("a.com")
+    dialog._on_save()
+    assert errors == ["Укажите сайт.", "Пароль не может быть пустым."] and dialog.result is None
+    dialog.destroy()

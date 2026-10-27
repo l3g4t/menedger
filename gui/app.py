@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import faulthandler
 import io
+import math
 import os
 import queue
 import secrets
@@ -31,15 +32,15 @@ import threading
 import time
 import tkinter as tk
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from tkinter import filedialog, messagebox, simpledialog
 
 import ttkbootstrap as ttk
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageTk
 
-from assistant.advisor import AdvisorReport, analyze_vault, check_password
+from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, AdvisorReport, analyze_vault, check_password
 from assistant.analyzer import analyze as analyze_password
 from assistant.analyzer import summary as analysis_summary
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
@@ -57,6 +58,7 @@ from vault.crypto import (
     encrypt_vault,
 )
 from vault.concurrency import ConcurrentChangeError, Snapshot, VaultBusyError, VaultLock, save_merged
+from vault.records import activity_group, apply_edit, history_lines, last_activity, new_entry, normalize_tags
 from vault.storage import load_vault_file, save_vault_file
 
 # Тема ttkbootstrap — "bootstrap-light": светлая, плоская, с синим
@@ -113,38 +115,6 @@ ICON_ICO_PATH = _RESOURCE_DIR / "icon.ico"
 # каждого bootstyle в этой теме, не угадыванием.
 ICONS_DIR = _RESOURCE_DIR / "icons"
 
-# Цвета для чередующихся строк в списке записей (см. _refresh_tree) —
-# раздел 10.12 сделал их заметно светлее прежних (#f2f3f5 → #f7f8fa):
-# современные списки (Bitwarden, 1Password и т.п.) размечают строки
-# едва заметной полоской, а не выраженной "зеброй" таблицы-эксельки.
-_TREE_ROW_COLORS = {"evenrow": "#ffffff", "oddrow": "#f7f8fa"}
-
-# Мягкий акцентный оттенок для выделенной строки списка (раздел 10.12) —
-# осветлённый `_ACCENT` (см. ниже), а не стандартный серый/синий цвет
-# выделения темы `bootstrap-light`, чтобы выделение читалось как часть
-# той же цветовой истории, что и акцентные кнопки, а не как отдельный,
-# ничем не связанный с остальным интерфейсом системный цвет.
-_TREE_SELECTED_BG = "#dce8fd"
-
-# Палитра "аватаров" — цветных кружков с первой буквой сайта слева от
-# каждой записи списка (раздел 10.12), тот же приём, что в Bitwarden/
-# 1Password и подобных менеджерах паролей: быстро отличать записи друг
-# от друга по цветовому пятну, даже не читая текст целиком. Цвет
-# выбирается детерминированно по хэшу названия сайта (см.
-# `App._site_avatar`) — одна и та же запись всегда получает один и тот
-# же цвет между перезапусками приложения, а не случайный при каждом
-# показе.
-_AVATAR_PALETTE = (
-    "#2f6fed",
-    "#e0524f",
-    "#1b998b",
-    "#f2994a",
-    "#7c5cbf",
-    "#2aa876",
-    "#d6558c",
-    "#3d8bd4",
-)
-
 # Палитра сайдбара/тёмного фона — цвет самой иконки приложения (см.
 # CLAUDE.md, раздел 10.2), тот же язык, что и в референсах "Разделённая
 # панель" (тёмный сайдбар + светлая рабочая область).
@@ -196,11 +166,7 @@ def _px(value: float) -> int:
 _MASTER_FIELD_WIDTH = 260  # px
 _MASTER_FIELD_HEIGHT = 38  # px
 
-# Панель записи справа в главном окне (раздел 10.78): ширина и размер кнопок-иконок.
-_DETAIL_WIDTH = 300  # px
-_DETAIL_BUTTON_SIZE = 30  # px, квадратные кнопки-иконки (копировать, глаз, карандаш, корзина)
 _GENERATOR_FIELD_HEIGHT = 42  # px, поле пароля генератора и кнопка копирования
-_NEW_PASSWORD_CONTENT_WIDTH = 360  # px — ширина содержимого диалога нового пароля (раздел 10.51)
 _VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (разделы 10.45–10.46)
 # Экран разблокировки (раздел 10.46): высота полей ввода и ВСЕХ кнопок на
 # нём одна — иначе кнопка рядом с полем выше/ниже него.
@@ -210,8 +176,8 @@ _UNLOCK_CONTROL_HEIGHT = 42  # px
 # главный экран.
 _UNLOCK_MARGIN_X = 40  # px
 _UNLOCK_MARGIN_Y = 24  # px
-_MAIN_WINDOW_SIZE = (1080, 640)  # px
-_MAIN_MIN_SIZE = (900, 460)  # px
+_MAIN_WINDOW_SIZE = (1120, 700)  # px, размер референса (раздел 10.79)
+_MAIN_MIN_SIZE = (960, 520)  # px
 # Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
 # этого цвета окно не рисует. Яркий и нигде больше в интерфейсе не встречается.
 _WINDOW_KEY_COLOR = "#fe00fe"
@@ -226,13 +192,6 @@ _PAGE_BG = "#eef1f6"
 _CARD_RADIUS = 20
 _CARD_MARGIN = 22
 
-# Плейсхолдер строки поиска (раздел 10.8) — показывается прямо в самом
-# поле вместо отдельной подписи "Поиск:" слева; сравнивается по значению
-# с текущим текстом поля (см. _refresh_tree), а не через отдельный
-# булев флаг — это устойчиво к прямой установке `_search_var.set(...)`
-# в тестах (tests/test_gui.py), которая не проходит через события
-# фокуса, где обычно вставляется/убирается плейсхолдер.
-_SEARCH_PLACEHOLDER = "Поиск по сайту или логину..."
 _SEARCH_PLACEHOLDER_COLOR = "#9aa3b2"
 
 # Уровни сегментированной шкалы надёжности в GeneratorDialog (раздел
@@ -700,11 +659,18 @@ def _use_native_frame(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
 _CHROME_THEMES = {
     "dark": {"bg": _SIDEBAR_BG, "fg": _SIDEBAR_TEXT_ACTIVE, "hover": _SIDEBAR_HOVER_BG, "title": "#8fa0bd"},
     "light": {"bg": _PAGE_BG, "fg": _NEUTRAL_TEXT, "hover": _NEUTRAL_BORDER, "title": "#7a869c"},
+    # Над главным экраном (раздел 10.79): тёмный, в цвет боковой панели референса.
+    "main": {"bg": "#0a1724", "fg": "#e8eef4", "hover": "#17314d", "title": "#5f758b"},
 }
 _CHROME_CLOSE_HOVER = "#e5484d"
 _CHROME_BORDER = "#b8c2d6"  # 1px рамка диалогов: без неё безрамочное окно "растворяется"
 _CHROME_BAR_HEIGHT = 36
 _CHROME_BUTTON_WIDTH = 42
+
+
+def _theme_window_bg(theme: str) -> str:
+    """Цвет фона окна под строкой заголовка для темы рамки."""
+    return {"dark": _SIDEBAR_BG, "main": "#0e1e30"}.get(theme, _PAGE_BG)
 
 
 def _chrome_glyph(kind: str, fg: str, bg: str, hover_bg: str | None) -> Image.Image:
@@ -885,6 +851,695 @@ def _entry_key(entry: dict) -> tuple[str, str, str]:
     return (entry.get("site", ""), entry.get("username", ""), entry.get("created_at", ""))
 
 
+# --- Главный экран по референсу (CLAUDE.md, раздел 10.79) ----------------------
+
+_MV_BG = "#0e1e30"  # список и панель записи
+_MV_SIDEBAR_BG = "#0a1724"
+_MV_LINE_SIDEBAR = "#12273d"
+_MV_LINE_LIST = "#112338"
+_MV_SELECT = "#17314d"  # выбранная строка и пункт меню
+_MV_FIELD_BORDER = "#14273e"
+_MV_PILL_BORDER = "#1f3955"
+_MV_CHIP_BORDER = "#1b3450"
+_MV_BUTTON_BORDER = "#1a334e"
+_MV_TRASH_BORDER = "#3b2f36"
+_MV_SEPARATOR = "#162b44"
+_MV_CREAM = "#f3f1ea"
+_MV_TEXT = "#e8eef4"
+_MV_TEXT_SOFT = "#9db0c3"
+_MV_TEXT_MUTED = "#7f95aa"
+_MV_TEXT_DIM = "#62788f"
+_MV_LINK = "#7fb0e0"
+_MV_GREEN = "#7db58f"
+_MV_RED = "#e5806a"
+_MV_AMBER = "#d9a15f"
+_MV_AVATARS = ("#9a5b3c", "#3f5f86", "#2e4a66", "#7a6a3a", "#4a4a5e", "#3c6b5a", "#5a4a66")
+_MV_TAG_COLORS = ("#6fa3d8", "#d9a15f", "#7db58f", "#b58fc4", "#d98a8a", "#8fc4c4", "#c4c48f", "#8f9fc4")
+_MV_SEARCH_HINT = "Поиск"
+_MV_GROUP_TITLES = {"today": "Сегодня", "week": "На этой неделе", "earlier": "Ранее"}
+
+_mv_family_cache: dict[str, str] = {}
+
+
+def _mv_family(mono: bool = False) -> str:
+    """Шрифт интерфейса: Inter (как в референсе), иначе Segoe UI / системный.
+    Для «Ctrl K» — моноширинный."""
+    key = "mono" if mono else "ui"
+    if key not in _mv_family_cache:
+        import tkinter.font as tkfont
+
+        available = set(tkfont.families())
+        wanted = ("JetBrains Mono", "Consolas", "DejaVu Sans Mono", "Courier New") if mono else ("Inter", "Segoe UI")
+        _mv_family_cache[key] = next((f for f in wanted if f in available), "TkFixedFont" if mono else "TkDefaultFont")
+    return _mv_family_cache[key]
+
+
+def _mv_font(px: float, bold: bool = False, mono: bool = False):
+    """Шрифт в ПИКСЕЛЯХ (отрицательный размер), как нарисован референс; масштабируется `_px`."""
+    return (_mv_family(mono), -_px(px), "bold" if bold else "normal")
+
+
+def _mv_color_for(text: str, palette: tuple[str, ...]) -> str:
+    # Не встроенный hash(): для строк он меняется между запусками (раздел 10.12).
+    return palette[sum(map(ord, text.casefold())) % len(palette)]
+
+
+def _mv_strength(entry: dict) -> tuple[str, str]:
+    """(слово, цвет) для строки «Надёжный · 18 символов»: по оценке анализатора
+    (раздел 9.7). Порог «слабый» — тот же 50 бит, что в разделе «Проблемы»."""
+    analysis = analyze_password(entry["password"], [entry.get("site", ""), entry.get("username", "")])
+    if analysis.leaked or analysis.bits < WEAK_ENTROPY_THRESHOLD_BITS:
+        return "Слабый", _MV_RED
+    if analysis.bits < 80:
+        return "Средний", _MV_AMBER
+    return "Надёжный", _MV_GREEN
+
+
+class _Hits:
+    """Кликабельные прямоугольники одного холста: на холсте всё рисуется
+    картинками и текстом, поэтому нажатие ищется по координатам, а не по виджету."""
+
+    def __init__(self, canvas: tk.Canvas) -> None:
+        self.canvas = canvas
+        self.items: list[tuple[float, float, float, float, Callable[[], None]]] = []
+        canvas.bind("<Button-1>", self._click, add="+")
+        canvas.bind("<Motion>", self._motion, add="+")
+
+    def clear(self) -> None:
+        self.items.clear()
+
+    def add(self, x0: float, y0: float, x1: float, y1: float, command: Callable[[], None]) -> None:
+        self.items.append((x0, y0, x1, y1, command))
+
+    def _find(self, event: tk.Event):
+        x, y = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        for x0, y0, x1, y1, command in reversed(self.items):
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return command
+        return None
+
+    def _click(self, event: tk.Event) -> None:
+        command = self._find(event)
+        if command is not None:
+            self.canvas.focus_set()
+            command()
+
+    def _motion(self, event: tk.Event) -> None:
+        self.canvas.configure(cursor="hand2" if self._find(event) else "")
+
+
+class MainView(tk.Frame):
+    """Главный экран строго по референсу: боковая панель (название хранилища, поиск,
+    «Все записи / Избранное / Недавние», теги, статус), столбец списка (кнопки
+    «Помощник» и «Генератор», заголовок, «Новая запись», записи по группам дат) и
+    панель выбранной записи. Всё рисуется на трёх холстах картинками и текстом в
+    пикселях референса (1120×700), умноженных на масштаб `_px`.
+
+    Данных не хранит: читает `app.data` и зовёт методы `App` (сохранение, диалоги)."""
+
+    def __init__(self, parent: tk.Misc, app: "App") -> None:
+        super().__init__(parent, bg=_MV_BG, bd=0, highlightthickness=0)
+        self.app = app
+        self._images: dict = {}  # PhotoImage надо держать живыми
+        self._mode = "all"  # all | fav | recent | tag
+        self._tag: str | None = None
+        self.selected: dict | None = None
+        self.password_visible = False
+        self.saved_at: datetime | None = None
+        self.vault_name = "Личное"
+        self._search_var = tk.StringVar(value=_MV_SEARCH_HINT)
+        self._search_active = False
+        self._pending: dict[str, str] = {}
+        self._search_window: int | None = None
+
+        line = max(1, _px(1))
+        self.sidebar = tk.Canvas(self, width=_px(224), bg=_MV_SIDEBAR_BG, bd=0, highlightthickness=0)
+        self.sidebar.pack(side="left", fill="y")
+        tk.Frame(self, width=line, bg=_MV_LINE_SIDEBAR, bd=0).pack(side="left", fill="y")
+        list_column = tk.Frame(self, width=_px(375), bg=_MV_BG, bd=0)
+        list_column.pack_propagate(False)
+        list_column.pack(side="left", fill="y")
+        self.head = tk.Canvas(list_column, height=_px(105), bg=_MV_BG, bd=0, highlightthickness=0)
+        self.head.pack(fill="x")
+        self.list = tk.Canvas(list_column, bg=_MV_BG, bd=0, highlightthickness=0, takefocus=True)
+        self.list.pack(fill="both", expand=True)
+        tk.Frame(self, width=line, bg=_MV_LINE_LIST, bd=0).pack(side="left", fill="y")
+        self.detail = tk.Canvas(self, bg=_MV_BG, bd=0, highlightthickness=0)
+        self.detail.pack(side="left", fill="both", expand=True)
+
+        self._sidebar_hits, self._head_hits = _Hits(self.sidebar), _Hits(self.head)
+        self._list_hits, self._detail_hits = _Hits(self.list), _Hits(self.detail)
+
+        self._search_entry = tk.Entry(
+            self.sidebar,
+            textvariable=self._search_var,
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+            bg=_MV_BG,
+            fg=_MV_TEXT_DIM,
+            insertbackground=_MV_TEXT,
+            font=_mv_font(12),
+        )
+        self._search_entry.bind("<FocusIn>", self._search_focus_in)
+        self._search_entry.bind("<FocusOut>", self._search_focus_out)
+        self._search_var.trace_add("write", lambda *_a: self._on_search_changed())
+
+        for canvas, name in ((self.sidebar, "sidebar"), (self.head, "head"), (self.list, "list"), (self.detail, "detail")):
+            canvas.bind("<Configure>", lambda _e, n=name: self._schedule(n), add="+")
+        self.list.bind("<MouseWheel>", self._on_wheel)
+        self.list.bind("<Button-4>", lambda _e: self.list.yview_scroll(-3, "units"))
+        self.list.bind("<Button-5>", lambda _e: self.list.yview_scroll(3, "units"))
+        self.list.bind("<Up>", lambda _e: self._move_selection(-1))
+        self.list.bind("<Down>", lambda _e: self._move_selection(1))
+        self.detail.bind("<MouseWheel>", lambda e: self.detail.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        app.bind("<Control-KeyPress>", self._on_control_key, add="+")
+
+    # --- общее -----------------------------------------------------------------
+
+    def _schedule(self, name: str) -> None:
+        """Перерисовка по <Configure> с объединением серии событий в одну."""
+        if name in self._pending:
+            return
+        self._pending[name] = self.after_idle(lambda: self._run_scheduled(name))
+
+    def _run_scheduled(self, name: str) -> None:
+        self._pending.pop(name, None)
+        {"sidebar": self._draw_sidebar, "head": self._draw_head, "list": self._draw_list, "detail": self._draw_detail}[
+            name
+        ]()
+
+    def _entries(self) -> list[dict]:
+        data = self.app.data
+        return data.get("entries", []) if data else []
+
+    def _rr(self, w: float, h: float, fill: str | None, border: str | None = None, radius: float = 8):
+        """Скруглённый прямоугольник w×h (px референса); прозрачные углы, 4× сглаживание."""
+        W, H, R = max(1, _px(w)), max(1, _px(h)), _px(radius)
+        key = ("rr", W, H, fill, border, R)
+        if key not in self._images:
+            factor = 4
+            big = Image.new("RGBA", (W * factor, H * factor), (0, 0, 0, 0))
+            ImageDraw.Draw(big).rounded_rectangle(
+                [0, 0, W * factor - 1, H * factor - 1],
+                radius=min(R, min(W, H) // 2) * factor,
+                fill=fill,
+                outline=border,
+                width=max(1, _px(1)) * factor if border else 0,
+            )
+            self._images[key] = self.app._tk_image(big.resize((W, H), Image.LANCZOS))
+        return self._images[key]
+
+    def _tile(self, text: str, size: float, color: str, radius: float):
+        """Квадратик-аватар с первой буквой сайта."""
+        S, R = _px(size), _px(radius)
+        letter = (text[:1] or "?").upper()
+        key = ("tile", letter, S, color, R)
+        if key not in self._images:
+            factor = 4
+            big = Image.new("RGBA", (S * factor, S * factor), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            draw.rounded_rectangle([0, 0, S * factor - 1, S * factor - 1], radius=R * factor, fill=color)
+            font = _avatar_font(int(S * factor * 0.42))
+            box = draw.textbbox((0, 0), letter, font=font)
+            draw.text(
+                ((S * factor - (box[2] - box[0])) / 2 - box[0], (S * factor - (box[3] - box[1])) / 2 - box[1]),
+                letter,
+                fill=_MV_TEXT,
+                font=font,
+            )
+            self._images[key] = self.app._tk_image(big.resize((S, S), Image.LANCZOS))
+        return self._images[key]
+
+    def _mountain(self, width: float, color: str):
+        """Гора со скважиной из иконки приложения (без тёмного квадрата вокруг)."""
+        W = _px(width)
+        key = ("mountain", W, color)
+        if key not in self._images:
+            try:
+                icon = Image.open(ICON_PATH).convert("RGBA")
+            except OSError:
+                return None
+            mask = ImageChops.multiply(icon.convert("L").point(lambda v: max(0, min(255, int((v - 110) * 255 / 90)))), icon.getchannel("A"))
+            box = mask.point(lambda v: 255 if v > 128 else 0).getbbox()
+            if box is None:
+                return None
+            mask = mask.crop(box)
+            height = max(1, round(mask.height * W / mask.width))
+            mask = mask.resize((W, height), Image.LANCZOS)
+            self._images[key] = self.app._tk_image(Image.merge("RGBA", (*Image.new("RGB", mask.size, color).split(), mask)))
+        return self._images[key]
+
+    def _glyph(self, kind: str, color: str, size: float):
+        """Значок: star / star_fill рисуются здесь, pencil / trash / plus — из gui/icons, перекрашенные."""
+        S = _px(size)
+        key = ("glyph", kind, color, S)
+        if key not in self._images:
+            if kind in ("star", "star_fill"):
+                factor = 6
+                big = Image.new("RGBA", (S * factor, S * factor), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(big)
+                cx = cy = S * factor / 2
+                outer, inner = S * factor * 0.46, S * factor * 0.19
+                points = [
+                    (
+                        cx + (outer if i % 2 == 0 else inner) * math.sin(math.pi * i / 5),
+                        cy - (outer if i % 2 == 0 else inner) * math.cos(math.pi * i / 5) + S * factor * 0.03,
+                    )
+                    for i in range(10)
+                ]
+                if kind == "star_fill":
+                    draw.polygon(points, fill=color)
+                else:
+                    draw.line(points + [points[0]], fill=color, width=max(2, round(S * factor * 0.075)), joint="curve")
+                image = big.resize((S, S), Image.LANCZOS)
+            else:
+                try:
+                    alpha = Image.open(ICONS_DIR / f"{kind}_white.png").convert("RGBA").getchannel("A")
+                except OSError:
+                    return None
+                alpha = alpha.resize((S, S), Image.LANCZOS)
+                image = Image.merge("RGBA", (*Image.new("RGB", (S, S), color).split(), alpha))
+            self._images[key] = self.app._tk_image(image)
+        return self._images[key]
+
+    @staticmethod
+    def _text(canvas: tk.Canvas, x: float, y: float, text: str, *, px: float, fill: str, bold=False, anchor="w", mono=False, **kw):
+        return canvas.create_text(_px(x), _px(y), text=text, anchor=anchor, fill=fill, font=_mv_font(px, bold, mono), tags="dyn", **kw)
+
+    # --- данные ----------------------------------------------------------------
+
+    def tag_counts(self) -> list[tuple[str, int]]:
+        names: dict[str, str] = {}
+        counts: dict[str, int] = {}
+        for entry in self._entries():
+            for tag in entry.get("tags", []) or []:
+                key = str(tag).casefold()
+                names.setdefault(key, str(tag))
+                counts[key] = counts.get(key, 0) + 1
+        return sorted(((names[k], c) for k, c in counts.items()), key=lambda item: (-item[1], item[0].casefold()))
+
+    def visible(self) -> list[tuple[int, dict]]:
+        """Записи, подходящие под фильтр боковой панели и поиск, новые сверху."""
+        query = "" if not self._search_active else self._search_var.get().strip().casefold()
+        found = []
+        for index, entry in enumerate(self._entries()):
+            if self._mode == "fav" and not entry.get("favorite"):
+                continue
+            if self._mode == "recent" and activity_group(entry) == "earlier":
+                continue
+            if self._mode == "tag" and (self._tag or "").casefold() not in {str(t).casefold() for t in entry.get("tags", []) or []}:
+                continue
+            if query:
+                haystack = " ".join(
+                    [entry.get("site", ""), entry.get("username", ""), entry.get("url", ""), *map(str, entry.get("tags", []) or [])]
+                ).casefold()
+                if query not in haystack:
+                    continue
+            found.append((index, entry))
+        floor = datetime.min.replace(tzinfo=timezone.utc)
+        found.sort(key=lambda item: (last_activity(item[1]) or floor, -item[0]), reverse=True)
+        return found
+
+    def title_text(self) -> str:
+        return {"all": "Все записи", "fav": "Избранное", "recent": "Недавние"}.get(self._mode) or (self._tag or "")
+
+    # --- публичный интерфейс для App -----------------------------------------------
+
+    def refresh(self) -> None:
+        """Перечитать `app.data` и перерисовать всё; открытая запись остаётся открытой."""
+        target = self.selected
+        entries = self._entries()
+        if target is not None and not any(e is target for e in entries):
+            same = [e for e in entries if _entry_key(e) == _entry_key(target)]
+            target = same[0] if same else None
+        if target is not None and not any(e is target for _, e in self.visible()):
+            target = None
+        if target is not self.selected and target is None:
+            self.password_visible = False
+        self.selected = target
+        self.redraw()
+
+    def redraw(self) -> None:
+        self._draw_sidebar()
+        self._draw_head()
+        self._draw_list()
+        self._draw_detail()
+
+    def clear(self) -> None:
+        """Блокировка хранилища: ничего не должно остаться на экране."""
+        self.selected, self.password_visible = None, False
+        self._mode, self._tag = "all", None
+        self._search_active = False
+        self._search_var.set(_MV_SEARCH_HINT)
+        self._search_entry.configure(fg=_MV_TEXT_DIM)
+        self.saved_at = None
+        self.redraw()
+
+    def select(self, entry: dict | None) -> None:
+        if entry is not self.selected:
+            self.password_visible = False
+        self.selected = entry
+        self._draw_list()
+        self._draw_detail()
+
+    def focus_search(self) -> None:
+        self._search_entry.focus_force()
+        if self._search_active:
+            self._search_entry.selection_range(0, "end")
+
+    def set_saved_at(self, moment: datetime | None) -> None:
+        self.saved_at = moment
+        self._draw_sidebar()
+
+    # --- поиск, фильтры, клавиши -------------------------------------------------
+
+    def _search_focus_in(self, _event=None) -> None:
+        if not self._search_active:
+            self._search_var.set("")
+            self._search_active = True
+        self._search_entry.configure(fg=_MV_TEXT)
+
+    def _search_focus_out(self, _event=None) -> None:
+        if not self._search_var.get():
+            self._search_active = False
+            self._search_var.set(_MV_SEARCH_HINT)
+            self._search_entry.configure(fg=_MV_TEXT_DIM)
+
+    def _on_search_changed(self) -> None:
+        # Подсказка «Поиск» живёт в том же поле: считать запросом только то, что набрал человек.
+        if not self._search_active and self._search_var.get() != _MV_SEARCH_HINT:
+            self._search_active = True  # текст поставлен программно (тесты) — это запрос
+            self._search_entry.configure(fg=_MV_TEXT)
+        self.refresh()
+
+    def set_filter(self, mode: str, tag: str | None = None) -> None:
+        self._mode, self._tag = mode, tag
+        self.refresh()
+
+    def _on_control_key(self, event: tk.Event) -> None:
+        if not self.winfo_ismapped():
+            return
+        keysym = event.keysym
+        if keysym in ("k", "K", "Cyrillic_el", "Cyrillic_EL"):
+            self.focus_search()
+        elif keysym in ("n", "N", "Cyrillic_te", "Cyrillic_TE"):
+            self.app._on_add()
+        elif keysym in ("l", "L", "Cyrillic_de", "Cyrillic_DE"):
+            self.app._on_lock()
+
+    def _on_wheel(self, event: tk.Event) -> None:
+        self.list.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    def _move_selection(self, step: int) -> None:
+        items = [entry for _, entry in self.visible()]
+        if not items:
+            return
+        current = next((i for i, e in enumerate(items) if e is self.selected), -1)
+        self.select(items[max(0, min(len(items) - 1, current + step))] if current >= 0 else items[0 if step > 0 else -1])
+
+    def _menu(self) -> None:
+        """Меню у названия хранилища: то, чего нет на экране референса, но без чего
+        нельзя обойтись (раздел 10.79)."""
+        menu = tk.Menu(
+            self.sidebar,
+            tearoff=0,
+            bg=_MV_BG,
+            fg="#dce5ee",
+            activebackground=_MV_SELECT,
+            activeforeground=_MV_CREAM,
+            bd=0,
+            relief="flat",
+            font=_mv_font(12),
+        )
+        menu.add_command(label="Проблемы", command=lambda: self.app._on_audit())
+        menu.add_command(label="Сменить мастер-пароль…", command=lambda: self.app._on_change_master())
+        menu.add_separator()
+        menu.add_command(label="Заблокировать        Ctrl+L", command=lambda: self.app._on_lock())
+        self._popup = menu
+        menu.tk_popup(self.sidebar.winfo_rootx() + _px(18), self.sidebar.winfo_rooty() + _px(52))
+
+    # --- боковая панель ------------------------------------------------------------
+
+    def _draw_sidebar(self) -> None:
+        c, hits = self.sidebar, self._sidebar_hits
+        c.delete("dyn")
+        hits.clear()
+        height = max(c.winfo_height(), _px(500))
+        entries = self._entries()
+        count = len(entries)
+
+        mountain = self._mountain(31, _MV_CREAM)
+        if mountain is not None:
+            c.create_image(_px(19), _px(22), image=mountain, anchor="nw", tags="dyn")
+        self._text(c, 60, 26, self.vault_name, px=13, fill=_MV_CREAM, bold=True)
+        self._text(c, 60, 42, f"{count} {ru_plural(count, ('запись', 'записи', 'записей'))}", px=11, fill="#5f758b")
+        hits.add(0, _px(8), _px(224), _px(56), self._menu)
+
+        c.create_image(_px(12), _px(61), image=self._rr(201, 37, _MV_BG, _MV_FIELD_BORDER, 10), anchor="nw", tags="dyn")
+        if self._search_window is None:
+            self._search_window = c.create_window(_px(23), _px(79), window=self._search_entry, anchor="w", width=_px(110))
+        c.tag_raise(self._search_window)
+        self._text(c, 202, 79, "Ctrl K", px=11, fill=_MV_TEXT_DIM, anchor="e", mono=True)
+
+        favorites = sum(1 for e in entries if e.get("favorite"))
+        nav = (
+            ("all", "Все записи", str(count), 126),
+            ("fav", "Избранное", str(favorites), 157),
+            ("recent", "Недавние", "", 187),
+        )
+        for mode, label, number, y in nav:
+            active = self._mode == mode
+            if active:
+                c.create_image(_px(8), _px(y - 15), image=self._rr(208, 31, _MV_SELECT, None, 9), anchor="nw", tags="dyn")
+            self._text(c, 18, y, label, px=12, fill=_MV_CREAM if active else _MV_TEXT_SOFT, bold=active)
+            if number:
+                self._text(c, 205, y, number, px=11, fill="#8196ac" if active else "#5c7287", anchor="e", mono=True)
+            hits.add(_px(8), _px(y - 15), _px(216), _px(y + 15), lambda m=mode: self.set_filter(m))
+
+        self._text(c, 18, 227, "Теги", px=10, fill=_MV_TEXT_DIM)
+        y, limit = 255, height / max(_px(1), 1) - 60
+        for tag, number in self.tag_counts():
+            if y + 15 > limit:
+                break
+            active = self._mode == "tag" and (self._tag or "").casefold() == tag.casefold()
+            if active:
+                c.create_image(_px(8), _px(y - 15), image=self._rr(208, 30, _MV_SELECT, None, 9), anchor="nw", tags="dyn")
+            color = _mv_color_for(tag, _MV_TAG_COLORS)
+            c.create_oval(_px(18), _px(y - 4), _px(26), _px(y + 4), fill=color, outline=color, tags="dyn")
+            self._text(c, 36, y, tag, px=12, fill=_MV_CREAM if active else _MV_TEXT_SOFT)
+            self._text(c, 205, y, str(number), px=11, fill="#5e748b", anchor="e", mono=True)
+            hits.add(_px(8), _px(y - 15), _px(216), _px(y + 15), lambda t=tag: self.set_filter("tag", t))
+            y += 30
+
+        bottom = height - _px(45)
+        c.create_line(0, bottom, _px(224), bottom, fill="#12273b", tags="dyn")
+        c.create_oval(_px(16), height - _px(25), _px(23), height - _px(18), fill=_MV_GREEN, outline=_MV_GREEN, tags="dyn")
+        if self.saved_at is not None:
+            c.create_text(
+                _px(34), height - _px(21), text=f"Сохранено в {self.saved_at:%H:%M}", anchor="w", fill="#8196ac", font=_mv_font(10), tags="dyn"
+            )
+
+    # --- столбец списка: верх ------------------------------------------------------------
+
+    def _draw_head(self) -> None:
+        c, hits = self.head, self._head_hits
+        c.delete("dyn")
+        hits.clear()
+        x0 = 225  # левый край столбца в координатах референса
+        for left, width, label, command, dot in (
+            (249, 102, "Помощник", lambda: self.app._on_assistant(), True),
+            (359, 83, "Генератор", lambda: self.app._on_generate_standalone(), False),
+        ):
+            c.create_image(_px(left - x0), _px(16), image=self._rr(width, 29, None, _MV_PILL_BORDER, 14.5), anchor="nw", tags="dyn")
+            if dot:
+                c.create_oval(_px(263 - x0), _px(27), _px(271 - x0), _px(35), fill=_MV_GREEN, outline=_MV_GREEN, tags="dyn")
+            self._text(c, left - x0 + (28 if dot else 13), 31, label, px=11, fill="#dce5ee", bold=True)
+            hits.add(_px(left - x0), _px(16), _px(left - x0 + width), _px(45), command)
+        self._text(c, 249 - x0, 80, self.title_text(), px=17, fill=_MV_CREAM, bold=True)
+        c.create_image(_px(453 - x0), _px(64), image=self._rr(124, 32, _MV_CREAM, None, 10), anchor="nw", tags="dyn")
+        plus = self._glyph("plus", _MV_SIDEBAR_BG, 13)
+        if plus is not None:
+            c.create_image(_px(472 - x0), _px(80), image=plus, anchor="center", tags="dyn")
+        self._text(c, 485 - x0, 80, "Новая запись", px=11, fill=_MV_SIDEBAR_BG, bold=True)
+        hits.add(_px(453 - x0), _px(64), _px(577 - x0), _px(96), lambda: self.app._on_add())
+
+    # --- столбец списка: записи ------------------------------------------------------------
+
+    def _draw_list(self) -> None:
+        c, hits = self.list, self._list_hits
+        c.delete("dyn")
+        hits.clear()
+        items = self.visible()
+        width = _px(375)
+        y = 16  # центр первого заголовка группы (в px референса от верха холста списка)
+        previous = None
+        for index, entry in items:
+            group = activity_group(entry)
+            if group != previous:
+                if previous is not None:
+                    y += 25 - 0  # от низа последней строки группы до центра заголовка
+                self._text(c, 243 - 225, y, _MV_GROUP_TITLES[group], px=10, fill=_MV_TEXT_DIM)
+                y += 13  # от центра заголовка до верха первой строки
+                previous = group
+            self._draw_row(c, hits, y, entry)
+            y += 54
+        if not items:
+            message = "Ничего не найдено" if self._entries() else "Записей пока нет"
+            self._text(c, 24, 40, message, px=12, fill=_MV_TEXT_DIM)
+        c.configure(scrollregion=(0, 0, width, max(_px(y) + _px(16), c.winfo_height())))
+        if _px(y) + _px(16) <= c.winfo_height():
+            c.yview_moveto(0)
+
+    def _draw_row(self, c: tk.Canvas, hits: _Hits, top: float, entry: dict) -> None:
+        active = entry is self.selected
+        if active:
+            c.create_image(_px(8), _px(top), image=self._rr(360, 54, _MV_SELECT, None, 10), anchor="nw", tags="dyn")
+        c.create_image(_px(24), _px(top + 12), image=self._tile(entry["site"], 30, _mv_color_for(entry["site"], _MV_AVATARS), 8), anchor="nw", tags="dyn")
+        self._text(c, 66, top + 17.5, entry["site"], px=13, fill=_MV_TEXT, bold=True)
+        self._text(c, 66, top + 36.5, entry.get("username", ""), px=11, fill=_MV_TEXT_MUTED)
+        tags = entry.get("tags") or []
+        if tags:
+            import tkinter.font as tkfont
+
+            label = str(tags[0])
+            text_w = tkfont.Font(family=_mv_family(), size=-_px(10)).measure(label) / max(_UI_SCALE, 0.01)
+            chip_w = text_w + 18
+            right = 352
+            c.create_image(_px(right - chip_w), _px(top + 17), image=self._rr(chip_w, 20, None, _MV_CHIP_BORDER, 7), anchor="nw", tags="dyn")
+            self._text(c, right - chip_w / 2, top + 27, label, px=10, fill="#97a9bc", anchor="center")
+        hits.add(_px(8), _px(top), _px(368), _px(top + 54), lambda e=entry: self.select(e))
+
+    # --- панель записи ------------------------------------------------------------------------
+
+    def _draw_detail(self) -> None:
+        c, hits = self.detail, self._detail_hits
+        c.delete("dyn")
+        hits.clear()
+        width, height = max(c.winfo_width(), _px(300)), max(c.winfo_height(), _px(300))
+        entry = self.selected
+        if entry is None or self.app.data is None:
+            self._draw_empty(c, width, height)
+            c.configure(scrollregion=(0, 0, width, height))
+            return
+        right = width / max(_UI_SCALE, 0.01) - 32  # правый край содержимого в px референса
+        left = 32
+
+        c.create_image(_px(left), _px(24), image=self._tile(entry["site"], 48, _mv_color_for(entry["site"], _MV_AVATARS), 12), anchor="nw", tags="dyn")
+        url = entry.get("url", "")
+        title_y = 40 if url else 48
+        self._text(c, 96, title_y, entry["site"], px=21, fill=_MV_CREAM, bold=True)
+        if url:
+            self._text(c, 96, 64, url, px=11, fill="#7caedd")
+            hits.add(_px(96), _px(55), _px(96 + 8 * len(url)), _px(73), lambda: self._open_url(url))
+
+        trash_x, pencil_x, star_x = right - 34, right - 34 - 48, right - 34 - 96
+        for x, kind, color, border, command in (
+            (star_x, "star_fill" if entry.get("favorite") else "star", _MV_AMBER if entry.get("favorite") else _MV_TEXT_SOFT, _MV_BUTTON_BORDER, self._toggle_favorite),
+            (pencil_x, "pencil", _MV_TEXT_SOFT, _MV_BUTTON_BORDER, lambda: self.app._edit_entry(entry)),
+            (trash_x, "trash", _MV_RED, _MV_TRASH_BORDER, lambda: self.app._delete_entry(entry)),
+        ):
+            c.create_image(_px(x), _px(31), image=self._rr(34, 34, None, border, 9), anchor="nw", tags="dyn")
+            glyph = self._glyph(kind, color, 15)
+            if glyph is not None:
+                c.create_image(_px(x + 17), _px(48), image=glyph, anchor="center", tags="dyn")
+            hits.add(_px(x), _px(31), _px(x + 34), _px(65), command)
+
+        def separator(y: float) -> None:
+            c.create_line(_px(left), _px(y), _px(right), _px(y), fill=_MV_SEPARATOR, tags="dyn")
+
+        def link(x_right: float, y: float, label: str, command: Callable[[], None]) -> float:
+            import tkinter.font as tkfont
+
+            w = tkfont.Font(family=_mv_family(), size=-_px(11), weight="bold").measure(label) / max(_UI_SCALE, 0.01)
+            self._text(c, x_right, y, label, px=11, fill=_MV_LINK, bold=True, anchor="e")
+            hits.add(_px(x_right - w - 4), _px(y - 10), _px(x_right + 4), _px(y + 10), command)
+            return x_right - w
+
+        self._text(c, left, 110, "Логин", px=11, fill="#7e92a8")
+        self._text(c, left, 130, entry.get("username") or "—", px=13, fill=_MV_TEXT)
+        link(right, 125, "Копировать", lambda: self.app._copy_to_clipboard(entry["username"]))
+        separator(151)
+
+        self._text(c, left, 172, "Пароль", px=11, fill="#7e92a8")
+        password = entry["password"]
+        if self.password_visible:
+            shown = self._text(c, left, 192, password, px=13, fill=_MV_TEXT, mono=True, width=_px(right - left - 130))
+            bbox = c.bbox(shown)
+            lines_h = ((bbox[3] - bbox[1]) / max(_UI_SCALE, 0.01)) if bbox else 18
+            c.coords(shown, _px(left), _px(184))
+            c.itemconfigure(shown, anchor="nw")
+            below = 184 + lines_h + 12
+        else:
+            spacing = 10.7
+            for i in range(min(len(password), int((right - left - 130) / spacing))):
+                cx = left + 2.5 + i * spacing
+                c.create_oval(_px(cx - 2), _px(190), _px(cx + 2), _px(194), fill=_MV_TEXT, outline=_MV_TEXT, tags="dyn")
+            below = 192 + 21
+        word, color = _mv_strength(entry)
+        n = len(password)
+        self._text(c, left, below, f"{word} · {n} {ru_plural(n, ('символ', 'символа', 'символов'))}", px=11, fill=color)
+        edge = link(right, below - 5, "Копировать", lambda: self.app._copy_to_clipboard(entry["password"]))
+        link(edge - 12, below - 5, "Скрыть" if self.password_visible else "Показать", self._toggle_password)
+        y = below + 20
+        separator(y)
+
+        note = entry.get("note", "")
+        if note:
+            self._text(c, left, y + 21, "Заметка", px=11, fill="#7e92a8")
+            item = self._text(c, left, y + 33, note, px=13, fill="#b8c6d4", anchor="nw", width=_px(right - left))
+            bbox = c.bbox(item)
+            note_h = ((bbox[3] - bbox[1]) / max(_UI_SCALE, 0.01)) if bbox else 18
+            y = y + 33 + note_h + 11
+            separator(y)
+
+        self._text(c, left, y + 28, "ИСТОРИЯ", px=10, fill=_MV_TEXT_DIM)
+        row = y + 54
+        for line in history_lines(entry):
+            self._text(c, left, row, line, px=11, fill=_MV_TEXT_SOFT)
+            row += 23
+        c.configure(scrollregion=(0, 0, width, max(height, _px(row + 24))))
+
+    def _draw_empty(self, c: tk.Canvas, width: int, height: int) -> None:
+        cx = width / 2
+        mid = height / max(_UI_SCALE, 0.01) / 2
+        mountain = self._mountain(121, _MV_SELECT)
+        if mountain is not None:
+            c.create_image(cx, _px(mid - 66), image=mountain, anchor="center", tags="dyn")
+        for dy, text, px, color, bold in (
+            (2, "Запись не выбрана", 15, _MV_CREAM, True),
+            (31, "Выберите запись в списке слева или", 12, "#8b9dae", False),
+            (52, "создайте новую.", 12, "#8b9dae", False),
+        ):
+            self._text(c, cx / max(_UI_SCALE, 0.01), mid + dy, text, px=px, fill=color, bold=bold, anchor="center")
+        c.create_image(cx - _px(46), _px(mid + 88), image=self._rr(55, 19, None, "#233d54", 6), anchor="center", tags="dyn")
+        self._text(c, cx / max(_UI_SCALE, 0.01) - 46, mid + 88, "Ctrl N", px=11, fill="#a4b5c8", anchor="center", mono=True)
+        self._text(c, cx / max(_UI_SCALE, 0.01) - 14, mid + 88, "новая запись", px=11, fill="#6a7b8e")
+
+    # --- действия панели -------------------------------------------------------------------------
+
+    def _toggle_password(self) -> None:
+        self.password_visible = not self.password_visible
+        self._draw_detail()
+
+    def _toggle_favorite(self) -> None:
+        entry = self.selected
+        if entry is None:
+            return
+        if entry.get("favorite"):
+            entry.pop("favorite", None)
+        else:
+            entry["favorite"] = True
+        self.app._save_vault()
+        self.refresh()
+
+    def _open_url(self, url: str) -> None:
+        import webbrowser
+
+        target = url if url.lower().startswith(("http://", "https://")) else f"https://{url}"
+        webbrowser.open(target)
+
+
 class App(ttk.Window):
     """Главное окно приложения.
 
@@ -984,14 +1639,6 @@ class App(ttk.Window):
         # single application root window", потому что кнопка получала
         # image от PhotoImage первого, уже уничтоженного окна.
         self._icons: dict[tuple[str, str], tk.PhotoImage] = {}
-        # Тот же приём, для аватаров списка записей (`_site_avatar`,
-        # раздел 10.12) — тоже на экземпляр, а не на модуль, по той же
-        # причине (см. комментарий выше про self._icons).
-        self._avatar_images: dict[tuple[str, str, int], ImageTk.PhotoImage] = {}
-        # Запись, открытая в панели справа (раздел 10.78), и показан ли её пароль.
-        self._detail_entry: dict | None = None
-        self._detail_password_visible = False
-        self._select_after_refresh: dict | None = None
         # Тот же приём — для цветных кружков-маркеров категорий находок
         # в `AuditDialog` (раздел 10.24).
         self._advisor_markers: dict[str, ImageTk.PhotoImage] = {}
@@ -1226,7 +1873,7 @@ class App(ttk.Window):
         self._titlebar.set_theme(theme)
         colors = _CHROME_THEMES[theme]
         if self._window_corners is not None:
-            self.configure(background=_SIDEBAR_BG if theme == "dark" else _PAGE_BG)
+            self.configure(background=_theme_window_bg(theme))
         self._grip.configure(
             background=colors["bg"], image=self._chrome_image("grip", colors["title"], colors["bg"], None)
         )
@@ -1742,7 +2389,7 @@ class App(ttk.Window):
         if self._maximized:
             return
         theme = self._chrome_theme_name
-        bottom = _SIDEBAR_BG if theme == "dark" else _PAGE_BG
+        bottom = _theme_window_bg(theme)
         overlays.extend(self._make_corner_overlays(self, _CHROME_THEMES[theme]["bg"], bottom, None))
 
     def _dlog(self, message: str) -> None:
@@ -2043,51 +2690,6 @@ class App(ttk.Window):
         if image is None:
             return {}
         return {"image": image, "compound": "left"}
-
-    def _site_avatar(self, site: str, base_size: int = 28) -> ImageTk.PhotoImage:
-        """Цветной кружок с первой буквой сайта — раздел 10.12. Цвет и
-        буква зависят только от `site`, поэтому одна и та же запись
-        рисуется одинаково от показа к показу; кэш (`self._avatar_
-        images`, на экземпляр окна — по той же причине, что и
-        `self._icons`, раздел 10.3: `ImageTk.PhotoImage` привязан к
-        конкретному Tcl-интерпретатору) не даёт перерисовывать один и
-        тот же кружок на каждый вызов `_refresh_tree`.
-
-        Рисуется с альфа-каналом (`"RGBA"`, прозрачный фон вне круга) —
-        в отличие от кнопок/панелей (раздел 10.5/10.9), здесь это
-        безопасно: `Treeview` показывает `image=` обычным Tk-блиттингом
-        с честной альфа-композицией поверх фона строки (чередующегося
-        или подсвеченного при выборе), а не через кастомный ttk-стиль,
-        где с прозрачностью были проблемы.
-        """
-        letter = (site[:1] or "?").upper()
-        # Не встроенный `hash()` — для строк Python по умолчанию
-        # рандомизирует его между ЗАПУСКАМИ процесса (защита от
-        # DoS-атак на хеш-таблицы, PYTHONHASHSEED), а цвет аватара
-        # должен быть стабильным от перезапуска к перезапуску, иначе
-        # пользователь не сможет привыкнуть узнавать запись по цвету —
-        # сумма кодов символов детерминирована всегда, и для выбора
-        # цвета из маленькой палитры этого достаточно (это не
-        # криптография, а просто разбрасывание по цветам).
-        color = _AVATAR_PALETTE[sum(map(ord, site)) % len(_AVATAR_PALETTE)]
-        cache_key = (letter, color, base_size)
-        if cache_key not in self._avatar_images:
-            size, factor = _px(base_size), 4
-            big = Image.new("RGBA", (size * factor, size * factor), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(big)
-            draw.ellipse([0, 0, size * factor - 1, size * factor - 1], fill=color)
-            font = _avatar_font(size * factor // 2)
-            bbox = draw.textbbox((0, 0), letter, font=font)
-            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            draw.text(
-                ((size * factor - text_w) / 2 - bbox[0], (size * factor - text_h) / 2 - bbox[1]),
-                letter,
-                fill="#ffffff",
-                font=font,
-            )
-            small = big.resize((size, size), Image.LANCZOS)
-            self._avatar_images[cache_key] = ImageTk.PhotoImage(small)
-        return self._avatar_images[cache_key]
 
     def _advisor_marker(self, color: str) -> ImageTk.PhotoImage:
         """Маленький цветной кружок-маркер категории находки в
@@ -2734,45 +3336,6 @@ class App(ttk.Window):
             darkcolor=[("readonly", _NEUTRAL_FILL), ("disabled", _NEUTRAL_FILL)],
         )
 
-        # Тот же приём (полное удаление элемента-рамки из раскладки, а
-        # не просто обнуление borderwidth) — для списка записей
-        # (`Treeview`), обёрнутого в такую же скруглённую подложку
-        # (раздел 10.10): `Treeview.field` убран, оставлены только
-        # `Treeview.padding`/`Treeview.treearea`.
-        style.layout(
-            "Flat.Treeview",
-            [
-                (
-                    "Treeview.padding",
-                    {"sticky": "nswe", "children": [("Treeview.treearea", {"sticky": "nswe"})]},
-                )
-            ],
-        )
-        # Раздел 10.12 — более просторные строки (аватар 28px + отступы
-        # не поместились бы в прежнюю компактную высоту) и мягкий
-        # акцентный цвет выделения (`_TREE_SELECTED_BG`) вместо
-        # стандартного серого/синего цвета выделения темы, чтобы список
-        # не выглядел как обычная таблица-эксель.
-        style.configure("Flat.Treeview", rowheight=_px(40), font=("", 10), borderwidth=0)
-        style.map(
-            "Flat.Treeview",
-            background=[("selected", _TREE_SELECTED_BG)],
-            foreground=[("selected", _NEUTRAL_TEXT)],
-        )
-        # Заголовки колонок — приглушённый серый текст на белом фоне,
-        # тем же тоном (`_SEARCH_PLACEHOLDER_COLOR`), что и плейсхолдер
-        # строки поиска (раздел 10.8) — тот же язык "второстепенного"
-        # текста по всему приложению, а не ещё один новый оттенок серого.
-        style.configure(
-            "Flat.Treeview.Heading",
-            background="#ffffff",
-            foreground=_SEARCH_PLACEHOLDER_COLOR,
-            font=("", 9, "bold"),
-            relief="flat",
-            borderwidth=0,
-        )
-        style.map("Flat.Treeview.Heading", background=[("active", "#ffffff")])
-
         style.configure("Sidebar.TFrame", background=_SIDEBAR_BG)
         style.configure(
             "Sidebar.TLabel", background=_SIDEBAR_BG, foreground=_SIDEBAR_TEXT_ACTIVE
@@ -3021,458 +3584,31 @@ class App(ttk.Window):
     # Главный экран
     # ------------------------------------------------------------------
 
-    def _build_main_frame(self) -> ttk.Frame:
-        # "Разделённая панель" (см. CLAUDE.md, разделы 10/10.8): единая
-        # "карточка" (тёмный сайдбар + светлая рабочая область) со
-        # скруглёнными ТОЛЬКО внешними углами, с отступом от края окна,
-        # на фоне светло-серой "страницы" — page/card_wrap ниже. Сайдбар
-        # несёт бренд + глобальные инструменты (советник/генератор не
-        # привязаны к конкретной записи), рабочая область — поиск,
-        # список и действия НАД записями. "Заблокировать" — тоже в
-        # сайдбар, это действие уровня приложения, а не списка записей.
-        page = ttk.Frame(self, style="Page.TFrame")
-
-        card_wrap = ttk.Frame(page, style="Page.TFrame")
-        card_wrap.pack(fill="both", expand=True, padx=_px(_CARD_MARGIN), pady=_px(_CARD_MARGIN))
-
-        # Один фрейм на панель, а не "внешний под скругление + внутренний
-        # под цвет", как было раньше (раздел 10.8) — вложенный
-        # полноразмерный внутренний фрейм закрывал бы собой скруглённые
-        # углы подложки квадратными своими собственными (раздел 10.9:
-        # `_rounded_backdrop` кладёт фон ПОД реальные виджеты через
-        # `.place()+.lower()`, а не через стиль фрейма, так что содержимому
-        # достаточно не залезать в сами угловые радиусы — обеспечивается
-        # обычным `padding=`, которое у ttk.Frame и так уже отступает
-        # контент от края независимо от способа заливки фона).
-        sidebar = ttk.Frame(card_wrap, style="Sidebar.TFrame", padding=(_px(16), _px(20)))
-        sidebar.pack(side="left", fill="y")
-        self._rounded_backdrop(
-            sidebar, _SIDEBAR_BG, corners=(True, False, False, True), dynamic=True
-        )
-
-        brand_row = ttk.Frame(sidebar, style="Sidebar.TFrame")
-        brand_row.pack(fill="x", pady=(0, _px(24)))
-        if hasattr(self, "_icon_image_small"):
-            ttk.Label(brand_row, image=self._icon_image_small, style="Sidebar.TLabel").pack(
-                side="left", padx=(0, _px(10))
-            )
-        ttk.Label(
-            brand_row, text=APP_TITLE, style="Sidebar.TLabel", font=("", 13, "bold")
-        ).pack(side="left")
-
-        # "Все записи" — единственный сейчас существующий "экран" внутри
-        # главного окна, поэтому всегда показан как активный пункт
-        # навигации (светлее фона сайдбара, `_SIDEBAR_HOVER_BG`, — тот же
-        # цвет, что уже был заведён под hover, но раньше нигде не
-        # использовался как самостоятельный "выбранный" фон). Клик сбрасывает
-        # фильтр поиска — осмысленное действие даже при одном экране.
-        self._styled(
-            ttk.Button(
-                sidebar,
-                text="Все записи",
-                command=self._on_show_all_entries,
-                **self._icon_kwargs("eye", "white"),
-            ),
-            self._rounded_button_style(
-                "Rounded.SidebarActive",
-                _SIDEBAR_HOVER_BG,
-                _SIDEBAR_TEXT_ACTIVE,
-                anchor="w",
-                surface=_SIDEBAR_BG,
-            ),
-        ).pack(fill="x", pady=_px(2))
-
-        sidebar_nav_style = self._rounded_button_style(
-            "Rounded.SidebarNav", _SIDEBAR_BG, _SIDEBAR_TEXT, anchor="w", surface=_SIDEBAR_BG
-        )
-        for text, command, icon_name in (
-            ("Проблемы", self._on_audit, "warning"),
-            ("Генератор", self._on_generate_standalone, "dice"),
-            ("Помощник", self._on_assistant, "chat"),
-        ):
-            self._styled(
-                ttk.Button(
-                    sidebar, text=text, command=command, **self._icon_kwargs(icon_name, "white")
-                ),
-                sidebar_nav_style,
-            ).pack(fill="x", pady=_px(2))
-
-        self._styled(
-            ttk.Button(
-                sidebar,
-                text="Заблокировать",
-                command=self._on_lock,
-                **self._icon_kwargs("lock", "white"),
-            ),
-            self._rounded_button_style(
-                "Rounded.SidebarLock",
-                _SIDEBAR_LOCK_BG,
-                _SIDEBAR_TEXT_ACTIVE,
-                surface=_SIDEBAR_BG,
-            ),
-        ).pack(side="bottom", fill="x")
-
-        content = ttk.Frame(card_wrap, padding=_px(20))
-        content.pack(side="left", fill="both", expand=True)
-        self._rounded_backdrop(content, "#ffffff", corners=(False, True, True, False), dynamic=True)
-
-        # Панель инструментов — действия НАД записями (раздел 10.8).
-        # "Просмотр"/"Сменить пароль" убраны отсюда (раздел 10.11) — они
-        # дублировали то, что уже доступно двойным кликом по строке и
-        # иконкой-карандашом прямо в ViewEntryDialog (раздел 10.9), и
-        # пользователь попросил убрать эти два дубля с панели.
-        # "Советник"/"Генератор" продублированы здесь же вслед за
-        # референсом, как быстрый доступ, не убирая их из сайдбара (там
-        # они остаются как глобальная навигация).
-        toolbar_row = ttk.Frame(content)
-        toolbar_row.pack(fill="x")
-        # Три кнопки одной ширины (раздел 10.68): колонки сетки в одной группе
-        # `uniform` берут ширину самой широкой («Мастер-пароль»), а не каждая по
-        # своему тексту — иначе она выглядела бы крупнее соседей.
-        for column, (text, command, icon_name) in enumerate(
-            (
-                ("Добавить", self._on_add, "plus"),
-                ("Удалить", self._on_delete_selected, "trash"),
-                ("Мастер-пароль", self._on_change_master, "pencil"),
-            )
-        ):
-            toolbar_row.columnconfigure(column, uniform="toolbar")
-            self._styled(
-                ttk.Button(
-                    toolbar_row, text=text, command=command, **self._icon_kwargs(icon_name, "dark")
-                ),
-                self._neutral_style(),
-            ).grid(row=0, column=column, sticky="ew", padx=(0, _px(6)))
-
-        # Скруглённая "плитка" вокруг поля поиска — тот же приём, что и
-        # у read-only полей в ViewEntryDialog (раздел 10.9): `_rounded_
-        # backdrop` кладёт картинку-подложку ПОД реальным `ttk.Entry`,
-        # а небольшой отступ (`padding`) внутри рамки не даёт собственной
-        # (прямоугольной) рамке `Entry` вылезти за скруглённые углы
-        # подложки.
-        # Под панелью инструментов — два столбца: список записей и справа панель
-        # выбранной записи (раздел 10.78) вместо отдельного окна просмотра.
-        columns_row = ttk.Frame(content)
-        columns_row.pack(fill="both", expand=True)
-        list_column = ttk.Frame(columns_row)
-        list_column.pack(side="left", fill="both", expand=True)
-        self._build_detail_panel(columns_row)
-
-        search_row = ttk.Frame(list_column, padding=(_px(6), _px(4)))
-        search_row.pack(fill="x", pady=(_px(12), _px(8)))
-        self._rounded_backdrop(
-            search_row,
-            _NEUTRAL_FILL,
-            corners=(True, True, True, True),
-            surface="#ffffff",
-            radius=_ROUNDED_RADIUS,
-            border_color=_NEUTRAL_BORDER,
-            border_width=1,
-            dynamic=True,
-        )
-        self._search_var = tk.StringVar(value=_SEARCH_PLACEHOLDER)
-        self._search_var.trace_add("write", lambda *_args: self._refresh_tree())
-        search_entry = ttk.Entry(search_row, textvariable=self._search_var)
-        # Стиль применяется ПОСЛЕ создания, через .configure(), а не
-        # аргументом конструктора — тот же обход перехвата style= в
-        # ttkbootstrap.Entry/Button, что и у App._styled() (раздел 10.5).
-        # `NeutralField.TEntry` (раздел 10.17) красит и заливку, и
-        # невидимую рамку через `fieldbackground`/`bordercolor` — прямая
-        # Tk-опция `background`, которая тут стояла раньше, никакой
-        # реальной роли не играла (раздел 10.17 объясняет, как эта
-        # ошибка провисела незамеченной несколько разделов).
-        search_entry.configure(style="NeutralField.TEntry")
-        search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
-        search_entry.pack(fill="x", ipady=_px(4))
-        self._search_entry = search_entry
-
-        def _on_search_focus_in(_event: object) -> None:
-            if self._search_var.get() == _SEARCH_PLACEHOLDER:
-                self._search_var.set("")
-                search_entry.configure(foreground="")
-
-        def _on_search_focus_out(_event: object) -> None:
-            if not self._search_var.get():
-                self._search_var.set(_SEARCH_PLACEHOLDER)
-                search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
-
-        search_entry.bind("<FocusIn>", _on_search_focus_in)
-        search_entry.bind("<FocusOut>", _on_search_focus_out)
-
-        # Тот же приём скруглённой "плитки", что и у строки поиска выше —
-        # `Treeview` внутри не трогаем (раздел 10.8 сознательно не лез
-        # внутрь его собственных элементов скроллинга/выделения), только
-        # добавляем скруглённую по всем четырём углам подложку СНАРУЖИ, с
-        # небольшим отступом, чтобы прямые углы самого `Treeview` не
-        # вылезали за скруглённые углы подложки.
-        table_wrap = ttk.Frame(list_column, padding=_px(6))
-        table_wrap.pack(fill="both", expand=True)
-        self._rounded_backdrop(
-            table_wrap,
-            "#ffffff",
-            corners=(True, True, True, True),
-            surface="#ffffff",
-            radius=_ROUNDED_RADIUS,
-            border_color=_NEUTRAL_BORDER,
-            border_width=1,
-            dynamic=True,
-        )
-
-        # `show="tree headings"` (не просто `"headings"`, раздел 10.12) —
-        # открывает служебную колонку "#0", обычно скрытую, под цветной
-        # кружок-аватар с первой буквой сайта (`App._site_avatar`) слева
-        # от каждой строки. `values=(site, username)` при этом не
-        # меняются — колонки "Сайт"/"Логин" остаются ровно там же, где
-        # были, поэтому `tests/test_gui.py`
-        # (`app._tree.item(iid, "values")`) не потребовали переделки.
-        columns = ("site", "username")
-        self._tree = ttk.Treeview(
-            table_wrap, columns=columns, show="tree headings", selectmode="browse"
-        )
-        self._tree.configure(style="Flat.Treeview")
-        self._tree.heading("#0", text="")
-        self._tree.column("#0", width=_px(44), stretch=False, anchor="center")
-        self._tree.heading("site", text="Сайт")
-        self._tree.heading("username", text="Логин")
-        self._tree.column("site", width=_px(150))
-        self._tree.column("username", width=_px(150))
-        self._tree.tag_configure("evenrow", background=_TREE_ROW_COLORS["evenrow"])
-        self._tree.tag_configure("oddrow", background=_TREE_ROW_COLORS["oddrow"])
-        self._tree.pack(fill="both", expand=True)
-        # Выбор строки открывает запись в панели справа (раздел 10.78).
-        self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
-
-        return page
+    def _build_main_frame(self) -> tk.Frame:
+        """Главный экран строго по референсу (раздел 10.79) — `MainView`."""
+        self._view = MainView(self, self)
+        return self._view
 
     def _show_main(self) -> None:
         self._unlock_frame.pack_forget()
         self._main_frame.pack(fill="both", expand=True)
-        self._set_chrome_theme("light")
+        self._set_chrome_theme("main")
         self._apply_screen_size("main")
-        self._refresh_tree()
+        try:
+            saved = datetime.fromtimestamp(self.vault_path.stat().st_mtime)
+        except (AttributeError, OSError):
+            saved = datetime.now()
+        self._view.set_saved_at(saved)
+        self._view.refresh()
         if os.environ.get("MENEDGER_DEBUG"):
             self.after(500, lambda: self._debug_report_images("главный экран"))
 
-    def _on_show_all_entries(self) -> None:
-        """Пункт навигации "Все записи" в сайдбаре (раздел 10.8) —
-        сейчас единственный экран внутри главного окна, поэтому всегда
-        показан как активный; клик сбрасывает фильтр поиска обратно к
-        плейсхолдеру, что и значит "показать вообще все записи"."""
-        self._search_var.set(_SEARCH_PLACEHOLDER)
-        self._search_entry.configure(foreground=_SEARCH_PLACEHOLDER_COLOR)
-        self.focus_set()
-        self._refresh_tree()
-
     def _refresh_tree(self) -> None:
-        # Какую запись показывать после перестройки списка: только что
-        # добавленную, иначе ту, что была открыта в панели (раздел 10.78).
-        target = self._select_after_refresh or self._detail_entry
-        self._select_after_refresh = None
-        self._tree.delete(*self._tree.get_children())
-        if self.data is None:
-            self._detail_entry = None
-            self._render_detail()
-            return
-
-        raw_query = self._search_var.get()
-        # Плейсхолдер живёт в том же StringVar, что и реальный ввод (см.
-        # _build_main_frame) — сравнение по значению, а не по отдельному
-        # флагу, устойчиво и к программной установке `_search_var.set(...)`
-        # в обход событий фокуса (как делают tests/test_gui.py).
-        query = "" if raw_query == _SEARCH_PLACEHOLDER else raw_query.strip().lower()
-        visible_position = 0
-        same_iid: str | None = None  # та же запись (тот же объект)
-        similar_iid: str | None = None  # запись с тем же сайтом/логином/датой (данные пересобраны слиянием)
-        for index, entry in enumerate(self.data.get("entries", [])):
-            haystack = f"{entry['site']} {entry['username']}".lower()
-            if query and query not in haystack:
-                continue
-            # iid = индекс записи в data["entries"] на момент построения
-            # списка (до применения фильтра) — по нему потом быстро
-            # находим исходную запись, не полагаясь на то, что site
-            # уникален (см. _selected_entry). Чередование цвета строки
-            # (evenrow/oddrow) считается отдельно, по позиции СРЕДИ
-            # ВИДИМЫХ строк — иначе после фильтрации полоски выглядели
-            # бы вразнобой, унаследовав чётность/нечётность от индекса
-            # в полном списке.
-            tag = "evenrow" if visible_position % 2 == 0 else "oddrow"
-            self._tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                image=self._site_avatar(entry["site"]),
-                values=(entry["site"], entry["username"]),
-                tags=(tag,),
-            )
-            if target is not None:
-                if entry is target:
-                    same_iid = str(index)
-                elif similar_iid is None and _entry_key(entry) == _entry_key(target):
-                    similar_iid = str(index)
-            visible_position += 1
-
-        chosen = same_iid or similar_iid
-        if chosen is not None:
-            self._tree.selection_set(chosen)
-            self._tree.see(chosen)
-            self._detail_entry = self.data["entries"][int(chosen)]
-        else:
-            self._detail_entry = None  # запись исчезла (удалена или скрыта поиском)
-        self._render_detail()
-
-    def _on_tree_select(self, _event: object = None) -> None:
-        """Выбор строки списка: показать запись в панели справа."""
-        entry = self._selected_entry()
-        if entry is not self._detail_entry:
-            self._detail_password_visible = False  # новая запись — пароль снова скрыт
-        self._detail_entry = entry
-        self._render_detail()
-
-    def _build_detail_panel(self, parent: ttk.Frame) -> None:
-        """Панель выбранной записи справа от списка (раздел 10.78): аватар и
-        сайт, логин, пароль (скрыт точками), дата, кнопки копирования, показа
-        пароля, смены пароля и удаления. Строится один раз, дальше
-        `_render_detail` только меняет тексты и переключает «пусто»/«запись»."""
-        panel = ttk.Frame(parent, padding=_px(16), width=_px(_DETAIL_WIDTH))
-        panel.pack_propagate(False)
-        panel.pack(side="left", fill="y", padx=(_px(16), 0), pady=(_px(12), 0))
-        self._rounded_backdrop(
-            panel,
-            "#ffffff",
-            corners=(True, True, True, True),
-            surface="#ffffff",
-            radius=_ROUNDED_RADIUS,
-            border_color=_NEUTRAL_BORDER,
-            border_width=1,
-            dynamic=True,
-        )
-        text_width = _px(_DETAIL_WIDTH - 32 - 24)  # ширина текста внутри плитки
-        self._detail_empty = ttk.Label(
-            panel,
-            text="Выберите запись в списке,\nчтобы увидеть логин и пароль",
-            justify="center",
-            foreground=_SEARCH_PLACEHOLDER_COLOR,
-        )
-        self._detail_empty.pack(expand=True)
-
-        body = ttk.Frame(panel)
-        self._detail_body = body
-        icon_style = self._rounded_button_style(
-            "Rounded.IconToggleSquare",
-            _NEUTRAL_FILL,
-            _NEUTRAL_TEXT,
-            border_color=_NEUTRAL_BORDER,
-            padding=(0, 0),
-            element_padding=0,
-        )
-
-        def icon_button(row: ttk.Frame, icon_name: str, command: Callable[[], None]) -> ttk.Button:
-            side = _px(_DETAIL_BUTTON_SIZE)
-            cell = ttk.Frame(row, width=side, height=side)
-            cell.pack_propagate(False)
-            cell.pack(side="right", padx=(_px(4), 0))
-            # compound="image": кнопка без текста (раздел 10.44).
-            button = ttk.Button(
-                cell, command=command, **{**self._icon_kwargs(icon_name, "dark", center=True), "compound": "image"}
-            )
-            self._styled(button, icon_style).pack(fill="both", expand=True)
-            return button
-
-        header = ttk.Frame(body)
-        header.pack(fill="x")
-        self._detail_avatar = tk.Label(header, bd=0, highlightthickness=0, background="#ffffff")
-        self._detail_avatar.pack(side="left", padx=(0, _px(10)))
-        self._detail_delete = icon_button(header, "trash", self._on_detail_delete)
-        self._detail_site = ttk.Label(
-            header, font=("", 13, "bold"), foreground=_SIDEBAR_BG, wraplength=_px(_DETAIL_WIDTH - 32 - 40 - 40 - 14)
-        )
-        self._detail_site.pack(side="left", fill="x", expand=True)
-
-        def field(caption: str) -> tuple[ttk.Frame, ttk.Label]:
-            caption_row = ttk.Frame(body, height=_px(_DETAIL_BUTTON_SIZE))
-            caption_row.pack(fill="x", pady=(_px(14), _px(4)))
-            ttk.Label(caption_row, text=caption.upper(), font=("", 8, "bold"), bootstyle="secondary").pack(
-                side="left"
-            )
-            tile = ttk.Frame(body, padding=(_px(10), _px(7)))
-            tile.pack(fill="x")
-            self._rounded_backdrop(
-                tile,
-                _NEUTRAL_FILL,
-                corners=(True, True, True, True),
-                surface="#ffffff",
-                radius=_ROUNDED_RADIUS,
-                border_color=_NEUTRAL_BORDER,
-                border_width=1,
-                dynamic=True,
-            )
-            # Длинное значение (почта, пароль) переносится, а не обрезается.
-            label = ttk.Label(
-                tile, background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT, wraplength=text_width, justify="left"
-            )
-            label.pack(anchor="w")
-            return caption_row, label
-
-        login_caption, self._detail_login = field("Логин")
-        icon_button(login_caption, "copy", self._on_detail_copy_login)
-        password_caption, self._detail_password = field("Пароль")
-        icon_button(password_caption, "copy", self._on_detail_copy_password)
-        icon_button(password_caption, "pencil", self._on_detail_change_password)
-        self._detail_eye = icon_button(password_caption, "eye", self._on_detail_toggle_password)
-        _, self._detail_date = field("Создан / изменён")
-
-    def _render_detail(self) -> None:
-        """Показать в панели справа `self._detail_entry` (или подсказку, если записи нет)."""
-        entry = self._detail_entry
-        if entry is None or self.data is None:
-            self._detail_password_visible = False
-            self._detail_body.pack_forget()
-            self._detail_empty.pack(expand=True)
-            return
-        self._detail_empty.pack_forget()
-        self._detail_body.pack(fill="both", expand=True)
-        self._detail_avatar.configure(image=self._site_avatar(entry["site"], 40))
-        self._detail_site.configure(text=entry["site"])
-        self._detail_login.configure(text=entry["username"] or "—")
-        password = entry["password"]
-        self._detail_password.configure(text=password if self._detail_password_visible else "•" * len(password))
-        try:
-            created = datetime.strptime(entry["created_at"], CREATED_AT_FORMAT).strftime("%d.%m.%Y")
-        except (KeyError, ValueError):
-            created = entry.get("created_at", "—")
-        self._detail_date.configure(text=created)
-
-    def _on_detail_toggle_password(self) -> None:
-        self._detail_password_visible = not self._detail_password_visible
-        self._render_detail()
-
-    def _on_detail_copy_login(self) -> None:
-        if self._detail_entry is not None:
-            self._copy_to_clipboard(self._detail_entry["username"])
-
-    def _on_detail_copy_password(self) -> None:
-        if self._detail_entry is not None:
-            self._copy_to_clipboard(self._detail_entry["password"])
-
-    def _on_detail_change_password(self) -> None:
-        if self._detail_entry is not None:
-            self._on_update_entry(self._detail_entry)
-
-    def _on_detail_delete(self) -> None:
-        if self._detail_entry is not None:
-            self._delete_entry(self._detail_entry)
+        """Перерисовать главный экран (имя осталось от списка-таблицы до 10.79)."""
+        self._view.refresh()
 
     def _selected_entry(self) -> dict | None:
-        selection = self._tree.selection()
-        if not selection:
-            return None
-        index = int(selection[0])
-        entries = self.data.get("entries", [])
-        if index >= len(entries):
-            # Данные успели измениться (например, запись только что
-            # удалена) — не даём это превратиться в IndexError.
-            return None
-        return entries[index]
+        return self._view.selected
 
     def _save_vault(self) -> bool:
         """Сохранить self.data, не затерев изменения других процессов
@@ -3498,6 +3634,7 @@ class App(ttk.Window):
             messagebox.showerror("Ошибка", f"Не удалось сохранить хранилище: {exc}", parent=self)
             return False
         self.data, self._snapshot = merged, snapshot
+        self._view.set_saved_at(datetime.now())
         if external:
             self._refresh_tree()
             messagebox.showinfo(
@@ -3517,44 +3654,32 @@ class App(ttk.Window):
         self.wait_window(dialog)
         if dialog.result is None:
             return
-
-        site, username, password = dialog.result
-        new_entry = {
-            "site": site,
-            "username": username,
-            "password": password,
-            "created_at": now_iso(),
-        }
-        self.data.setdefault("entries", []).append(new_entry)
-        # Новая запись сразу открывается в панели справа (раздел 10.78); если
-        # она скрыта поиском, панель просто очистится.
-        self._select_after_refresh = new_entry
+        fields = dialog.result
+        entry = new_entry(
+            fields["site"],
+            fields["username"],
+            fields["password"],
+            url=fields["url"],
+            note=fields["note"],
+            tags=normalize_tags(fields["tags"]),
+        )
+        self.data.setdefault("entries", []).append(entry)
+        # Новая запись сразу открывается справа (если её не скрывает фильтр).
+        self._view.selected = entry
         if self._save_vault():
-            self._refresh_tree()
+            self._view.refresh()
 
-    def _on_update_entry(self, entry: dict) -> None:
-        """Сменить пароль записи. created_at обновляется на текущий
-        момент — это поле означает "когда пароль последний раз
-        установлен", важно для эвристики устаревших паролей
-        (assistant.advisor, см. CLAUDE.md, раздел "Детали CLI")."""
-        # Диалог в стиле остального приложения (раздел 10.51), а не системное
-        # `simpledialog.askstring`.
-        dialog = NewPasswordDialog(self, entry)
+    def _edit_entry(self, entry: dict) -> None:
+        """Карандаш в панели записи (раздел 10.79): тот же диалог, что и для новой
+        записи, с заполненными полями. Смена пароля, заметки и сайта/логина
+        попадает в историю записи (`vault.records.apply_edit`)."""
+        dialog = EntryDialog(self, title="Изменить запись", entry=entry)
         self.wait_window(dialog)
-        new_password = dialog.result
-        if not new_password:
+        if dialog.result is None:
             return
-        entry["password"] = new_password
-        entry["created_at"] = now_iso()
+        apply_edit(entry, **dialog.result)
         self._save_vault()
-        self._refresh_tree()  # панель справа покажет новую дату
-
-    def _on_delete_selected(self) -> None:
-        entry = self._selected_entry()
-        if entry is None:
-            messagebox.showinfo("Нет выбора", "Сначала выберите запись в списке.", parent=self)
-            return
-        self._delete_entry(entry)
+        self._view.refresh()
 
     def _delete_entry(self, entry: dict) -> None:
         confirmed = messagebox.askyesno(
@@ -3762,8 +3887,7 @@ class App(ttk.Window):
         self._snapshot = None
         self.vault_path = None
         self._assistant_history = []
-        self._detail_entry = None
-        self._render_detail()  # панель записи не должна хранить пароль на экране после блокировки
+        self._view.clear()  # на экране не должно остаться ни записей, ни пароля
         self._main_frame.pack_forget()
         self._unlock_frame.pack(fill="both", expand=True)
         self._set_chrome_theme("dark")
@@ -3774,32 +3898,38 @@ class App(ttk.Window):
 
 
 class EntryDialog(ttk.Toplevel):
-    """Модальный диалог добавления новой записи."""
+    """Модальный диалог новой записи и правки существующей (карандаш в панели
+    записи, раздел 10.79). `result` — словарь полей для `vault.records`
+    (`site`, `username`, `password`, `url`, `note`, `tags`) или None при отмене."""
 
-    def __init__(self, parent: App, title: str) -> None:
+    def __init__(self, parent: App, title: str, entry: dict | None = None) -> None:
         super().__init__(title=title, master=parent, resizable=(False, False), iconphoto=None)
         parent._dialog_chrome(self, title)
         self.transient(parent)
-        self.result: tuple[str, str, str] | None = None
+        self.result: dict | None = None
 
         form = ttk.Frame(self, padding=_px(16))
         form.pack(fill="both", expand=True)
 
-        self._site_var = tk.StringVar()
-        self._username_var = tk.StringVar()
-        self._password_var = tk.StringVar()
+        entry = entry or {}
+        self._site_var = tk.StringVar(value=entry.get("site", ""))
+        self._username_var = tk.StringVar(value=entry.get("username", ""))
+        self._password_var = tk.StringVar(value=entry.get("password", ""))
+        self._url_var = tk.StringVar(value=entry.get("url", ""))
+        self._tags_var = tk.StringVar(value=", ".join(entry.get("tags", []) or []))
 
         fields = (
             ("Сайт:", self._site_var, ""),
+            ("Адрес:", self._url_var, ""),
             ("Логин:", self._username_var, ""),
             ("Пароль:", self._password_var, "*"),
         )
         for row, (label, var, show) in enumerate(fields):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=_px(4))
-            box, entry = parent._rounded_field(form, var, show=show, width=28)
+            box, field = parent._rounded_field(form, var, show=show, width=28)
             box.grid(row=row, column=1, sticky="ew", pady=_px(4), padx=(_px(8), 0))
             if row == 0:
-                entry.focus_set()
+                field.focus_set()
         form.columnconfigure(1, weight=1)
 
         parent._styled(
@@ -3821,10 +3951,40 @@ class EntryDialog(ttk.Toplevel):
         self._strength_var = tk.StringVar()
         ttk.Label(
             form, textvariable=self._strength_var, wraplength=_px(320), bootstyle="secondary"
-        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(_px(6), 0))
+        ).grid(row=len(fields) + 1, column=0, columnspan=2, sticky="w", pady=(_px(6), _px(6)))
+
+        row = len(fields) + 2
+        ttk.Label(form, text="Теги:").grid(row=row, column=0, sticky="w", pady=_px(4))
+        tags_box, _tags_entry = parent._rounded_field(form, self._tags_var, width=28)
+        tags_box.grid(row=row, column=1, sticky="ew", pady=_px(4), padx=(_px(8), 0))
+        ttk.Label(form, text="через запятую", bootstyle="secondary").grid(
+            row=row + 1, column=1, sticky="w", padx=(_px(8), 0)
+        )
+
+        ttk.Label(form, text="Заметка:").grid(row=row + 2, column=0, sticky="nw", pady=_px(6))
+        note_box = ttk.Frame(form, padding=(_px(12), _px(8)))
+        parent._rounded_backdrop(
+            note_box,
+            _NEUTRAL_FILL,
+            corners=(True, True, True, True),
+            surface="#ffffff",
+            radius=_ROUNDED_RADIUS,
+            border_color=_NEUTRAL_BORDER,
+            border_width=1,
+            dynamic=True,
+        )
+        self._note_text = tk.Text(
+            note_box, width=28, height=3, wrap="word", bd=0, highlightthickness=0, relief="flat",
+            background=_NEUTRAL_FILL, foreground=_NEUTRAL_TEXT, font=("", 10), undo=True,
+        )
+        self._note_text.pack(fill="both", expand=True)
+        self._note_text.insert("1.0", entry.get("note", ""))
+        note_box.grid(row=row + 2, column=1, sticky="ew", pady=_px(6), padx=(_px(8), 0))
+
         self._password_var.trace_add("write", self._update_strength)
         self._site_var.trace_add("write", self._update_strength)
         self._username_var.trace_add("write", self._update_strength)
+        self._update_strength()
 
         buttons = ttk.Frame(self, padding=(_px(16), 0, _px(16), _px(16)))
         buttons.pack(fill="x")
@@ -3864,7 +4024,14 @@ class EntryDialog(ttk.Toplevel):
             messagebox.showerror("Ошибка", "Пароль не может быть пустым.", parent=self)
             return
 
-        self.result = (site, username, password)
+        self.result = {
+            "site": site,
+            "username": username,
+            "password": password,
+            "url": self._url_var.get().strip(),
+            "note": self._note_text.get("1.0", "end").strip(),
+            "tags": normalize_tags(self._tags_var.get()),
+        }
         self.destroy()
 
 
@@ -4179,113 +4346,6 @@ class CreateVaultDialog(ttk.Toplevel):
         self.result = password
         if self._change:
             self.current_password = self._current_var.get()
-        self.destroy()
-
-
-class NewPasswordDialog(ttk.Toplevel):
-    """Ввод нового пароля для записи (раздел 10.51) — замена системному
-    `simpledialog.askstring` («Новый пароль» с полями OK/Cancel): то же
-    оформление, что у остальных диалогов — своя строка заголовка и
-    скруглённые углы, скруглённое поле с кнопкой-"глазом", живая оценка
-    надёжности (`App._build_strength_meter`, как у `EntryDialog` и
-    `CreateVaultDialog`). Результат — `self.result` (None при отмене)."""
-
-    def __init__(self, parent: App, entry: dict) -> None:
-        super().__init__(title="Новый пароль", master=parent, resizable=(False, False), iconphoto=None)
-        parent._dialog_chrome(self, "Новый пароль")
-        self.transient(parent)
-        self.result: str | None = None
-
-        content = ttk.Frame(self, padding=_px(24))
-        content.pack(fill="both", expand=True)
-        # Ширина диалога задаётся распоркой (фон белый — у Tk минимальная
-        # высота фрейма 1 px, и с фоном по умолчанию была бы серая линия).
-        tk.Frame(
-            content, width=_px(_NEW_PASSWORD_CONTENT_WIDTH), height=0, bd=0, highlightthickness=0, background="#ffffff"
-        ).pack()
-
-        header = ttk.Frame(content)
-        header.pack(fill="x")
-        if hasattr(parent, "_icon_image_medium"):
-            ttk.Label(header, image=parent._icon_image_medium).pack(side="left", padx=(0, _px(12)))
-        title_stack = ttk.Frame(header)
-        title_stack.pack(side="left", fill="both", expand=True)
-        ttk.Label(title_stack, text="Новый пароль", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(anchor="w")
-        ttk.Label(
-            title_stack,
-            text=f"для «{entry['site']}»",
-            foreground=_SEARCH_PLACEHOLDER_COLOR,
-            font=("", 9),
-            wraplength=_px(_NEW_PASSWORD_CONTENT_WIDTH - 90),
-            justify="left",
-        ).pack(anchor="w")
-
-        ttk.Label(content, text="НОВЫЙ ПАРОЛЬ", font=("", 8, "bold"), bootstyle="secondary").pack(
-            fill="x", anchor="w", pady=(_px(18), _px(2))
-        )
-        self._password_var = tk.StringVar()
-        row = ttk.Frame(content)
-        row.pack(fill="x")
-        box, password_entry = parent._rounded_field(row, self._password_var, show="*", height=_MASTER_FIELD_HEIGHT)
-        box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
-        password_entry.bind("<Return>", lambda _event: self._on_submit())
-        self._password_entry = password_entry
-        self._password_visible = False
-        eye_cell = ttk.Frame(row, width=_px(_MASTER_FIELD_HEIGHT), height=_px(_MASTER_FIELD_HEIGHT))
-        eye_cell.pack_propagate(False)
-        eye_cell.pack(side="left")
-        parent._styled(
-            ttk.Button(
-                eye_cell,
-                command=self._on_toggle_visibility,
-                **{**parent._icon_kwargs("eye", "dark", center=True), "compound": "image"},
-            ),
-            parent._rounded_button_style(
-                "Rounded.IconToggleSquare",
-                _NEUTRAL_FILL,
-                _NEUTRAL_TEXT,
-                border_color=_NEUTRAL_BORDER,
-                padding=(0, 0),
-                element_padding=0,
-            ),
-        ).pack(fill="both", expand=True)
-
-        strength_section = ttk.Frame(content)
-        strength_section.pack(fill="x", pady=(_px(12), 0))
-        self._update_strength = parent._build_strength_meter(strength_section)
-        self._password_var.trace_add("write", lambda *_args: self._update_strength(self._password_var.get()))
-
-        self._status_label = ttk.Label(
-            content, text="", bootstyle="danger", wraplength=_px(_NEW_PASSWORD_CONTENT_WIDTH), justify="left"
-        )
-        self._status_label.pack(fill="x", pady=(_px(10), 0))
-
-        buttons = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
-        buttons.pack(fill="x")
-        parent._action_buttons(
-            buttons,
-            primary_text="Сохранить",
-            primary_command=self._on_submit,
-            primary_icon="save",
-            cancel_command=self.destroy,
-        )
-
-        password_entry.focus_set()
-        self.update_idletasks()
-        parent._round_dialog_corners(self)
-        self.place_window_center()
-        self.grab_set()
-
-    def _on_toggle_visibility(self) -> None:
-        self._password_visible = not self._password_visible
-        self._password_entry.configure(show="" if self._password_visible else "*")
-
-    def _on_submit(self) -> None:
-        password = self._password_var.get()
-        if not password:
-            self._status_label.configure(text="Введите новый пароль.")
-            return
-        self.result = password
         self.destroy()
 
 

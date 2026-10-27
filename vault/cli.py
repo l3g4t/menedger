@@ -31,7 +31,8 @@ import getpass
 import sys
 from pathlib import Path
 
-from vault.common import DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
+from vault.common import DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH
+from vault.records import new_entry, record_password_change
 from vault.crypto import (
     InvalidMasterPasswordError,
     VaultFormatError,
@@ -227,14 +228,7 @@ def cmd_add(args: argparse.Namespace) -> None:
         print("Пароль не может быть пустым.", file=sys.stderr)
         raise SystemExit(1)
 
-    data.setdefault("entries", []).append(
-        {
-            "site": args.site,
-            "username": username,
-            "password": password,
-            "created_at": now_iso(),
-        }
-    )
+    data.setdefault("entries", []).append(new_entry(args.site, username, password))
 
     # Полное перешифрование всего хранилища с новыми salt/nonce — см.
     # CLAUDE.md, раздел 3 ("Почему nonce обязан быть уникальным").
@@ -327,8 +321,7 @@ def cmd_update(args: argparse.Namespace) -> None:
         print("Пароль не может быть пустым.", file=sys.stderr)
         raise SystemExit(1)
 
-    entry["password"] = new_password
-    entry["created_at"] = now_iso()
+    record_password_change(entry, new_password)  # created_at и строка истории (раздел 10.79)
 
     _save(path, master_password, data, base)
     print(f"Пароль для «{entry['site']}» ({entry['username']}) обновлён.")
