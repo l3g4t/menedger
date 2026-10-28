@@ -1343,9 +1343,8 @@ class MainView(tk.Frame):
 
         c.create_image(_px(12), _px(61), image=self._rr(201, 37, _MV_BG, _MV_FIELD_BORDER, 10), anchor="nw", tags="dyn")
         if self._search_window is None:
-            self._search_window = c.create_window(_px(23), _px(79), window=self._search_entry, anchor="w", width=_px(110))
+            self._search_window = c.create_window(_px(23), _px(79), window=self._search_entry, anchor="w", width=_px(178))
         c.tag_raise(self._search_window)
-        self._text(c, 202, 79, "Ctrl K", px=11, fill=_MV_TEXT_DIM, anchor="e", mono=True)
 
         favorites = sum(1 for e in entries if e.get("favorite"))
         nav = (
@@ -1560,9 +1559,6 @@ class MainView(tk.Frame):
             (52, "создайте новую.", 12, "#8b9dae", False),
         ):
             self._text(c, cx / max(_UI_SCALE, 0.01), mid + dy, text, px=px, fill=color, bold=bold, anchor="center")
-        c.create_image(cx - _px(46), _px(mid + 88), image=self._rr(55, 19, None, "#233d54", 6), anchor="center", tags="dyn")
-        self._text(c, cx / max(_UI_SCALE, 0.01) - 46, mid + 88, "Ctrl N", px=11, fill="#a4b5c8", anchor="center", mono=True)
-        self._text(c, cx / max(_UI_SCALE, 0.01) - 14, mid + 88, "новая запись", px=11, fill="#6a7b8e")
 
     # --- форма изменения записи (CLAUDE.md, раздел 10.80) ---------------------------------------
 

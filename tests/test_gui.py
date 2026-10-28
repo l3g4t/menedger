@@ -2019,7 +2019,8 @@ def test_main_view_empty_state_then_entry_details(app, monkeypatch):
     entry = _rec("github.com", "dev@example.com", url="github.com", note="Токен для CI", tags=["работа"])
     view = _open_main(app, monkeypatch, entry)
     assert "Запись не выбрана" in _canvas_texts(view.detail)
-    assert "Ctrl N" in _canvas_texts(view.detail)
+    assert "Ctrl N" not in _canvas_texts(view.detail)
+    assert "Ctrl K" not in _canvas_texts(view.sidebar)
 
     view.select(entry)
     texts = _canvas_texts(view.detail)
