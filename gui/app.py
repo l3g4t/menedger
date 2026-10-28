@@ -49,7 +49,15 @@ from assistant.llm import Assistant
 from assistant.offline import plural as ru_plural
 from assistant.prompt import context_from_report, redact_secrets
 from assistant.wordlist import preload as preload_wordlist
-from vault.common import CREATED_AT_FORMAT, DEFAULT_VAULT_PATH, MIN_MASTER_PASSWORD_LENGTH, now_iso
+from vault.common import (
+    CREATED_AT_FORMAT,
+    DEFAULT_VAULT_PATH,
+    MIN_MASTER_PASSWORD_LENGTH,
+    last_unlock_time,
+    last_vault_path,
+    now_iso,
+    remember_unlock,
+)
 from vault.crypto import (
     InvalidMasterPasswordError,
     VaultFormatError,
@@ -58,7 +66,15 @@ from vault.crypto import (
     encrypt_vault,
 )
 from vault.concurrency import ConcurrentChangeError, Snapshot, VaultBusyError, VaultLock, save_merged
-from vault.records import activity_group, apply_edit, history_lines, last_activity, new_entry, normalize_tags
+from vault.records import (
+    activity_group,
+    apply_edit,
+    format_last_login,
+    history_lines,
+    last_activity,
+    new_entry,
+    normalize_tags,
+)
 from vault.storage import load_vault_file, save_vault_file
 
 # Тема ttkbootstrap — "bootstrap-light": светлая, плоская, с синим
@@ -168,14 +184,9 @@ _MASTER_FIELD_HEIGHT = 38  # px
 
 _GENERATOR_FIELD_HEIGHT = 42  # px, поле пароля генератора и кнопка копирования
 _VIEW_WINDOW_RADIUS = 14  # px скругления углов самого окна диалога (разделы 10.45–10.46)
-# Экран разблокировки (раздел 10.46): высота полей ввода и ВСЕХ кнопок на
-# нём одна — иначе кнопка рядом с полем выше/ниже него.
+# Высота кнопок «Сохранить»/«Отмена» в диалогах (раздел 10.52): у обеих одна —
+# иначе кнопка с иконкой выше кнопки без неё.
 _UNLOCK_CONTROL_HEIGHT = 42  # px
-# Отступы тёмного фона вокруг карточки на экране разблокировки (раздел 10.48):
-# окно на этом экране ужимается вокруг карточки, а не остаётся размером с
-# главный экран.
-_UNLOCK_MARGIN_X = 40  # px
-_UNLOCK_MARGIN_Y = 24  # px
 _MAIN_WINDOW_SIZE = (1120, 700)  # px, размер референса (раздел 10.79)
 _MAIN_MIN_SIZE = (960, 520)  # px
 # Ключевой цвет "прозрачности" (Windows, `-transparentcolor`): пиксели ровно
@@ -658,6 +669,8 @@ def _use_native_frame(env: "os._Environ[str] | dict", argv: list[str]) -> bool:
 # того, что под ней, поэтому она не читается как отдельная полоса.
 _CHROME_THEMES = {
     "dark": {"bg": _SIDEBAR_BG, "fg": _SIDEBAR_TEXT_ACTIVE, "hover": _SIDEBAR_HOVER_BG, "title": "#8fa0bd"},
+    # Над экраном блокировки (раздел 10.81): в цвет его фона из референса.
+    "unlock": {"bg": "#12263a", "fg": "#e8eef4", "hover": "#1d3a57", "title": "#8fa0bd"},
     "light": {"bg": _PAGE_BG, "fg": _NEUTRAL_TEXT, "hover": _NEUTRAL_BORDER, "title": "#7a869c"},
     # Над главным экраном (раздел 10.79): тёмный, в цвет боковой панели референса.
     "main": {"bg": "#0a1724", "fg": "#e8eef4", "hover": "#17314d", "title": "#5f758b"},
@@ -670,7 +683,7 @@ _CHROME_BUTTON_WIDTH = 42
 
 def _theme_window_bg(theme: str) -> str:
     """Цвет фона окна под строкой заголовка для темы рамки."""
-    return {"dark": _SIDEBAR_BG, "main": "#0e1e30"}.get(theme, _PAGE_BG)
+    return {"dark": _SIDEBAR_BG, "unlock": "#12263a", "main": "#0e1e30"}.get(theme, _PAGE_BG)
 
 
 def _chrome_glyph(kind: str, fg: str, bg: str, hover_bg: str | None) -> Image.Image:
@@ -967,7 +980,68 @@ class _Hits:
         self.canvas.configure(cursor="hand2" if self._find(event) else "")
 
 
-class MainView(tk.Frame):
+class _DrawKit:
+    """Общее для экранов, которые рисуются на холсте картинками (главный экран и экран
+    блокировки): скруглённые прямоугольники, гора из иконки, шрифт точек пароля. Нужны
+    `self._images` (кэш картинок) и `self.app`."""
+
+    def _rr(self, w: float, h: float, fill: str | None, border: str | None = None, radius: float = 8):
+        """Скруглённый прямоугольник w×h (px референса); прозрачные углы, 4× сглаживание."""
+        W, H, R = max(1, _px(w)), max(1, _px(h)), _px(radius)
+        key = ("rr", W, H, fill, border, R)
+        if key not in self._images:
+            factor = 4
+            big = Image.new("RGBA", (W * factor, H * factor), (0, 0, 0, 0))
+            ImageDraw.Draw(big).rounded_rectangle(
+                [0, 0, W * factor - 1, H * factor - 1],
+                radius=min(R, min(W, H) // 2) * factor,
+                fill=fill,
+                outline=border,
+                width=max(1, _px(1)) * factor if border else 0,
+            )
+            self._images[key] = self.app._tk_image(big.resize((W, H), Image.LANCZOS))
+        return self._images[key]
+
+    def _mountain(self, width: float, color: str):
+        """Гора со скважиной из иконки приложения (без тёмного квадрата вокруг)."""
+        W = _px(width)
+        key = ("mountain", W, color)
+        if key not in self._images:
+            try:
+                icon = Image.open(ICON_PATH).convert("RGBA")
+            except OSError:
+                return None
+            mask = ImageChops.multiply(icon.convert("L").point(lambda v: max(0, min(255, int((v - 110) * 255 / 90)))), icon.getchannel("A"))
+            box = mask.point(lambda v: 255 if v > 128 else 0).getbbox()
+            if box is None:
+                return None
+            mask = mask.crop(box)
+            height = max(1, round(mask.height * W / mask.width))
+            mask = mask.resize((W, height), Image.LANCZOS)
+            self._images[key] = self.app._tk_image(Image.merge("RGBA", (*Image.new("RGB", mask.size, color).split(), mask)))
+        return self._images[key]
+
+    def _dot_font(self, pitch: float = 10.4):
+        """Моноширинный шрифт для поля пароля: размер подбирается так, чтобы шаг между
+        точками был как в макете (10,4 px у формы записи, 9,5 px у экрана блокировки)."""
+        cache = self.__dict__.setdefault("_dot_fonts", {})
+        key = (pitch, _UI_SCALE)
+        if key not in cache:
+            import tkinter.font as tkfont
+
+            available = set(tkfont.families())
+            family = next((f for f in ("Consolas", "DejaVu Sans Mono", "Courier New") if f in available), "TkFixedFont")
+            best, best_gap = 13, 1e9
+            for size in range(10, 25):
+                width = tkfont.Font(family=family, size=-_px(size)).measure(_MV_DOT)
+                gap = abs(width - _px(pitch))
+                if gap < best_gap:
+                    best, best_gap = size, gap
+            cache[key] = (family, -_px(best), "normal")
+        return cache[key]
+
+
+class MainView(_DrawKit, tk.Frame):
     """Главный экран строго по референсу: боковая панель (название хранилища, поиск,
     «Все записи / Избранное / Недавние», теги, статус), столбец списка (кнопки
     «Помощник» и «Генератор», заголовок, «Новая запись», записи по группам дат) и
@@ -1003,7 +1077,6 @@ class MainView(tk.Frame):
         self._focus: str | None = None
         self._tag_input_open = False
         self._tag_choice = 0
-        self._dot_font_cache = None
 
         line = max(1, _px(1))
         self.sidebar = tk.Canvas(self, width=_px(224), bg=_MV_SIDEBAR_BG, bd=0, highlightthickness=0)
@@ -1067,23 +1140,6 @@ class MainView(tk.Frame):
         data = self.app.data
         return data.get("entries", []) if data else []
 
-    def _rr(self, w: float, h: float, fill: str | None, border: str | None = None, radius: float = 8):
-        """Скруглённый прямоугольник w×h (px референса); прозрачные углы, 4× сглаживание."""
-        W, H, R = max(1, _px(w)), max(1, _px(h)), _px(radius)
-        key = ("rr", W, H, fill, border, R)
-        if key not in self._images:
-            factor = 4
-            big = Image.new("RGBA", (W * factor, H * factor), (0, 0, 0, 0))
-            ImageDraw.Draw(big).rounded_rectangle(
-                [0, 0, W * factor - 1, H * factor - 1],
-                radius=min(R, min(W, H) // 2) * factor,
-                fill=fill,
-                outline=border,
-                width=max(1, _px(1)) * factor if border else 0,
-            )
-            self._images[key] = self.app._tk_image(big.resize((W, H), Image.LANCZOS))
-        return self._images[key]
-
     def _tile(self, text: str, size: float, color: str, radius: float):
         """Квадратик-аватар с первой буквой сайта."""
         S, R = _px(size), _px(radius)
@@ -1103,25 +1159,6 @@ class MainView(tk.Frame):
                 font=font,
             )
             self._images[key] = self.app._tk_image(big.resize((S, S), Image.LANCZOS))
-        return self._images[key]
-
-    def _mountain(self, width: float, color: str):
-        """Гора со скважиной из иконки приложения (без тёмного квадрата вокруг)."""
-        W = _px(width)
-        key = ("mountain", W, color)
-        if key not in self._images:
-            try:
-                icon = Image.open(ICON_PATH).convert("RGBA")
-            except OSError:
-                return None
-            mask = ImageChops.multiply(icon.convert("L").point(lambda v: max(0, min(255, int((v - 110) * 255 / 90)))), icon.getchannel("A"))
-            box = mask.point(lambda v: 255 if v > 128 else 0).getbbox()
-            if box is None:
-                return None
-            mask = mask.crop(box)
-            height = max(1, round(mask.height * W / mask.width))
-            mask = mask.resize((W, height), Image.LANCZOS)
-            self._images[key] = self.app._tk_image(Image.merge("RGBA", (*Image.new("RGB", mask.size, color).split(), mask)))
         return self._images[key]
 
     def _glyph(self, kind: str, color: str, size: float):
@@ -1574,23 +1611,6 @@ class MainView(tk.Frame):
             "tags": list(self._edit_tags),
         }
 
-    def _dot_font(self):
-        """Моноширинный шрифт для поля пароля: размер подбирается так, чтобы шаг между
-        точками был как в макете (10,4 px при масштабе 1.0)."""
-        if self._dot_font_cache is None:
-            import tkinter.font as tkfont
-
-            available = set(tkfont.families())
-            family = next((f for f in ("Consolas", "DejaVu Sans Mono", "Courier New") if f in available), "TkFixedFont")
-            best, best_gap = 13, 1e9
-            for size in range(10, 25):
-                width = tkfont.Font(family=family, size=-_px(size)).measure(_MV_DOT)
-                gap = abs(width - _px(10.4))
-                if gap < best_gap:
-                    best, best_gap = size, gap
-            self._dot_font_cache = (family, -_px(best), "normal")
-        return self._dot_font_cache
-
     def _ensure_edit_widgets(self) -> None:
         if self._ev:
             return
@@ -2023,6 +2043,393 @@ class MainView(tk.Frame):
         webbrowser.open(target)
 
 
+# --- Экран блокировки и создания хранилища по референсу (CLAUDE.md, раздел 10.81) ----------
+#
+# Две картинки-референса 390×844 (экран блокировки и «Новое хранилище»): тёмный фон,
+# всё в один столбец. Как и главный экран (10.79), рисуется на холсте картинками и текстом
+# в пикселях референса, умноженных на масштаб `_px`; настоящие виджеты — только поля ввода.
+
+_UV_BG = "#12263a"
+_UV_FIELD = "#0c1c2b"
+_UV_FIELD_LINE = "#465c74"
+_UV_CREAM = "#f4f3ef"
+_UV_MOUNTAIN = "#f3f1ea"
+_UV_SOFT = "#afc0d0"  # подзаголовок, подписи полей
+_UV_DIM = "#869aae"  # «или»
+_UV_FOOT = "#8fa3b7"
+_UV_TEXT = "#dce5ee"
+_UV_LINE = "#234263"
+_UV_LINE_SOFT = "#1a334d"
+_UV_OUTLINE = "#2f4963"  # рамка кнопки «Создать новое хранилище»
+_UV_WARN_FILL = "#1a2430"
+_UV_WARN_LINE = "#5b4a2e"
+_UV_WARN_TEXT = "#e9c79a"
+_UV_CHECK = "#7fb0e0"
+_UV_CHECK_MARK = "#3b3b3b"
+_UV_SEGMENT_OFF = "#2a4a6b"
+_UV_BUTTON_TEXT = "#12263a"
+_UV_WINDOW_SIZE = (390, 844)  # px, размер референса
+_UV_MIN_HEIGHT = {"unlock": 600, "create": 781}  # ниже — содержимое прокручивается колесом мыши
+_UV_DEFAULT_NAME = "Личное"
+
+
+def _uv_strength(analysis) -> tuple[str, str, int]:
+    """(слово, цвет, сколько из пяти сегментов закрасить) для живой шкалы мастер-пароля.
+    Слово и пороги — те же, что в `_mv_strength` (слабый — меньше 50 бит или в списке утечек)."""
+    if analysis.leaked or analysis.bits < WEAK_ENTROPY_THRESHOLD_BITS:
+        return "Слабый", _MV_RED, 1
+    filled = 1
+    for threshold, level_filled, _label, _color in _STRENGTH_LEVELS:
+        if analysis.bits >= threshold:
+            filled = level_filled
+    if analysis.bits < 80:
+        return "Средний", _MV_AMBER, max(2, min(filled, 3))
+    return "Надёжный", _MV_GREEN, max(4, filled)
+
+
+class UnlockView(_DrawKit, tk.Canvas):
+    """Экран блокировки («Открыть») и экран «Новое хранилище» — строго по референсам.
+
+    Данных не хранит: расшифровку и создание файла делает `App` (`_on_unlock`, `_finish_create`).
+    Нет в референсе, но нужно для работы: строка ошибки под кнопкой «Открыть», сообщения под
+    полем повтора пароля, выбор файла по Ctrl+O (раздел 10.81)."""
+
+    MARGIN = 24
+
+    def __init__(self, parent: tk.Misc, app: "App") -> None:
+        super().__init__(parent, bg=_UV_BG, bd=0, highlightthickness=0, yscrollincrement=_px(20))
+        self.app = app
+        self._images: dict = {}
+        self.mode = "unlock"  # unlock | create
+        self.status = ""  # ошибка под кнопкой «Открыть»
+        self.error = ""  # ошибка формы создания (строка под «Повторите мастер-пароль»)
+        self.last_login: str | None = None
+        self._focus: str | None = None
+        self._hits = _Hits(self)
+        self._pending: str | None = None
+        self._items: dict[str, int] = {}
+        self._used: set[str] = set()
+        self._strength_cache: tuple | None = None
+
+        self.name_var = tk.StringVar(master=self, value=_UV_DEFAULT_NAME)
+        self.pw1_var = tk.StringVar(master=self)
+        self.pw2_var = tk.StringVar(master=self)
+        self.saved_var = tk.BooleanVar(master=self, value=False)  # «Я сохранил мастер-пароль…»
+        self._entries: dict[str, tk.Entry] = {}
+        self._make_entry("pw", app._password_var, self._dot_font(9.5), submit=app._on_unlock)
+        for var in (self.name_var, self.pw1_var, self.pw2_var, self.saved_var):
+            var.trace_add("write", lambda *_a: self._on_form_changed())
+
+        self.bind("<Configure>", lambda _e: self._schedule(), add="+")
+        self.bind("<MouseWheel>", lambda e: self._wheel(-1 if e.delta > 0 else 1))
+        self.bind("<Button-4>", lambda _e: self._wheel(-1))
+        self.bind("<Button-5>", lambda _e: self._wheel(1))
+        self.bind("<Escape>", lambda _e: self._on_escape())
+        app.bind("<Control-KeyPress>", self._on_control_key, add="+")
+
+    # --- поля ввода -------------------------------------------------------------
+
+    def _make_entry(self, key: str, var: tk.StringVar, font, *, submit: Callable[[], None], secret: bool = True) -> None:
+        entry = tk.Entry(
+            self,
+            textvariable=var,
+            show=_MV_DOT if secret else "",
+            bd=0,
+            highlightthickness=0,
+            relief="flat",
+            bg=_UV_FIELD,
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            selectbackground=_UV_SEGMENT_OFF,
+            selectforeground="#ffffff",
+            font=font,
+        )
+        entry.bind("<FocusIn>", lambda _e, k=key: self._set_focus(k))
+        entry.bind("<FocusOut>", lambda _e, w=entry: (w.selection_clear(), self._set_focus(None)))
+        entry.bind("<Return>", lambda _e: submit())
+        entry.bind("<Escape>", lambda _e: self._on_escape())
+        self._entries[key] = entry
+
+    def _ensure_create_entries(self) -> None:
+        if "name" in self._entries:
+            return
+        # порядок создания = порядок обхода клавишей Tab
+        self._make_entry(
+            "name", self.name_var, _mv_font(15), submit=lambda: self._entries["pw1"].focus_set(), secret=False
+        )
+        self._make_entry("pw1", self.pw1_var, self._dot_font(9.5), submit=lambda: self._entries["pw2"].focus_set())
+        self._make_entry("pw2", self.pw2_var, self._dot_font(9.5), submit=self._submit_create)
+
+    def _set_focus(self, key: str | None) -> None:
+        if self._focus != key:
+            self._focus = key
+            self._schedule()
+
+    def focus_main_field(self) -> None:
+        if not self.winfo_ismapped():  # отложенный вызов не должен красть фокус у главного экрана
+            return
+        key = "pw" if self.mode == "unlock" else "name"
+        entry = self._entries.get(key)
+        if entry is None:
+            return
+        entry.focus_set()
+        if key == "name":
+            entry.selection_range(0, "end")
+
+    # --- состояние ---------------------------------------------------------------
+
+    def refresh(self) -> None:
+        self.last_login = self.app._last_login_text()
+        self._schedule()
+
+    def set_status(self, text: str) -> None:
+        self.status = text
+        self._schedule()
+
+    def show_create(self) -> None:
+        self.mode = "create"
+        self.error = ""
+        self._ensure_create_entries()
+        self.yview_moveto(0)
+        self._schedule()
+        self.after_idle(self.focus_main_field)
+
+    def show_unlock(self) -> None:
+        self.mode = "unlock"
+        for var in (self.pw1_var, self.pw2_var):
+            var.set("")
+        self.saved_var.set(False)
+        self.error = ""
+        self.yview_moveto(0)
+        self._schedule()
+        self.after_idle(self.focus_main_field)
+
+    def reset(self) -> None:
+        """Вернуться к пустому экрану блокировки (после «Заблокировать»)."""
+        self.status = ""
+        self.name_var.set(_UV_DEFAULT_NAME)
+        self.show_unlock()
+        self.refresh()
+
+    def _on_form_changed(self) -> None:
+        self.error = ""
+        self._schedule()
+
+    def _on_escape(self) -> None:
+        if self.mode == "create":
+            self.show_unlock()
+
+    def _on_control_key(self, event: tk.Event) -> None:
+        if not self.winfo_ismapped():
+            return
+        if event.keysym in ("o", "O", "Cyrillic_shcha", "Cyrillic_SHCHA"):
+            self.app._on_browse(create=self.mode == "create")
+
+    def _wheel(self, step: int) -> None:
+        if self._scrollable():
+            self.yview_scroll(step * 3, "units")
+
+    def _scrollable(self) -> bool:
+        return self._virtual_height() * max(_UI_SCALE, 0.01) > self.winfo_height() + 1
+
+    def _virtual_height(self) -> float:
+        return max(self.winfo_height() / max(_UI_SCALE, 0.01), _UV_MIN_HEIGHT[self.mode])
+
+    # --- создание ----------------------------------------------------------------
+
+    def _fail(self, text: str, key: str) -> None:
+        self.error = text
+        self._schedule()
+        self._entries[key].focus_set()
+
+    def _submit_create(self) -> None:
+        name = self.name_var.get().strip()
+        password, confirmation = self.pw1_var.get(), self.pw2_var.get()
+        if not name:
+            return self._fail("Введите название хранилища.", "name")
+        if password != confirmation:
+            return self._fail("Пароли не совпадают.", "pw2")
+        if len(password) < MIN_MASTER_PASSWORD_LENGTH:
+            return self._fail(f"Мастер-пароль должен быть не короче {MIN_MASTER_PASSWORD_LENGTH} символов.", "pw1")
+        if not self.saved_var.get():
+            self.error = "Подтвердите, что сохранили мастер-пароль."
+            self._schedule()
+            return
+        # Мастер-пароль оценивается по тем же критериям «слабости», что пароли записей
+        # (раздел 10.18): предупреждение, а не запрет — решение за пользователем.
+        if check_password(password, [name])[1]:
+            proceed = messagebox.askyesno(
+                "Слабый мастер-пароль",
+                "Этот пароль легко подобрать (см. оценку выше), а он защищает ВСЁ хранилище целиком, "
+                "а не одну запись. Всё равно использовать его?",
+                parent=self.app,
+            )
+            if not proceed:
+                return
+        self.app._finish_create(name, password)
+
+    # --- рисование ---------------------------------------------------------------
+
+    def _schedule(self) -> None:
+        if self._pending is None:
+            self._pending = self.after_idle(self._draw)
+
+    def _t(self, x: float, y: float, text: str, px: float, fill: str, *, bold=False, anchor="w", **kw):
+        return self.create_text(
+            _px(x), _px(y), text=text, anchor=anchor, fill=fill, font=_mv_font(px, bold), tags="dyn", **kw
+        )
+
+    def _put(self, key: str, x: float, y: float, width: float) -> None:
+        self._used.add(key)
+        widget = self._entries[key]
+        item = self._items.get(key)
+        if item is None:
+            self._items[key] = self.create_window(_px(x), _px(y), window=widget, anchor="w", width=_px(width), tags="win")
+        else:
+            self.coords(item, _px(x), _px(y))
+            self.itemconfigure(item, width=_px(width), state="normal")
+
+    def _field(self, x: float, y: float, w: float, key: str, h: float = 52) -> None:
+        border = _MV_FOCUS_LINE if self._focus == key else _UV_FIELD_LINE
+        self.create_image(_px(x), _px(y), image=self._rr(w, h, _UV_FIELD, border, 14), anchor="nw", tags="dyn")
+
+    def _button(
+        self, x: float, y: float, w: float, label: str, command: Callable[[], None], *, primary: bool, h: float = 52
+    ) -> None:
+        if primary:
+            image, color = self._rr(w, h, _UV_CREAM, None, 14), _UV_BUTTON_TEXT
+        else:
+            image, color = self._rr(w, h, None, _UV_OUTLINE, 14), _UV_TEXT
+        self.create_image(_px(x), _px(y), image=image, anchor="nw", tags="dyn")
+        self._t(x + w / 2, y + h / 2, label, 14, color, bold=True, anchor="center")
+        self._hits.add(_px(x), _px(y), _px(x + w), _px(y + h), command)
+
+    def _draw(self) -> None:
+        self._pending = None
+        scale = max(_UI_SCALE, 0.01)
+        width_px, height_px = self.winfo_width(), self.winfo_height()
+        if width_px <= 1 or height_px <= 1:
+            return
+        W = width_px / scale
+        vh = self._virtual_height()
+        self.delete("dyn")
+        self._hits.clear()
+        self._used = set()
+        if vh * scale > height_px + 1:
+            self.configure(scrollregion=(0, 0, width_px, _px(vh)))
+        else:
+            self.configure(scrollregion=(0, 0, width_px, height_px))
+            self.yview_moveto(0)
+        (self._draw_unlock if self.mode == "unlock" else self._draw_create)(W, vh)
+        for key in list(self._items):
+            if key not in self._used:
+                self.delete(self._items.pop(key))
+
+    def _draw_unlock(self, W: float, vh: float) -> None:
+        m = self.MARGIN
+        w = W - 2 * m
+        mountain = self._mountain(75, _UV_MOUNTAIN)
+        if mountain is not None:
+            self.create_image(_px(m), _px(72), image=mountain, anchor="nw", tags="dyn")
+        self._t(m, 144.75, "Хранилище тайн", 23, "#ffffff", bold=True)
+        self._t(m, 173.75, "Введите мастер-пароль", 13, _UV_SOFT)
+        self._t(m, 247, "Мастер-пароль", 12, _UV_SOFT)
+        self._field(m, 261, w, "pw", 52.5)
+        self._put("pw", m + 14, 288, w - 30)
+        self._button(m, 325, w, "Открыть", self.app._on_unlock, primary=True, h=52.5)
+        if self.status:
+            self._t(m, 393, self.status, 12, _MV_RED, anchor="nw", width=_px(w))
+
+        # нижняя группа прижата к низу окна (в референсе окно 844 px высотой)
+        b = vh - _UV_WINDOW_SIZE[1]
+        cx = W / 2
+        y = 679.5 + b
+        for x0, x1 in ((m, cx - 23), (cx + 22.5, W - m)):
+            self.create_rectangle(_px(x0), _px(y - 1), _px(x1), _px(y + 1), fill=_UV_LINE_SOFT, outline="", tags="dyn")
+            self.create_rectangle(_px(x0), _px(y - 0.5), _px(x1), _px(y + 0.5), fill=_UV_LINE, outline="", tags="dyn")
+        self._t(cx, y + 1, "или", 11, _UV_DIM, anchor="center")
+        self._button(m, 704 + b, w, "Создать новое хранилище", self.app._on_create, primary=False)
+        self._t(m, 784.75 + b, "Мастер-пароль не восстанавливается.", 11, _UV_FOOT)
+        if self.last_login:
+            self._t(m, 803.25 + b, f"Последний вход: {self.last_login}", 11, _UV_FOOT)
+
+    def _strength(self):
+        key = (self.pw1_var.get(), self.name_var.get())
+        if self._strength_cache is None or self._strength_cache[0] != key:
+            self._strength_cache = (key, analyze_password(key[0], [key[1]]) if key[0] else None)
+        return self._strength_cache[1]
+
+    def _draw_create(self, W: float, vh: float) -> None:
+        m = self.MARGIN
+        w = W - 2 * m
+        # «Назад»
+        self.create_line(
+            _px(32.7), _px(67.2), _px(27.3), _px(71.8), _px(32.5), _px(76.4),
+            fill=_UV_SOFT, width=max(1, _px(1.6)), capstyle="round", joinstyle="round", tags="dyn",
+        )
+        self._t(43.7, 72.75, "Назад", 14, _UV_SOFT)
+        self._hits.add(_px(m), _px(58), _px(120), _px(88), self.show_unlock)
+
+        self._t(m, 126, "Новое хранилище", 23, "#ffffff", bold=True)
+        self._t(m, 156.75, "Данные хранятся в зашифрованном файле на этом", 13, _UV_SOFT)
+        self._t(m, 178.25, "устройстве.", 13, _UV_SOFT)
+
+        self._t(m, 219.5, "Название хранилища", 12, _UV_SOFT)
+        self._field(m, 234, w, "name")
+        self._put("name", m + 14.5, 260, w - 30)
+
+        self._t(m, 310.5, "Мастер-пароль", 12, _UV_SOFT)
+        self._field(m, 324, w, "pw1", 53)
+        self._put("pw1", m + 14, 352, w - 30)
+
+        analysis = self._strength()
+        word, color, filled = _uv_strength(analysis) if analysis is not None else ("", _UV_SEGMENT_OFF, 0)
+        for i in range(5):
+            self.create_image(
+                _px(m + 32 * i), _px(392.7),
+                image=self._rr(28.5, 3.5, color if i < filled else _UV_SEGMENT_OFF, None, 2), anchor="nw", tags="dyn",
+            )
+        if analysis is not None:
+            detail = "в списке утечек" if analysis.leaked else f"{round(analysis.bits)} бит"
+            self._t(m + 167, 395.5, f"{word} · {detail}", 11, color)
+
+        self._t(m, 427.5, "Повторите мастер-пароль", 12, _UV_SOFT)
+        self._field(m, 441.5, w, "pw2")
+        self._put("pw2", m + 14, 468.5, w - 30)
+
+        if self.error:
+            text, text_color = self.error, _MV_RED
+        elif self.pw2_var.get():
+            same = self.pw1_var.get() == self.pw2_var.get()
+            text, text_color = ("Пароли совпадают", _MV_GREEN) if same else ("Пароли не совпадают", _MV_RED)
+        else:
+            text, text_color = "", _MV_GREEN
+        if text:
+            self._t(m, 509.25, text, 11, text_color)
+
+        self.create_image(_px(m), _px(537.5), image=self._rr(w, 87.5, _UV_WARN_FILL, _UV_WARN_LINE, 14), anchor="nw", tags="dyn")
+        for i, line in enumerate(
+            ("Мастер-пароль нельзя восстановить. Если вы его", "забудете, данные не откроет никто, в том числе", "мы.")
+        ):
+            self._t(m + 17, 561.5 + 19.5 * i, line, 12, _UV_WARN_TEXT)
+
+        if self.saved_var.get():
+            self.create_image(_px(m), _px(653), image=self._rr(20, 20, _UV_CHECK, None, 2.5), anchor="nw", tags="dyn")
+            coords: list[int] = []
+            for dx, dy in ((3.4, 10.8), (8, 15.4), (16.6, 4.8)):
+                coords += [_px(m + dx), _px(653 + dy)]
+            self.create_line(
+                *coords,
+                fill=_UV_CHECK_MARK, width=max(2, _px(2.7)), capstyle="butt", joinstyle="miter", tags="dyn",
+            )
+        else:
+            self.create_image(_px(m), _px(653), image=self._rr(20, 20, None, _UV_SOFT, 2.5), anchor="nw", tags="dyn")
+        self._t(m + 32, 664, "Я сохранил мастер-пароль в надёжном месте", 13, _UV_TEXT)
+        self._hits.add(_px(m), _px(648), _px(W - m), _px(678), lambda: self.saved_var.set(not self.saved_var.get()))
+
+        self._button(m, max(vh - 84, 700), w, "Создать хранилище", self._submit_create, primary=True)
+
+
 class App(ttk.Window):
     """Главное окно приложения.
 
@@ -2159,7 +2566,7 @@ class App(ttk.Window):
         self._titlebar: TitleBar | None = None
         self._grip: tk.Label | None = None
         self._window_corners: list[tk.Label] | None = None
-        self._chrome_theme_name = "dark"
+        self._chrome_theme_name = "unlock"
         if not self._native_frame:
             self._install_chrome()
         else:
@@ -2167,6 +2574,8 @@ class App(ttk.Window):
 
         self._unlock_frame.pack(fill="both", expand=True)
         self._apply_screen_size("unlock", center_on_screen=True)
+        self._unlock_view.refresh()
+        self._unlock_view.after_idle(self._unlock_view.focus_main_field)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -2232,21 +2641,20 @@ class App(ttk.Window):
         return window is self and self._maximized
 
     def _apply_screen_size(self, screen: str, *, center_on_screen: bool = False) -> None:
-        """Размер окна под экран (раздел 10.48): на экране разблокировки окно
-        ужато вокруг белой карточки (тёмного фона вокруг — немного), на
-        главном экране — обычного размера. Центр окна сохраняется (при
+        """Размер окна под экран: экран блокировки — размер референса 390×844 (раздел
+        10.82), главный — 1120×700 (раздел 10.79). Центр окна сохраняется (при
         первом показе окно ставится по центру рабочей области). Развёрнутое
         окно сначала возвращается к обычному размеру."""
         if self._maximized:
             self._toggle_maximize()
         scale = _px
         if screen == "unlock":
-            self.update_idletasks()
-            card = self._unlock_card
+            # Размер референса экрана блокировки (390×844, раздел 10.81); на низком экране
+            # окно ужимается до рабочей области, а содержимое прокручивается колесом мыши.
             bar = 0 if self._native_frame else scale(_CHROME_BAR_HEIGHT)
-            width = card.winfo_reqwidth() + 2 * scale(_UNLOCK_MARGIN_X)
-            height = card.winfo_reqheight() + bar + 2 * scale(_UNLOCK_MARGIN_Y)
-            min_size = (width, height)
+            width = scale(_UV_WINDOW_SIZE[0])
+            height = scale(_UV_WINDOW_SIZE[1]) + bar
+            min_size = (width, scale(_UV_MIN_HEIGHT["unlock"]) + bar)
         else:
             width, height = scale(_MAIN_WINDOW_SIZE[0]), scale(_MAIN_WINDOW_SIZE[1])
             min_size = (scale(_MAIN_MIN_SIZE[0]), scale(_MAIN_MIN_SIZE[1]))
@@ -2313,7 +2721,7 @@ class App(ttk.Window):
             self,
             self,
             APP_TITLE,
-            theme="dark",
+            theme="unlock",
             right_margin=_px(8) if self._window_corners is not None else 0,
         )
         self._titlebar.pack(side="top", fill="x")
@@ -2332,7 +2740,7 @@ class App(ttk.Window):
         self._grip.place(relx=1.0, rely=1.0, x=-self._grip_offset, y=-self._grip_offset, anchor="se")
         self._grip.bind("<ButtonPress-1>", self._grip_start)
         self._grip.bind("<B1-Motion>", self._grip_move)
-        self._set_chrome_theme("dark")
+        self._set_chrome_theme("unlock")
 
         # Без системной рамки ОС не знает, куда поставить окно, — по центру
         # рабочей области.
@@ -3740,14 +4148,11 @@ class App(ttk.Window):
         """
         style = ttk.Style()
 
-        style.configure("UnlockBg.TFrame", background=_SIDEBAR_BG)
-
         # Светло-серая "страница" вокруг карточки главного экрана (раздел
         # 10.8) — сама карточка (сайдбар + рабочая область) получает
         # скруглённые внешние углы через `_rounded_backdrop` (раздел 10.9),
         # а этот плоский
-        # фон нужен только для контраста снаружи неё, тем же приёмом, что
-        # и `UnlockBg.TFrame` для тёмного фона экрана разблокировки.
+        # фон нужен только для контраста снаружи неё.
         style.configure("Page.TFrame", background=_PAGE_BG)
 
         # `NeutralField.TEntry` — общий стиль для ЛЮБОГО `Entry`, который
@@ -3833,176 +4238,45 @@ class App(ttk.Window):
     # Экран разблокировки / создания хранилища
     # ------------------------------------------------------------------
 
-    def _build_unlock_frame(self) -> ttk.Frame:
-        # Тёмный фон во всё окно (тот же цвет, что у сайдбара главного
-        # экрана и у самой иконки приложения) + белая "карточка" по
-        # центру — язык "Разделённая панель" (см. CLAUDE.md, раздел 10).
-        # Центрирование — трюк pack(): виджет, упакованный с expand=True
-        # и БЕЗ fill, центрируется в родителе по обеим осям.
-        outer = ttk.Frame(self, style="UnlockBg.TFrame")
-        center = ttk.Frame(outer, style="UnlockBg.TFrame")
-        center.pack(expand=True)
-
-        # Белая карточка со скруглёнными углами (раздел 10.47): вместо рамки
-        # `relief="solid"` (прямоугольник) — скруглённая подложка поверх тёмного
-        # фона. Отступы содержимого (40/36 px) больше радиуса, поэтому дети
-        # карточки в углы не заходят.
-        card = ttk.Frame(center, padding=(_px(40), _px(36)))
-        card.pack()
-        self._rounded_backdrop(
-            card,
-            "#ffffff",
-            corners=(True, True, True, True),
-            surface=_SIDEBAR_BG,
-            radius=_CARD_RADIUS,
-            dynamic=True,
-        )
-        self._unlock_card = card
-
-        def field_label(parent: ttk.Frame, text: str) -> ttk.Label:
-            # Мелкая заглавная подпись НАД полем — как на референсе
-            # (вариант C): "ФАЙЛ ХРАНИЛИЩА"/"МАСТЕР-ПАРОЛЬ", а не привычная
-            # "Файл хранилища:" слева от поля.
-            return ttk.Label(parent, text=text.upper(), font=("", 8, "bold"), bootstyle="secondary")
-
-        if hasattr(self, "_icon_image_medium"):
-            ttk.Label(card, image=self._icon_image_medium).pack(pady=(0, _px(12)))
-
-        # Без bootstyle="primary" — на референсе заголовок тёмный (обычный
-        # цвет текста темы), а не синий; синий на экране разблокировки
-        # оставлен только за акцентной кнопкой "Разблокировать".
-        ttk.Label(card, text=APP_TITLE, font=("", 18, "bold")).pack()
-        ttk.Label(
-            card,
-            text="Введите мастер-пароль, чтобы открыть хранилище",
-            bootstyle="secondary",
-            justify="center",
-        ).pack(pady=(_px(2), _px(20)))
-
-        field_label(card, "Файл хранилища").pack(fill="x", anchor="w")
-        path_row = ttk.Frame(card)
-        path_row.pack(fill="x", pady=(_px(2), _px(12)))
-        self._path_var = tk.StringVar(value=str(DEFAULT_VAULT_PATH))
-        control_height = _px(_UNLOCK_CONTROL_HEIGHT)
-        path_box, _path_entry = self._rounded_field(
-            path_row, self._path_var, width=26, height=_UNLOCK_CONTROL_HEIGHT
-        )
-        path_box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
-        browse_cell = ttk.Frame(path_row, height=control_height)
-        browse_cell.pack_propagate(False)
-        browse_cell.pack(side="left")
-        browse_button = self._styled(
-            ttk.Button(browse_cell, text="Выберите файл", command=self._on_browse),
-            self._neutral_style(flat=True),
-        )
-        browse_button.pack(fill="both", expand=True)
-        # Ширина ячейки — по тексту кнопки (высота задана выше).
-        browse_cell.configure(width=browse_button.winfo_reqwidth())
-
-        field_label(card, "Мастер-пароль").pack(fill="x", anchor="w")
-        pw_row = ttk.Frame(card)
-        pw_row.pack(fill="x", pady=(_px(2), _px(4)))
+    def _build_unlock_frame(self) -> UnlockView:
+        """Экран блокировки и «Новое хранилище» строго по референсам (раздел 10.81)."""
+        remembered = last_vault_path()
+        start = remembered if remembered is not None and remembered.exists() else DEFAULT_VAULT_PATH
+        self._path_var = tk.StringVar(value=str(start))
         self._password_var = tk.StringVar()
-        # show="*" — тот же смысл, что и getpass.getpass() в CLI (см.
-        # vault/cli.py): вводимые символы не должны быть видны на экране.
-        # Кнопка-"глаз" рядом (см. _on_toggle_password_visibility) даёт
-        # пользователю возможность сверить, что он ввёл, не расширяя это
-        # доверие на любого, кто просто смотрит на экран через плечо.
-        password_box, password_entry = self._rounded_field(
-            pw_row, self._password_var, show="*", height=_UNLOCK_CONTROL_HEIGHT
-        )
-        password_box.pack(side="left", fill="x", expand=True, padx=(0, _px(8)))
-        password_entry.bind("<Return>", lambda _event: self._on_unlock())
-        self._password_entry = password_entry
-        self._password_visible = False
-        eye_cell = ttk.Frame(pw_row, width=control_height, height=control_height)
-        eye_cell.pack_propagate(False)
-        eye_cell.pack(side="left")
-        self._styled(
-            ttk.Button(
-                eye_cell,
-                command=self._on_toggle_password_visibility,
-                **{**self._icon_kwargs("eye", "dark", center=True), "compound": "image"},
-            ),
-            self._rounded_button_style(
-                "Rounded.IconToggleSquare",
-                _NEUTRAL_FILL,
-                _NEUTRAL_TEXT,
-                border_color=_NEUTRAL_BORDER,
-                padding=(0, 0),
-                element_padding=0,
-            ),
-        ).pack(fill="both", expand=True)
+        self._unlock_view = UnlockView(self, self)
+        return self._unlock_view
 
-        # Место под сообщение об ошибке зарезервировано (две строки): иначе
-        # длинное сообщение раздвигало бы карточку, а вместе с ней — и
-        # окно, которое на этом экране подогнано под карточку (раздел 10.48).
-        status_holder = ttk.Frame(card, height=_px(34))
-        status_holder.pack_propagate(False)
-        status_holder.pack(fill="x", pady=(_px(2), _px(2)))
-        self._unlock_status = ttk.Label(
-            status_holder, text="", bootstyle="danger", wraplength=_px(360), justify="left"
-        )
-        self._unlock_status.pack(fill="x", anchor="n")
+    def _last_login_text(self) -> str | None:
+        """«сегодня, 09:14» для строки «Последний вход» (None, если этот файл ещё не открывали)."""
+        return format_last_login(last_unlock_time(self._path_var.get()))
 
-        unlock_cell = ttk.Frame(card, height=control_height)
-        unlock_cell.pack_propagate(False)
-        unlock_cell.pack(fill="x", pady=(_px(4), _px(16)))
-        self._styled(
-            ttk.Button(
-                unlock_cell,
-                text="Разблокировать",
-                command=self._on_unlock,
-                **self._icon_kwargs("unlock", "white"),
-            ),
-            self._accent_style(flat=True),
-        ).pack(fill="both", expand=True)
-
-        divider_row = ttk.Frame(card)
-        divider_row.pack(fill="x", pady=(0, _px(12)))
-        ttk.Separator(divider_row).pack(side="left", fill="x", expand=True)
-        ttk.Label(
-            divider_row, text="НЕТ ХРАНИЛИЩА?", font=("", 8, "bold"), bootstyle="secondary"
-        ).pack(side="left", padx=_px(8))
-        ttk.Separator(divider_row).pack(side="left", fill="x", expand=True)
-
-        create_cell = ttk.Frame(card, height=control_height)
-        create_cell.pack_propagate(False)
-        create_cell.pack(fill="x")
-        self._styled(
-            ttk.Button(
-                create_cell,
-                text="Создать новое хранилище",
-                command=self._on_create,
-                **self._icon_kwargs("plus", "dark"),
-            ),
-            self._neutral_style(flat=True),
-        ).pack(fill="both", expand=True)
-
-        return outer
-
-    def _on_toggle_password_visibility(self) -> None:
-        self._password_visible = not self._password_visible
-        self._password_entry.configure(show="" if self._password_visible else "*")
-
-    def _on_browse(self) -> None:
+    def _on_browse(self, create: bool = False) -> None:
+        """Ctrl+O на экране блокировки (в референсе кнопки выбора файла нет): открыть другой файл
+        хранилища, а на экране «Новое хранилище» — выбрать, где его создать."""
         initial_dir = Path(self._path_var.get()).parent
-        path = filedialog.askopenfilename(
-            title="Выберите файл хранилища",
-            initialdir=str(initial_dir) if initial_dir.exists() else str(Path.home()),
-            filetypes=[("Хранилище паролей", "*.vault"), ("Все файлы", "*.*")],
-        )
+        options = {
+            "initialdir": str(initial_dir) if initial_dir.exists() else str(Path.home()),
+            "filetypes": [("Хранилище паролей", "*.vault"), ("Все файлы", "*.*")],
+        }
+        if create:
+            path = filedialog.asksaveasfilename(
+                title="Где создать хранилище", defaultextension=".vault", confirmoverwrite=False, **options
+            )
+        else:
+            path = filedialog.askopenfilename(title="Выберите файл хранилища", **options)
         if path:
             self._path_var.set(path)
+            self._unlock_view.set_status("")
+            self._unlock_view.refresh()
 
     def _on_unlock(self) -> None:
         path = Path(self._path_var.get())
         password = self._password_var.get()
+        view = self._unlock_view
 
         if not path.exists():
-            self._unlock_status.config(
-                text="Файл не найден. Нажмите «Создать новое...», чтобы завести хранилище."
-            )
+            view.set_status("Файл хранилища не найден. Нажмите «Создать новое хранилище».")
             return
 
         try:
@@ -4011,13 +4285,13 @@ class App(ttk.Window):
         except InvalidMasterPasswordError:
             # Одно и то же сообщение для неверного пароля и для
             # повреждённых данных — см. CLAUDE.md, раздел 4.
-            self._unlock_status.config(text="Неверный мастер-пароль.")
+            view.set_status("Неверный мастер-пароль.")
             return
         except VaultFormatError as exc:
-            self._unlock_status.config(text=f"Файл повреждён или это не хранилище: {exc}")
+            view.set_status(f"Файл повреждён или это не хранилище: {exc}")
             return
         except OSError as exc:
-            self._unlock_status.config(text=f"Не удалось прочитать файл: {exc}")
+            view.set_status(f"Не удалось прочитать файл: {exc}")
             return
 
         self.vault_path = path
@@ -4025,28 +4299,30 @@ class App(ttk.Window):
         self.data = data
         self._snapshot = Snapshot.of(data, blob)
         self._password_var.set("")
-        self._unlock_status.config(text="")
+        view.set_status("")
+        remember_unlock(path)
         self._show_main()
 
     def _on_create(self) -> None:
+        """«Создать новое хранилище»: открыть экран «Новое хранилище»."""
+        self._unlock_view.show_create()
+
+    def _finish_create(self, name: str, password: str) -> None:
+        """Создать файл хранилища с названием `name` и мастер-паролем `password` (поля уже
+        проверены экраном «Новое хранилище»)."""
         path = Path(self._path_var.get())
         if path.exists():
             overwrite = messagebox.askyesno(
                 "Хранилище уже существует",
                 f"Файл {path} уже существует.\n"
-                "Пересоздать его? СТАРЫЕ ДАННЫЕ БУДУТ ПОТЕРЯНЫ.",
+                "Пересоздать его? СТАРЫЕ ДАННЫЕ БУДУТ ПОТЕРЯНЫ.\n\n"
+                "(Чтобы создать хранилище в другом месте, нажмите Ctrl+O.)",
                 parent=self,
             )
             if not overwrite:
                 return
 
-        dialog = CreateVaultDialog(self)
-        self.wait_window(dialog)
-        if dialog.result is None:
-            return
-        password = dialog.result
-
-        data = {"entries": []}
+        data = {"entries": [], "name": name}
         try:
             blob = encrypt_vault(data, password)
             save_vault_file(path, blob)
@@ -4059,8 +4335,8 @@ class App(ttk.Window):
         self.data = data
         self._snapshot = Snapshot.of(data, blob)
         self._password_var.set("")
-        self._unlock_status.config(text="")
-        messagebox.showinfo("Готово", f"Хранилище создано: {path}", parent=self)
+        self._unlock_view.reset()
+        remember_unlock(path)
         self._show_main()
 
     # ------------------------------------------------------------------
@@ -4082,6 +4358,7 @@ class App(ttk.Window):
         except (AttributeError, OSError):
             saved = datetime.now()
         self._view.set_saved_at(saved)
+        self._view.vault_name = (self.data or {}).get("name") or "Личное"
         self._view.refresh()
         if os.environ.get("MENEDGER_DEBUG"):
             self.after(500, lambda: self._debug_report_images("главный экран"))
@@ -4367,8 +4644,9 @@ class App(ttk.Window):
         self._view.clear()  # на экране не должно остаться ни записей, ни пароля
         self._main_frame.pack_forget()
         self._unlock_frame.pack(fill="both", expand=True)
-        self._set_chrome_theme("dark")
+        self._set_chrome_theme("unlock")
         self._apply_screen_size("unlock")
+        self._unlock_view.reset()
 
     def _on_close(self) -> None:
         self.destroy()

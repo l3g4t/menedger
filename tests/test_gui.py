@@ -21,9 +21,11 @@ getpass.getpass()/input() в tests/test_cli.py. Сама крипто- и
 
 import json
 import os
+import tempfile
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,8 +52,11 @@ import gui.app as guiapp  # noqa: E402
 # файла проверяют собственную (разделы 10.33–10.58): включаем её на весь файл.
 # Выбор рамки по умолчанию проверяют тесты с явным окружением (ниже).
 os.environ.setdefault("MENEDGER_CUSTOM_FRAME", "1")
+# «Последний вход» и запомненный файл (раздел 10.81) не должны попадать в настоящий ~/.menedger.
+os.environ["MENEDGER_STATE"] = str(Path(tempfile.mkdtemp()) / "state.json")
 
 MASTER = "StrongMasterPassword123"
+STRONG = "Zk9#mP2$vL7qRt4Wz!x"  # заведомо надёжный: без слов из словаря (MASTER анализатор считает слабым)
 _RealCreateVaultDialog = guiapp.CreateVaultDialog  # _create_vault подменяет класс в модуле на фейк
 
 
@@ -59,44 +64,25 @@ _RealCreateVaultDialog = guiapp.CreateVaultDialog  # _create_vault подмен�
 def app(tmp_path, monkeypatch):
     monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: None)
     monkeypatch.setattr(guiapp.messagebox, "showinfo", lambda *a, **k: None)
+    monkeypatch.setenv("MENEDGER_STATE", str(tmp_path / "state.json"))
     instance = guiapp.App()
     instance._path_var.set(str(tmp_path / "test.vault"))
+    instance._unlock_view.refresh()
     yield instance
     instance.destroy()
 
 
-def _create_vault(app, monkeypatch, master=MASTER):
-    # `_on_create` теперь открывает `CreateVaultDialog` (раздел 10.18) —
-    # обычный Toplevel с полями и `self.wait_window(dialog)`, а не пару
-    # `simpledialog.askstring`. Для тестов, которым нужен просто готовый
-    # разблокированный vault (а не проверка самого диалога), подменяем
-    # класс диалога на фейковый: реальный `tk.Toplevel`, который сразу
-    # выставляет `.result` и планирует своё уничтожение через `after(0,
-    # ...)`. **Найденный при написании этого теста нюанс:** уничтожить
-    # окно СРАЗУ в `__init__` нельзя — `App._on_create` вызывает
-    # `wait_window` уже ПОСЛЕ того, как конструктор отработал, и на
-    # момент вызова путь окна в Tcl уже невалиден
-    # (`_tkinter.TclError: bad window path name`), а не "возвращается
-    # немедленно", как можно было бы ожидать. `after(0, self.destroy)`
-    # правильно откладывает уничтожение на момент, когда `wait_window`
-    # уже запустил свой локальный цикл обработки событий Tcl и обработает
-    # отложенный вызов как обычное событие. Валидацию полей самого
-    # диалога (несовпадение, короткий пароль, слабый пароль) тесты
-    # проверяют отдельно, вызывая `CreateVaultDialog` напрямую — см. ниже.
-    class _FakeCreateVaultDialog(tk.Toplevel):
-        def __init__(self, parent):
-            super().__init__(parent)
-            self.result = master
-            self.after(0, self.destroy)
-
-    monkeypatch.setattr(guiapp, "CreateVaultDialog", _FakeCreateVaultDialog)
-    app._on_create()
+def _create_vault(app, monkeypatch, master=MASTER, name="Личное"):
+    # Экран «Новое хранилище» (раздел 10.81) проверяют отдельные тесты ниже; тем, кому
+    # нужно просто готовое разблокированное хранилище, создаём его тем же путём, которым
+    # экран завершает создание, — `App._finish_create`.
+    app._finish_create(name, master)
 
 
 def test_create_vault(app, monkeypatch, tmp_path):
     _create_vault(app, monkeypatch)
 
-    assert app.data == {"entries": []}
+    assert app.data == {"entries": [], "name": "Личное"}
     assert app.master_password == MASTER
     assert Path(app._path_var.get()).exists()
 
@@ -156,7 +142,7 @@ def test_unlock_wrong_master_password_shows_status(app, monkeypatch):
     app._on_unlock()
 
     assert app.data is None
-    assert "Неверный мастер-пароль" in app._unlock_status.cget("text")
+    assert "Неверный мастер-пароль" in app._unlock_view.status
 
 
 def test_unlock_correct_master_password(app, monkeypatch):
@@ -166,7 +152,7 @@ def test_unlock_correct_master_password(app, monkeypatch):
     app._password_var.set(MASTER)
     app._on_unlock()
 
-    assert app.data == {"entries": []}
+    assert app.data == {"entries": [], "name": "Личное"}
     assert app.master_password == MASTER
 
 
@@ -387,11 +373,11 @@ def test_toggle_maximize_roundtrip_restores_geometry(app):
 def test_titlebar_theme_follows_screen(app, monkeypatch):
     if app._titlebar is None:
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
-    assert app._titlebar._theme == "dark"
+    assert app._titlebar._theme == "unlock"
     _create_vault(app, monkeypatch)
     assert app._titlebar._theme == "main"
     app._on_lock()
-    assert app._titlebar._theme == "dark"
+    assert app._titlebar._theme == "unlock"
 
 
 def test_dialog_gets_close_only_titlebar(app):
@@ -645,56 +631,223 @@ def test_other_dialogs_have_no_overlays_without_transparency_support(app):
         dialog.destroy()
 
 
-def test_unlock_screen_buttons_match_field_height(app):
-    """Раздел 10.46: поля ввода и ВСЕ кнопки экрана разблокировки одной высоты."""
+def _unlock_view(app):
     app.update()
-    expected = guiapp._px(guiapp._UNLOCK_CONTROL_HEIGHT)
-    buttons = _find_widgets_by_class(app._unlock_frame, "TButton")
-    assert len(buttons) == 4  # выбрать файл, глаз, разблокировать, создать
-    assert {b.winfo_height() for b in buttons} == {expected}
-    entries = _find_widgets_by_class(app._unlock_frame, "TEntry")
-    assert entries
-    for entry in entries:
-        assert entry.master.winfo_height() == expected  # плитка поля
+    return app._unlock_view
 
 
-def test_unlock_card_has_rounded_backdrop_matching_its_size(app):
-    """Раздел 10.47: белая карточка экрана разблокировки — скруглённая подложка
-    ровно по размеру карточки (а не рамка-прямоугольник)."""
-    app.update()
-    app.update_idletasks()
-    app.update()
-    card = app._unlock_card
-    backdrops = [w for w in card.winfo_children() if hasattr(w, "photo")]
-    assert len(backdrops) == 1
-    photo = backdrops[0].photo
-    assert (photo.width(), photo.height()) == (card.winfo_width(), card.winfo_height())
-    assert str(card.cget("relief")) != "solid"
+def test_unlock_screen_shows_reference_texts_without_hints(app):
+    """Раздел 10.81: экран блокировки — как на референсе: гора, название, подпись, поле
+    пароля, «Открыть», «или», «Создать новое хранилище», подпись внизу; ни кнопки выбора
+    файла, ни «глаза», ни подсказок клавиш."""
+    view = _unlock_view(app)
+    texts = _canvas_texts(view)
+    for expected in (
+        "Хранилище тайн",
+        "Введите мастер-пароль",
+        "Мастер-пароль",
+        "Открыть",
+        "или",
+        "Создать новое хранилище",
+        "Мастер-пароль не восстанавливается.",
+    ):
+        assert expected in texts, texts
+    assert not any("Ctrl" in text or "Выберите файл" in text for text in texts)
+    assert not _find_widgets_by_class(app, "TButton")  # ни одной ttk-кнопки на экране
+    assert view.mode == "unlock"
 
 
-def test_window_shrinks_around_card_on_unlock_screen(app):
-    """Раздел 10.48: на экране разблокировки окно ужато вокруг карточки (немного
-    тёмного фона), на главном — обычного размера, и обратно после блокировки."""
-    app.update()
+def test_unlock_screen_has_reference_size_and_bottom_group_follows_height(app):
+    view = _unlock_view(app)
     ax, ay, aw, ah = app._work_area()
-    card = app._unlock_card
-    margin = 2 * guiapp._px(guiapp._UNLOCK_MARGIN_X)
-    unlock_size = (app.winfo_width(), app.winfo_height())
-    assert unlock_size[0] == min(card.winfo_reqwidth() + margin, aw)
-    assert unlock_size[0] < guiapp._px(guiapp._MAIN_WINDOW_SIZE[0])
+    bar = 0 if app._native_frame else guiapp._px(guiapp._CHROME_BAR_HEIGHT)
+    assert app.winfo_width() == min(guiapp._px(guiapp._UV_WINDOW_SIZE[0]), aw)
+    assert app.winfo_height() == min(guiapp._px(guiapp._UV_WINDOW_SIZE[1]) + bar, ah)
+    # нижняя группа прижата к низу: «Создать новое хранилище» ниже «Открыть» и выше края
+    open_y = view.bbox(_text_item(view, "Открыть"))[1]
+    create_item = _text_item(view, "Создать новое хранилище")
+    assert open_y < view.bbox(create_item)[1] < view.winfo_height()
 
-    app.data = {"entries": []}
-    app._show_main()
-    app.update()
-    assert app.winfo_width() == min(guiapp._px(guiapp._MAIN_WINDOW_SIZE[0]), aw)
-    assert app.minsize() == (
-        min(guiapp._px(guiapp._MAIN_MIN_SIZE[0]), aw),
-        min(guiapp._px(guiapp._MAIN_MIN_SIZE[1]), ah),
-    )
 
+def test_unlock_last_login_line_appears_after_first_unlock(app, monkeypatch):
+    view = _unlock_view(app)
+    assert not any(text.startswith("Последний вход") for text in _canvas_texts(view))
+
+    _create_vault(app, monkeypatch)  # remember_unlock
     app._on_lock()
     app.update()
-    assert (app.winfo_width(), app.winfo_height()) == unlock_size
+    texts = _canvas_texts(app._unlock_view)
+    assert any(text.startswith("Последний вход: сегодня, ") for text in texts), texts
+
+
+def test_unlock_open_button_click_unlocks(app, monkeypatch):
+    _create_vault(app, monkeypatch)
+    app._on_lock()
+    view = _unlock_view(app)
+    app._password_var.set(MASTER)
+    _click_text(view, "Открыть")
+    assert app.data is not None and app.master_password == MASTER
+
+
+def test_unlock_missing_file_shows_message(app):
+    view = _unlock_view(app)
+    app._password_var.set(MASTER)
+    app._on_unlock()
+    assert "не найден" in view.status
+    app.update()
+    assert any("не найден" in text for text in _canvas_texts(view))
+
+
+def test_create_screen_opens_and_back_clears_fields(app):
+    view = _unlock_view(app)
+    _click_text(view, "Создать новое хранилище")
+    app.update()
+    assert view.mode == "create"
+    texts = _canvas_texts(view)
+    for expected in (
+        "Назад",
+        "Новое хранилище",
+        "Название хранилища",
+        "Мастер-пароль",
+        "Повторите мастер-пароль",
+        "Мастер-пароль нельзя восстановить. Если вы его",
+        "Я сохранил мастер-пароль в надёжном месте",
+        "Создать хранилище",
+    ):
+        assert expected in texts, texts
+    view.pw1_var.set("secret-secret")
+    view.saved_var.set(True)
+    _click_text(view, "Назад")
+    app.update()
+    assert view.mode == "unlock"
+    assert view.pw1_var.get() == "" and not view.saved_var.get()
+    assert "Открыть" in _canvas_texts(view)
+
+
+def _fill_create(view, name="Работа", password=MASTER, confirm=None, saved=True):
+    view.name_var.set(name)
+    view.pw1_var.set(password)
+    view.pw2_var.set(password if confirm is None else confirm)
+    view.saved_var.set(saved)
+
+
+def test_create_screen_validation_messages(app, monkeypatch):
+    view = _unlock_view(app)
+    app._on_create()
+    app.update()
+    _fill_create(view, confirm="something else")
+    view._submit_create()
+    assert view.error == "Пароли не совпадают." and app.data is None
+
+    _fill_create(view, password="short")
+    view._submit_create()
+    assert "не короче" in view.error and app.data is None
+
+    _fill_create(view, name="  ")
+    view._submit_create()
+    assert "название" in view.error.lower() and app.data is None
+
+    _fill_create(view, saved=False)
+    view._submit_create()
+    assert "сохранили" in view.error and app.data is None
+    app.update()
+    assert "Подтвердите, что сохранили мастер-пароль." in _canvas_texts(view)
+
+    view.saved_var.set(True)  # любое изменение полей снимает сообщение
+    assert view.error == ""
+
+
+def test_create_screen_live_status_and_strength(app):
+    view = _unlock_view(app)
+    app._on_create()
+    _fill_create(view, password=STRONG, confirm=STRONG[:-1])
+    app.update()
+    texts = _canvas_texts(view)
+    assert "Пароли не совпадают" in texts
+    assert any(text.startswith("Надёжный · ") and text.endswith(" бит") for text in texts), texts
+    view.pw2_var.set(STRONG)
+    app.update()
+    assert "Пароли совпадают" in _canvas_texts(view)
+    view.pw1_var.set("aaaaaaaa")
+    app.update()
+    assert any(text.startswith("Слабый · ") for text in _canvas_texts(view))
+
+
+def test_create_screen_weak_password_asks_confirmation(app, monkeypatch):
+    view = _unlock_view(app)
+    app._on_create()
+    _fill_create(view, password="aaaaaaaa")
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: False)
+    view._submit_create()
+    assert app.data is None
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: True)
+    view._submit_create()
+    assert app.master_password == "aaaaaaaa"
+
+
+def test_create_screen_creates_named_vault_and_main_screen_shows_name(app):
+    view = _unlock_view(app)
+    app._on_create()
+    _fill_create(view, name="Работа", password=STRONG)
+    app.update()
+    _click_text(view, "Создать хранилище")
+    app.update()
+    assert app.data == {"entries": [], "name": "Работа"}
+    assert Path(app._path_var.get()).exists()
+    assert "Работа" in _canvas_texts(app._view.sidebar)
+    # пароль и поля не остаются в экране блокировки после создания
+    assert view.pw1_var.get() == "" and view.mode == "unlock"
+
+
+def test_create_screen_asks_before_overwriting_existing_vault(app, monkeypatch):
+    view = _unlock_view(app)
+    app._finish_create("Первое", MASTER)
+    app._on_lock()
+    app._on_create()
+    _fill_create(view, name="Второе", password="Qv7!rT2#kLp9$wXe")
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: False)
+    view._submit_create()
+    assert app.data is None
+    from vault.crypto import decrypt_vault
+    from vault.storage import load_vault_file
+
+    assert decrypt_vault(load_vault_file(Path(app._path_var.get())), MASTER)["name"] == "Первое"
+
+
+def test_unlock_screen_escape_goes_back_from_create(app):
+    view = _unlock_view(app)
+    app._on_create()
+    view._on_escape()
+    assert view.mode == "unlock"
+
+
+def test_unlock_screen_ctrl_o_chooses_file(app, monkeypatch, tmp_path):
+    view = _unlock_view(app)
+    chosen = tmp_path / "other.vault"
+    monkeypatch.setattr(guiapp.filedialog, "askopenfilename", lambda **k: str(chosen))
+    saved = {}
+    monkeypatch.setattr(guiapp.filedialog, "asksaveasfilename", lambda **k: saved.setdefault("p", str(tmp_path / "new.vault")))
+    event = SimpleNamespace(keysym="o")
+    view._on_control_key(event)
+    assert app._path_var.get() == str(chosen)
+    app._on_create()
+    view._on_control_key(SimpleNamespace(keysym="Cyrillic_shcha"))
+    assert app._path_var.get() == saved["p"]
+
+
+def test_unlock_screen_scrolls_when_window_is_shorter_than_content(app):
+    view = _unlock_view(app)
+    app._on_create()
+    app.update()
+    assert view._virtual_height() >= guiapp._UV_MIN_HEIGHT["create"]
+    assert view._scrollable() == (view._virtual_height() * guiapp._UI_SCALE > view.winfo_height() + 1)
+
+
+def test_unlock_screen_remembers_last_vault_path(app, monkeypatch, tmp_path):
+    _create_vault(app, monkeypatch)
+    from vault.common import last_vault_path
+
+    assert last_vault_path() == Path(app._path_var.get())
 
 
 def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
@@ -707,7 +860,7 @@ def test_main_window_rounded_corners_follow_screen_and_maximize(monkeypatch):
     try:
         window.update()
         assert window.cget("background").lower() != guiapp._WINDOW_KEY_COLOR  # раздел 10.59
-        assert window.cget("background").lower() == guiapp._SIDEBAR_BG  # экран разблокировки — тёмный
+        assert window.cget("background").lower() == guiapp._theme_window_bg("unlock")  # экран блокировки — тёмный
         assert len(window._window_corners) >= 4
         unlock_photos = [label.photo for label in window._window_corners]
         window.data = {"entries": []}

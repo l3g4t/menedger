@@ -144,6 +144,27 @@ def format_event_date(iso: str, today: date | None = None) -> str:
     return text if moment.year == today.year else f"{text} {moment.year}"
 
 
+def format_last_login(iso: str | None, now: datetime | None = None) -> str | None:
+    """«сегодня, 09:14» / «вчера, 21:30» / «12 окт., 09:14» (и год, если не нынешний) — для
+    строки «Последний вход» на экране блокировки. Время показывается ЛОКАЛЬНОЕ (в файле
+    состояния оно в UTC). Нет или не разобрать — None."""
+    moment = _parse(iso)
+    if moment is None:
+        return None
+    now = now or datetime.now().astimezone()
+    local = moment.astimezone(now.tzinfo)
+    clock = local.strftime("%H:%M")
+    days = (now.date() - local.date()).days
+    if days == 0:
+        return f"сегодня, {clock}"
+    if days == 1:
+        return f"вчера, {clock}"
+    text = f"{local.day} {_MONTHS[local.month - 1]}"
+    if local.year != now.year:
+        text += f" {local.year}"
+    return f"{text}, {clock}"
+
+
 def history_lines(entry: dict, today: date | None = None) -> list[str]:
     """Строки истории, новые сверху: «12 окт. — пароль изменён». У старых записей без
     истории — одна строка по `created_at`: честнее «пароль установлен», чем «создана»,
