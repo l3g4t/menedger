@@ -253,12 +253,6 @@ def test_audit_dialog_close_button_is_not_squeezed_to_zero(app, monkeypatch):
 
     audit.destroy()
 
-    copied = []
-    generator = guiapp.GeneratorDialog(app, on_copy=copied.append)
-    generator._on_copy_click()
-    assert len(copied) == 1
-    generator.destroy()
-
 
 def test_resource_dir_in_normal_run_is_gui_package_dir():
     assert guiapp._gui_resource_dir() == Path(guiapp.__file__).resolve().parent
@@ -383,7 +377,9 @@ def test_titlebar_theme_follows_screen(app, monkeypatch):
 def test_dialog_gets_close_only_titlebar(app):
     if app._titlebar is None:
         pytest.skip("системная рамка (MENEDGER_NATIVE_FRAME)")
-    dialog = guiapp.GeneratorDialog(app, lambda _v: None)
+    from assistant.advisor import AdvisorReport
+
+    dialog = guiapp.AuditDialog(app, AdvisorReport())
     try:
         bars = [w for w in dialog.winfo_children() if isinstance(w, guiapp.TitleBar)]
         assert len(bars) == 1
@@ -564,7 +560,6 @@ def test_other_dialogs_get_rounded_corner_overlays(app, monkeypatch):
     dialogs = [
         guiapp.CreateVaultDialog(app),
         guiapp.AuditDialog(app, AdvisorReport()),
-        guiapp.GeneratorDialog(app, lambda password: None),
     ]
     try:
         for dialog in dialogs:
@@ -599,7 +594,6 @@ def test_dialogs_show_key_color_only_in_rounded_corners(app, monkeypatch, tmp_pa
         guiapp.AssistantDialog(app),
         guiapp.CreateVaultDialog(app),
         guiapp.AuditDialog(app, AdvisorReport()),
-        guiapp.GeneratorDialog(app, lambda password: None),
     ]
     try:
         for dialog in dialogs:
@@ -1177,7 +1171,9 @@ def test_native_corner_mode_uses_dwm_and_falls_back_to_region(monkeypatch, dwm_r
         assert any(c[0] == "DwmSetWindowAttribute" for c in fake.calls)
         has_region = any(c[0] == "SetWindowRgn" for c in fake.calls)
         assert has_region == expect_region
-        dialog = guiapp.GeneratorDialog(window, lambda password: None)
+        from assistant.advisor import AdvisorReport
+
+        dialog = guiapp.AuditDialog(window, AdvisorReport())
         for _ in range(4):
             dialog.update()
         assert dialog._corner_overlay is None
@@ -1213,7 +1209,9 @@ def test_region_mode_applies_region_to_main_window_and_dialogs_on_resize(monkeyp
         window.update()
         window.update()
         assert len([c for c in fake.calls if c[0] == "SetWindowRgn"]) > before  # обновилась при ресайзе
-        dialog = guiapp.GeneratorDialog(window, lambda password: None)
+        from assistant.advisor import AdvisorReport
+
+        dialog = guiapp.AuditDialog(window, AdvisorReport())
         dialog.update()
         dialog.update()
         assert dialog._corner_overlay is None
@@ -1293,56 +1291,6 @@ def test_dialog_footer_buttons_have_equal_height_and_width(app):
         finally:
             dialog.destroy()
 
-
-
-def test_generator_copy_button_is_separate_from_field_and_same_height(app, monkeypatch):
-    """Раздел 10.53: поле пароля и кнопка копирования — отдельные виджеты
-    одной высоты (кнопка не внутри плитки поля)."""
-    _create_vault(app, monkeypatch)
-    generator = guiapp.GeneratorDialog(app, on_copy=lambda _text: None)
-    generator.update_idletasks()
-    button = generator._copy_button
-    entry = _find_widgets_by_class(generator, "TEntry")[0]
-    box = entry.nametowidget(entry.winfo_parent())
-    assert button.winfo_toplevel() is generator
-    # кнопка не потомок плитки поля
-    parent = button
-    while parent is not generator and parent is not box:
-        parent = parent.nametowidget(parent.winfo_parent())
-    assert parent is not box
-    cell = button.nametowidget(button.winfo_parent())
-    assert cell.winfo_height() == box.winfo_height()
-    assert cell.winfo_width() == cell.winfo_height()
-    assert button.winfo_rootx() >= box.winfo_rootx() + box.winfo_width()
-    generator.destroy()
-
-
-def test_generator_dialog_rounded_corners_and_stays_in_work_area(app, monkeypatch):
-    """Раздел 10.54: у генератора есть накладки скруглённых углов (при
-    поддержке прозрачности) и окно не выходит за рабочую область."""
-    _create_vault(app, monkeypatch)
-    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda w: True)
-    generator = guiapp.GeneratorDialog(app, on_copy=lambda _text: None)
-    generator.update_idletasks()
-    assert generator._corner_overlay and len(generator._corner_overlay) >= 4
-    left, top, width, height = app._work_area()
-    assert generator.winfo_x() >= left and generator.winfo_y() >= top
-    assert generator.winfo_height() <= height
-    generator.destroy()
-
-
-def test_generator_dialog_is_shown_ready_and_corner_overlays_are_merged(app, monkeypatch):
-    """Раздел 10.55: диалог строится скрытым и показывается готовым;
-    одинаковые строки накладок углов склеены (виджетов меньше, чем строк)."""
-    _create_vault(app, monkeypatch)
-    monkeypatch.setattr(guiapp, "_enable_transparent_corners", lambda w: True)
-    generator = guiapp.GeneratorDialog(app, on_copy=lambda _text: None)
-    generator.update()
-    assert generator.state() == "normal"
-    assert generator.winfo_viewable()
-    radius_rows = guiapp._px(guiapp._VIEW_WINDOW_RADIUS) + 4
-    assert len(generator._corner_overlay) < 4 * radius_rows
-    generator.destroy()
 
 
 def _entries(widget):
@@ -1909,11 +1857,12 @@ def test_clipboard_is_cleared_even_when_vault_is_locked(app, monkeypatch):
 
 def test_clipboard_is_cleared_after_dialog_that_copied_is_closed(app, monkeypatch):
     monkeypatch.setattr(guiapp, "CLIPBOARD_CLEAR_DELAY_MS", 200)
-    generator = guiapp.GeneratorDialog(app, on_copy=app._copy_to_clipboard)
-    generator.update()
-    generator._on_copy_click()
-    assert _clipboard(app) != ""
-    generator.destroy()
+    view = _open_main(app, monkeypatch)
+    view.open_generator()
+    view.update()
+    _click_text(view.detail, "Копировать")
+    assert _clipboard(app) == view._gen_password != ""
+    view.close_panel()
     _wait(app, 0.6)
     assert _clipboard(app) == ""
 
@@ -2726,3 +2675,167 @@ def test_edit_form_marks_focused_field_with_light_border(app, monkeypatch):
     assert view._focus == "password"
     view._set_focus(None, only="site")  # потеря фокуса другим полем ничего не сбрасывает
     assert view._focus == "password"
+
+
+# --- Генератор в правой панели (раздел 10.84) ----------------------------------
+
+
+def _open_generator(app, monkeypatch, *entries):
+    view = _open_main(app, monkeypatch, *entries)
+    _click_text(view.head, "Генератор")
+    view.update()
+    return view
+
+
+def test_generator_pill_opens_panel_in_main_window_and_toggles(app, monkeypatch):
+    first, second = _rec("a.com"), _rec("b.com", days=3)
+    view = _open_main(app, monkeypatch, first, second)
+    view.select(first)
+    _click_text(view.head, "Генератор")
+    assert view.panel == "gen" and view.selected is None  # в списке ничего не подсвечено, как на макете
+    texts = _canvas_texts(view.detail)
+    for wanted in ("Генератор пароля", "Копировать", "Другой", "Случайный", "Из слов", "PIN", "Длина", "20",
+                   "Заглавные", "Строчные", "Цифры", "Символы", "Без похожих знаков", "Пароль нигде не сохраняется",
+                   "Сохранить в запись..."):
+        assert wanted in texts, wanted
+    assert len(view._gen_password) == 20 and view._gen_bits > 100
+    assert any(t.startswith("Очень надёжный") and t.endswith(" бит") for t in texts)
+    _click_text(view.head, "Генератор")  # повторное нажатие закрывает и возвращает выбор
+    assert view.panel is None and view.selected is first and view._gen_password == ""
+    assert "Генератор пароля" not in _canvas_texts(view.detail)
+
+
+def test_generator_again_options_and_modes(app, monkeypatch):
+    view = _open_generator(app, monkeypatch)
+    first = view._gen_password
+    _click_text(view.detail, "Другой")
+    assert view._gen_password != first and len(view._gen_password) == 20
+    for _ in range(3):
+        _click_text(view.detail, "Цифры")
+        assert not any(ch.isdigit() for ch in view._gen_password)
+        _click_text(view.detail, "Цифры")
+        assert view._gen_opts["digits"] is True
+    _click_text(view.detail, "Без похожих знаков")
+    assert view._gen_opts["clear"] is True and not any(ch in "0O1lI" for ch in view._gen_password)
+    # хотя бы один набор символов должен остаться
+    for key, label in (("lower", "Строчные"), ("digits", "Цифры"), ("symbols", "Символы"), ("upper", "Заглавные")):
+        _click_text(view.detail, label)
+    assert sum(view._gen_opts[k] for k in ("upper", "lower", "digits", "symbols")) == 1
+
+    _click_text(view.detail, "Из слов")
+    assert view._gen_mode == "words" and "Слов" in _canvas_texts(view.detail) and "5" in _canvas_texts(view.detail)
+    assert len(view._gen_password.split("-")) == 5
+    assert "Первая буква заглавная" in _canvas_texts(view.detail)
+    _click_text(view.detail, "PIN")
+    assert view._gen_mode == "pin" and len(view._gen_password) == 6 and view._gen_password.isdigit()
+    assert "Заглавные" not in _canvas_texts(view.detail)
+
+
+def test_generator_slider_and_arrow_keys_change_length(app, monkeypatch):
+    view = _open_generator(app, monkeypatch)
+    x0, x1, y = view._slider
+    view.detail.event_generate("<ButtonPress-1>", x=int(x0 + 0.5 * (x1 - x0)), y=int(y))
+    view.detail.update()
+    assert 34 <= view._gen_len["random"] <= 38 and len(view._gen_password) == view._gen_len["random"]
+    view.detail.event_generate("<B1-Motion>", x=int(x1 + 50), y=int(y))
+    assert view._gen_len["random"] == 64
+    view.detail.event_generate("<ButtonRelease-1>", x=int(x1), y=int(y))
+    view.detail.event_generate("<B1-Motion>", x=int(x0), y=int(y))
+    assert view._gen_len["random"] == 64  # перетаскивание закончилось
+    view._gen_step(-1)
+    assert view._gen_len["random"] == 63
+    view._gen_set_length(2)
+    assert view._gen_len["random"] == 8  # не меньше минимума
+    # длинный пароль переносится на две строки, а не вылезает из рамки
+    view._gen_set_length(64)
+    assert len(view._gen_password) == 64
+    width = view.detail.winfo_width()
+    for item in view.detail.find_withtag("dyn"):
+        box = view.detail.bbox(item)
+        assert box is None or box[2] <= width  # ничто не вылезает за правый край панели
+
+
+def test_generator_level_thresholds(app, monkeypatch):
+    view = _open_generator(app, monkeypatch)
+    for bits, segments, word in ((20, 1, "Слабый"), (50, 2, "Средний"), (70, 3, "Надёжный"), (100, 4, "Надёжный"), (130, 5, "Очень надёжный")):
+        view._gen_bits = bits
+        assert view._gen_level()[:2] == (segments, word)
+
+
+def test_generator_copy_button_copies_password(app, monkeypatch):
+    view = _open_generator(app, monkeypatch)
+    _click_text(view.detail, "Копировать")
+    assert _clipboard(app) == view._gen_password
+
+
+def test_save_panel_replaces_password_of_chosen_entry(app, monkeypatch):
+    github, notion = _rec("GitHub", "dev@example.com", password="Old#Pass1x9"), _rec("Notion", "team@example.com", days=5)
+    view = _open_main(app, monkeypatch, github, notion)
+    view.select(notion)
+    _click_text(view.head, "Генератор")
+    password = view._gen_password
+    _click_text(view.detail, "Сохранить в запись...")
+    assert view.panel == "save" and view._save_target is notion  # предвыбрана запись, которая была открыта
+    texts = _canvas_texts(view.detail)
+    for wanted in ("Генератор", "Сохранить пароль", "Выберите запись, в которую подставить пароль.", "GitHub", "Notion",
+                   "Создать новую запись с этим паролем", "Заменить пароль", "Отмена", "20 символов"):
+        assert wanted in texts, wanted
+    assert [t for t in texts if t in ("GitHub", "Notion")] == ["GitHub", "Notion"]  # по алфавиту
+    assert any("Пароль в записи Notion будет заменён" in t for t in texts)
+    _click_text(view.detail, "GitHub")
+    assert view._save_target is github
+    _click_text(view.detail, "Заменить пароль")
+    assert github["password"] == password and view.panel is None and view.selected is github
+    assert github["history"][-1]["event"] == "password"
+    assert notion["password"] != password
+    assert app._save_vault() and view._gen_password == ""
+
+
+def test_save_panel_search_back_cancel_and_scroll(app, monkeypatch):
+    rows = [_rec(f"site{i}.com", f"user{i}", days=i) for i in range(7)]
+    view = _open_generator(app, monkeypatch, *rows)
+    _click_text(view.detail, "Сохранить в запись...")
+    assert len([t for t in _canvas_texts(view.detail) if t.endswith(".com")]) == 4  # видно четыре строки
+    view._on_detail_wheel(1)
+    view._on_detail_wheel(1)
+    assert [t for t in _canvas_texts(view.detail) if t.endswith(".com")][0] == "site2.com"
+    view._on_detail_wheel(5)
+    assert view._save_scroll == 3  # не дальше последней строки
+    view._save_var.set("site5")
+    assert [t for t in _canvas_texts(view.detail) if t.endswith(".com")] == ["site5.com"]
+    view._save_var.set("нет такой")
+    assert "Ничего не найдено" in _canvas_texts(view.detail)
+    _click_text(view.detail, "Генератор")  # «‹ Генератор» — назад к генератору
+    assert view.panel == "gen" and view._gen_password
+    _click_text(view.detail, "Сохранить в запись...")
+    _click_text(view.detail, "Отмена")
+    assert view.panel is None and "Сохранить пароль" not in _canvas_texts(view.detail)
+
+
+def test_save_panel_creates_new_entry_form_with_generated_password(app, monkeypatch):
+    view = _open_generator(app, monkeypatch, _rec("a.com"))
+    password = view._gen_password
+    _click_text(view.detail, "Сохранить в запись...")
+    _click_text(view.detail, "Создать новую запись с этим паролем")
+    assert view.panel is None and view.editing and view._edit_entry is None
+    assert view._ev["password"].get() == password and view._edit_pw_visible
+    assert view._is_dirty()  # пароль подставлен, форма «не сохранена»
+
+
+def test_generator_panel_is_dropped_on_lock_and_when_entry_selected(app, monkeypatch):
+    entry = _rec("a.com")
+    view = _open_generator(app, monkeypatch, entry)
+    view.select(entry)
+    assert view.panel is None and view._gen_password == ""
+    _click_text(view.head, "Генератор")
+    assert view._gen_password
+    app._on_lock()
+    assert view.panel is None and view._gen_password == "" and view._save_target is None
+
+
+def test_generator_pill_is_highlighted_while_panel_is_open(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+    on = lambda: any(k[0] == "rr" and k[3] == guiapp._MV_PILL_ON_FILL for k in view._images)  # noqa: E731
+    assert not on()
+    _click_text(view.head, "Генератор")
+    assert view.panel == "gen" and on()

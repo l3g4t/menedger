@@ -45,7 +45,22 @@ from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, AdvisorReport, analyz
 from assistant.analyzer import analyze as analyze_password
 from assistant.analyzer import summary as analysis_summary
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
-from assistant.generator import generate_password
+from assistant.generator import (
+    MAX_LENGTH as GEN_MAX_LENGTH,
+    MIN_LENGTH as GEN_MIN_LENGTH,
+    PASSPHRASE_DEFAULT_WORDS,
+    PASSPHRASE_MAX_WORDS,
+    PASSPHRASE_MIN_WORDS,
+    PIN_DEFAULT_LENGTH,
+    PIN_MAX_LENGTH,
+    PIN_MIN_LENGTH,
+    generate_passphrase,
+    generate_password,
+    generate_pin,
+    passphrase_bits,
+    pin_bits,
+    random_password_bits,
+)
 from assistant.llm import Assistant
 from assistant.offline import plural as ru_plural
 from assistant.prompt import context_from_report, redact_secrets
@@ -910,6 +925,46 @@ _MV_HINT = "#8d9db3"
 _MV_SEP_EDIT = "#1c2d42"
 _MV_DROP_LINE = "#1d3347"
 _MV_DOT = "\u2219"  # «∙» — точка в поле пароля
+# панель генератора и «Сохранить пароль» (раздел 10.84)
+_MV_PW_LETTER = "#f2f4ef"
+_MV_PW_DIGIT = "#e2c08c"
+_MV_PW_SYMBOL = "#86b0dd"
+_MV_PANEL_LINE = "#1a2c42"
+_MV_PILL_ON_FILL = "#10273f"
+_MV_PILL_ON_LINE = "#6b8bb0"
+_MV_ROW_FILL = "#0c1b2b"
+_MV_ROW_LINE = "#28415b"
+_MV_ROW_ON_FILL = "#122f4c"
+_MV_ROW_ON_LINE = "#6c8db1"
+_MV_RADIO_ON = "#8db8e2"
+_MV_RADIO_OFF = "#435873"
+_MV_SEG_ON = "#82b795"
+_MV_SEG_OFF = "#1c2f45"
+_MV_TRACK = "#3c3c3e"
+_MV_THUMB = "#7fb0e0"
+_MV_TAB_LINE = "#1c3047"
+_MV_TAB_ON = "#18314d"
+_MV_TAB_OFF_TEXT = "#7f96ab"
+_MV_INFO_LINE = "#223650"
+_MV_FOOT_TEXT = "#7d90a3"
+_MV_GEN_RANGES = {  # режим -> (минимум, максимум, подпись слайдера)
+    "random": (GEN_MIN_LENGTH, GEN_MAX_LENGTH, "Длина"),
+    "words": (PASSPHRASE_MIN_WORDS, PASSPHRASE_MAX_WORDS, "Слов"),
+    "pin": (PIN_MIN_LENGTH, PIN_MAX_LENGTH, "Длина"),
+}
+_MV_GEN_TABS = (("random", "Случайный"), ("words", "Из слов"), ("pin", "PIN"))
+_MV_GEN_OPTIONS = {  # режим -> (ключ, подпись, подсказка справа)
+    "random": (
+        ("upper", "Заглавные", "A-Z"),
+        ("lower", "Строчные", "a-z"),
+        ("digits", "Цифры", "0\u20139"),
+        ("symbols", "Символы", "-_.!?"),
+        ("clear", "Без похожих знаков", "0 O l 1"),
+    ),
+    "words": (("cap", "Первая буква заглавная", "Ab"), ("digit", "Цифра в конце", "0\u20139")),
+    "pin": (),
+}
+_MV_SAVE_HINT = "Найти запись"
 _MV_SEARCH_HINT = "Поиск"
 _MV_GROUP_TITLES = {"today": "Сегодня", "week": "На этой неделе", "earlier": "Ранее"}
 
@@ -1082,6 +1137,21 @@ class MainView(_DrawKit, tk.Frame):
         self._focus: str | None = None
         self._tag_input_open = False
         self._tag_choice = 0
+        # генератор и «Сохранить пароль» в правой панели (раздел 10.84)
+        self.panel: str | None = None  # None | "gen" | "save"
+        self._panel_prev: dict | None = None
+        self._gen_mode = "random"
+        self._gen_len = {"random": DEFAULT_GENERATED_LENGTH, "words": PASSPHRASE_DEFAULT_WORDS, "pin": PIN_DEFAULT_LENGTH}
+        self._gen_opts = {"upper": True, "lower": True, "digits": True, "symbols": True, "clear": False, "cap": True, "digit": False}
+        self._gen_password = ""
+        self._gen_bits = 0.0
+        self._slider: tuple[float, float, float] | None = None  # (x0, x1, y) дорожки в px холста
+        self._slider_drag = False
+        self._save_target: dict | None = None
+        self._save_scroll = 0
+        self._save_active = False
+        self._save_var = tk.StringVar(value=_MV_SAVE_HINT)
+        self._save_entry: tk.Entry | None = None
 
         line = max(1, _px(1))
         self.sidebar = tk.Canvas(self, width=_px(224), bg=_MV_SIDEBAR_BG, bd=0, highlightthickness=0)
@@ -1124,7 +1194,14 @@ class MainView(_DrawKit, tk.Frame):
         self.list.bind("<Button-5>", lambda _e: self.list.yview_scroll(3, "units"))
         self.list.bind("<Up>", lambda _e: self._move_selection(-1))
         self.list.bind("<Down>", lambda _e: self._move_selection(1))
-        self.detail.bind("<MouseWheel>", lambda e: self.detail.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        self.detail.bind("<MouseWheel>", lambda e: self._on_detail_wheel(-1 if e.delta > 0 else 1))
+        self.detail.bind("<Button-4>", lambda _e: self._on_detail_wheel(-1))
+        self.detail.bind("<Button-5>", lambda _e: self._on_detail_wheel(1))
+        self.detail.bind("<ButtonPress-1>", self._slider_press, add="+")
+        self.detail.bind("<B1-Motion>", self._slider_move, add="+")
+        self.detail.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_slider_drag", False), add="+")
+        self.detail.bind("<Left>", lambda _e: self._gen_step(-1))
+        self.detail.bind("<Right>", lambda _e: self._gen_step(1))
         app.bind("<Control-KeyPress>", self._on_control_key, add="+")
 
     # --- общее -----------------------------------------------------------------
@@ -1268,6 +1345,10 @@ class MainView(_DrawKit, tk.Frame):
     def clear(self) -> None:
         """Блокировка хранилища: ничего не должно остаться на экране."""
         self.end_edit()
+        self.close_panel(restore=False)
+        self._save_target, self._save_scroll = None, 0
+        self._save_active = False
+        self._save_var.set(_MV_SAVE_HINT)
         for var in self._ev.values():
             var.set("")
         if self._ev:
@@ -1284,6 +1365,8 @@ class MainView(_DrawKit, tk.Frame):
     def select(self, entry: dict | None) -> None:
         if self.editing and entry is not self._edit_entry and not self._leave_edit_ok():
             return
+        if self.panel:
+            self.close_panel(restore=False)
         if entry is not self.selected:
             self.password_visible = False
         self.selected = entry
@@ -1437,7 +1520,14 @@ class MainView(_DrawKit, tk.Frame):
             (249, 102, "Помощник", lambda: self.app._on_assistant(), True),
             (359, 83, "Генератор", lambda: self.app._on_generate_standalone(), False),
         ):
-            c.create_image(_px(left - x0), _px(16), image=self._rr(width, 29, None, _MV_PILL_BORDER, 14.5), anchor="nw", tags="dyn")
+            on = label == "Генератор" and self.panel is not None
+            c.create_image(
+                _px(left - x0),
+                _px(16),
+                image=self._rr(width, 29, _MV_PILL_ON_FILL if on else None, _MV_PILL_ON_LINE if on else _MV_PILL_BORDER, 14.5),
+                anchor="nw",
+                tags="dyn",
+            )
             if dot:
                 c.create_oval(_px(263 - x0), _px(27), _px(271 - x0), _px(35), fill=_MV_GREEN, outline=_MV_GREEN, tags="dyn")
             self._text(c, left - x0 + (28 if dot else 13), 31, label, px=11, fill="#dce5ee", bold=True)
@@ -1505,6 +1595,9 @@ class MainView(_DrawKit, tk.Frame):
         width, height = max(c.winfo_width(), _px(300)), max(c.winfo_height(), _px(300))
         if self.editing and self.app.data is not None:
             self._draw_edit(c, hits, width, height)
+            return
+        if self.panel and self.app.data is not None:
+            (self._draw_gen if self.panel == "gen" else self._draw_save)(c, hits, width, height)
             return
         entry = self.selected
         if entry is None or self.app.data is None:
@@ -1675,13 +1768,16 @@ class MainView(_DrawKit, tk.Frame):
             return
         if self._focus != name:
             self._focus = name
-            if self.editing:
+            if self.editing or self.panel:
                 self._draw_detail()
 
-    def begin_edit(self, entry: dict | None = None) -> None:
-        """Открыть форму изменения (или новой записи, если `entry` is None) справа."""
+    def begin_edit(self, entry: dict | None = None, password: str | None = None) -> None:
+        """Открыть форму изменения (или новой записи, если `entry` is None) справа.
+        `password` — заранее подставленный пароль (из генератора, раздел 10.84)."""
         if self.editing and not self._leave_edit_ok():
             return
+        if self.panel:
+            self.close_panel(restore=False)
         self._ensure_edit_widgets()
         entry = entry or {}
         self.editing = False  # пока значения подставляются, перерисовывать форму не надо
@@ -1689,11 +1785,11 @@ class MainView(_DrawKit, tk.Frame):
         self._ev["site"].set(entry.get("site", ""))
         self._ev["url"].set(entry.get("url", ""))
         self._ev["username"].set(entry.get("username", ""))
-        self._ev["password"].set(entry.get("password", ""))
+        self._ev["password"].set(password if password is not None else entry.get("password", ""))
         self._note_text.delete("1.0", "end")
         self._note_text.insert("1.0", entry.get("note", ""))
         self._edit_tags = normalize_tags(entry.get("tags", []) or [])
-        self._edit_pw_visible = False
+        self._edit_pw_visible = password is not None  # подставленный пароль сразу виден
         self._tag_input_open = False
         self._tag_var.set("")
         self._focus = None
@@ -1701,6 +1797,9 @@ class MainView(_DrawKit, tk.Frame):
         self.selected = self._edit_entry
         self.editing = True
         self._edit_orig = self._edit_fields()
+        if password is not None:  # подставленный пароль — это уже изменение: форма «не сохранена»
+            self._edit_orig = {**self._edit_orig, "password": entry.get("password", "")}
+        self._draw_head()
         self._draw_list()
         self._draw_detail()
         target = self._edit_entries["password" if self._edit_entry else "site"]
@@ -1874,8 +1973,14 @@ class MainView(_DrawKit, tk.Frame):
             dash, travelled = 3 * f * max(1, _px(1)), 0.0
             for a, b in zip(pts, pts[1:]):
                 length = math.dist(a, b)
-                if int(travelled // dash) % 2 == 0:
-                    draw.line([a, b], fill=color, width=max(1, _px(1)) * f)
+                steps = max(1, math.ceil(length / (dash / 2)))
+                for k in range(steps):
+                    t0, t1 = k / steps, (k + 1) / steps
+                    mid = travelled + length * (t0 + t1) / 2
+                    if int(mid // dash) % 2 == 0:
+                        p0 = (a[0] + (b[0] - a[0]) * t0, a[1] + (b[1] - a[1]) * t0)
+                        p1 = (a[0] + (b[0] - a[0]) * t1, a[1] + (b[1] - a[1]) * t1)
+                        draw.line([p0, p1], fill=color, width=max(1, _px(1)) * f)
                 travelled += length
             self._images[key] = self.app._tk_image(big.resize((W, H), Image.LANCZOS))
         return self._images[key]
@@ -2023,6 +2128,438 @@ class MainView(_DrawKit, tk.Frame):
             if key not in self._edit_used:
                 self._drop_window(key)
         c.configure(scrollregion=(0, 0, width, max(height, P(footer + 80))))
+
+    # --- генератор и «Сохранить пароль» в правой панели (раздел 10.84) -----------------------------
+
+    def toggle_generator(self) -> None:
+        """Кнопка «Генератор»: открыть панель справа или закрыть, если она уже открыта."""
+        if self.panel:
+            self.close_panel()
+        else:
+            self.open_generator()
+
+    def open_generator(self) -> None:
+        if self.app.data is None or (self.editing and not self._leave_edit_ok()):
+            return
+        self._panel_prev = self.selected
+        self.selected, self.password_visible = None, False
+        self.panel = "gen"
+        self._gen_regenerate()
+        self._draw_head()
+        self._draw_list()
+        self._draw_detail()
+        self.detail.focus_set()
+
+    def close_panel(self, restore: bool = True) -> None:
+        """Закрыть панель генератора. Сгенерированный пароль в памяти не оставляем."""
+        if not self.panel:
+            return
+        self.panel = None
+        self._gen_password, self._gen_bits = "", 0.0
+        self._slider, self._slider_drag = None, False
+        self._drop_window("gsearch")
+        if restore and self._panel_prev is not None and any(e is self._panel_prev for e in self._entries()):
+            self.selected = self._panel_prev
+        self._panel_prev = None
+        self._draw_head()
+        self._draw_list()
+        self._draw_detail()
+
+    def _gen_regenerate(self) -> None:
+        o, n = self._gen_opts, self._gen_len[self._gen_mode]
+        if self._gen_mode == "random":
+            flags = (o["lower"], o["upper"], o["digits"], o["symbols"], o["clear"])
+            self._gen_password = generate_password(n, *flags)
+            self._gen_bits = random_password_bits(n, *flags)
+        elif self._gen_mode == "words":
+            self._gen_password = generate_passphrase(n, capitalize=o["cap"], add_digit=o["digit"])
+            self._gen_bits = passphrase_bits(n, o["digit"])
+        else:
+            self._gen_password = generate_pin(n)
+            self._gen_bits = pin_bits(n)
+
+    def _gen_again(self) -> None:
+        self._gen_regenerate()
+        self._draw_detail()
+
+    def _gen_set_mode(self, mode: str) -> None:
+        if mode != self._gen_mode:
+            self._gen_mode = mode
+            self._gen_again()
+
+    def _gen_toggle(self, key: str) -> None:
+        if self._gen_mode == "random" and key != "clear" and self._gen_opts[key]:
+            if sum(self._gen_opts[k] for k in ("upper", "lower", "digits", "symbols")) == 1:
+                return  # хотя бы один набор символов должен остаться
+        self._gen_opts[key] = not self._gen_opts[key]
+        self._gen_again()
+
+    def _gen_set_length(self, value: int) -> None:
+        low, high, _label = _MV_GEN_RANGES[self._gen_mode]
+        value = max(low, min(high, value))
+        if value != self._gen_len[self._gen_mode]:
+            self._gen_len[self._gen_mode] = value
+            self._gen_again()
+
+    def _gen_step(self, step: int) -> None:
+        if self.panel == "gen":
+            self._gen_set_length(self._gen_len[self._gen_mode] + step)
+
+    def _slider_value_at(self, x: float) -> int:
+        x0, x1, _y = self._slider
+        low, high, _label = _MV_GEN_RANGES[self._gen_mode]
+        inset = _px(7.5)
+        fraction = (x - (x0 + inset)) / max(1.0, (x1 - x0) - 2 * inset)
+        return round(low + max(0.0, min(1.0, fraction)) * (high - low))
+
+    def _slider_press(self, event: tk.Event) -> None:
+        if self.panel != "gen" or self._slider is None:
+            return
+        x, y = self.detail.canvasx(event.x), self.detail.canvasy(event.y)
+        x0, x1, ys = self._slider
+        if x0 - _px(8) <= x <= x1 + _px(8) and abs(y - ys) <= _px(14):
+            self._slider_drag = True
+            self._gen_set_length(self._slider_value_at(x))
+
+    def _slider_move(self, event: tk.Event) -> None:
+        if self._slider_drag and self._slider is not None and self.panel == "gen":
+            self._gen_set_length(self._slider_value_at(self.detail.canvasx(event.x)))
+
+    def _on_detail_wheel(self, direction: int) -> None:
+        if self.panel == "save":
+            self._save_scroll = max(0, min(max(0, len(self._save_rows()) - 4), self._save_scroll + direction))
+            self._draw_detail()
+        elif not self.panel:
+            self.detail.yview_scroll(direction, "units")
+
+    def _open_save_panel(self) -> None:
+        rows = self._save_rows(filtered=False)
+        previous = self._panel_prev
+        self._save_target = previous if previous is not None and any(e is previous for e in rows) else (rows[0] if rows else None)
+        self._save_scroll, self._save_active = 0, False
+        self._save_var.set(_MV_SAVE_HINT)
+        if self._save_entry is not None:
+            self._save_entry.configure(fg=_MV_TEXT_DIM)
+        self.panel = "save"
+        self._draw_detail()
+
+    def _save_rows(self, filtered: bool = True) -> list[dict]:
+        """Записи для выбора, по алфавиту (как в списке на макете), с учётом поиска."""
+        query = self._save_var.get().strip().casefold() if filtered and self._save_active else ""
+        rows = sorted(self._entries(), key=lambda e: e.get("site", "").casefold())
+        if query:
+            rows = [e for e in rows if query in " ".join([e.get("site", ""), e.get("username", ""), e.get("url", "")]).casefold()]
+        return rows
+
+    def _ensure_save_entry(self) -> None:
+        if self._save_entry is not None:
+            return
+        entry = tk.Entry(
+            self.detail, textvariable=self._save_var, bd=0, highlightthickness=0, relief="flat", bg=_MV_FIELD_FILL,
+            fg=_MV_TEXT_DIM, insertbackground=_MV_EDIT_TEXT, selectbackground=_MV_SELECT, selectforeground=_MV_EDIT_TEXT,
+            font=_mv_font(13),
+        )
+
+        def focus_in(_e) -> None:
+            if not self._save_active:
+                self._save_var.set("")
+                self._save_active = True
+            entry.configure(fg=_MV_EDIT_TEXT)
+            self._set_focus("gsearch")
+
+        def focus_out(_e) -> None:
+            if not self._save_var.get():
+                self._save_active = False
+                self._save_var.set(_MV_SAVE_HINT)
+                entry.configure(fg=_MV_TEXT_DIM)
+            self._set_focus(None, only="gsearch")
+
+        entry.bind("<FocusIn>", focus_in)
+        entry.bind("<FocusOut>", focus_out)
+        entry.bind("<Escape>", lambda _e: self.close_panel())
+        self._save_var.trace_add("write", lambda *_a: self._on_save_query())
+        self._save_entry = entry
+
+    def _on_save_query(self) -> None:
+        if self.panel != "save":
+            return
+        if not self._save_active and self._save_var.get() != _MV_SAVE_HINT:
+            self._save_active = True  # текст поставлен программно — это запрос
+            self._save_entry.configure(fg=_MV_EDIT_TEXT)
+        self._save_scroll = 0
+        self._draw_detail()
+
+    def _save_pick(self, entry: dict) -> None:
+        self._save_target = entry
+        self._draw_detail()
+
+    def _save_replace(self) -> None:
+        entry = self._save_target
+        if entry is None or not self._gen_password:
+            return
+        password = self._gen_password
+        fields = {
+            "site": entry.get("site", ""),
+            "username": entry.get("username", ""),
+            "password": password,
+            "url": entry.get("url", ""),
+            "note": entry.get("note", ""),
+            "tags": list(entry.get("tags", []) or []),
+        }
+        self.close_panel(restore=False)
+        self.app._store_entry(entry, fields)
+
+    def _save_as_new(self) -> None:
+        password = self._gen_password
+        if password:
+            self.begin_edit(None, password=password)
+
+    # рисование панелей
+
+    def _panel_mono(self, size: float):
+        return _mv_font(size, False, True)
+
+    def _draw_password(self, c: tk.Canvas, text: str, x: float, y: float, size: float, max_width: float, lines: int = 1, leading: float = 20) -> None:
+        """Пароль моноширинным шрифтом: буквы светлые, цифры — янтарные, знаки — голубые.
+        Не помещается в одну строку — переносится (до `lines` строк) или обрезается «…»."""
+        font = tkfont.Font(family=_mv_family(True), size=-_px(size))
+        char = font.measure("0") / max(_UI_SCALE, 0.01)
+        per_line = max(1, int(max_width / char))
+        chunks = [text[i : i + per_line] for i in range(0, len(text), per_line)][:lines] or [""]
+        if len(text) > per_line * lines:
+            chunks[-1] = chunks[-1][:-1] + "…"
+        top = y - (len(chunks) - 1) * leading / 2
+        for row, chunk in enumerate(chunks):
+            cx, cy = x, top + row * leading
+            run, kind = "", None
+            for ch in chunk + "\0":
+                k = "d" if ch.isdigit() else "l" if ch.isalpha() else "s"
+                if ch == "\0" or k != kind:
+                    if run:
+                        color = {"d": _MV_PW_DIGIT, "l": _MV_PW_LETTER, "s": _MV_PW_SYMBOL}[kind]
+                        self._text(c, cx, cy, run, px=size, fill=color, mono=True)
+                        cx += char * len(run)
+                    run, kind = "", k
+                run += ch if ch != "\0" else ""
+
+    def _disc(self, d: float, fill: str | None, ring: str | None = None, ring_w: float = 1.5):
+        D = max(1, _px(d))
+        key = ("disc", D, fill, ring, ring_w)
+        if key not in self._images:
+            f = 6
+            big = Image.new("RGBA", (D * f, D * f), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            draw.ellipse([0, 0, D * f - 1, D * f - 1], fill=fill, outline=ring, width=round(_px(ring_w) * f) if ring else 0)
+            self._images[key] = self.app._tk_image(big.resize((D, D), Image.LANCZOS))
+        return self._images[key]
+
+    def _checkbox(self, checked: bool):
+        S = _px(17)
+        key = ("checkbox", S, checked)
+        if key not in self._images:
+            f = 6
+            big = Image.new("RGBA", (S * f, S * f), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            r = _px(4) * f
+            if checked:
+                draw.rounded_rectangle([0, 0, S * f - 1, S * f - 1], radius=r, fill=_MV_THUMB)
+                pts = [(S * f * 0.26, S * f * 0.52), (S * f * 0.43, S * f * 0.69), (S * f * 0.76, S * f * 0.32)]
+                draw.line(pts, fill="#0c1c30", width=max(2, round(S * f * 0.12)), joint="curve")
+            else:
+                draw.rounded_rectangle([0, 0, S * f - 1, S * f - 1], radius=r, fill="#ffffff", outline="#9aa0a5", width=f)
+            self._images[key] = self.app._tk_image(big.resize((S, S), Image.LANCZOS))
+        return self._images[key]
+
+    def _bar(self, w: float, h: float, color: str):
+        return self._rr(w, h, color, None, h / 2)
+
+    def _footer_top(self, height: float) -> float:
+        return max(height / max(_UI_SCALE, 0.01) - 64.7, 635.3)
+
+    def _gen_level(self) -> tuple[int, str, str]:
+        bits = self._gen_bits
+        if bits < 40:
+            return 1, "Слабый", _MV_RED
+        if bits < 60:
+            return 2, "Средний", _MV_AMBER
+        if bits < 80:
+            return 3, "Надёжный", _MV_SEG_ON
+        if bits < 110:
+            return 4, "Надёжный", _MV_SEG_ON
+        return 5, "Очень надёжный", _MV_SEG_ON
+
+    def _button(self, c: tk.Canvas, hits: _Hits, x: float, y: float, w: float, h: float, label: str, command, *, accent: bool, text_px: float = 13) -> None:
+        P = _px
+        if accent:
+            c.create_image(P(x), P(y), image=self._rr(w, h, _MV_CREAM, None, 10), anchor="nw", tags="dyn")
+        else:
+            c.create_image(P(x), P(y), image=self._rr(w, h, None, _MV_CANCEL_LINE, 10), anchor="nw", tags="dyn")
+        self._text(c, x + w / 2, y + h / 2 + 0.5, label, px=text_px, fill=_MV_SAVE_TEXT if accent else _MV_EDIT_TEXT, bold=True, anchor="center")
+        hits.add(P(x), P(y), P(x + w), P(y + h), command)
+
+    def _draw_gen(self, c: tk.Canvas, hits: _Hits, width: int, height: int) -> None:
+        P = _px
+        scale = max(_UI_SCALE, 0.01)
+        left, right = 32, width / scale - 32
+        span = right - left
+        self._edit_used = set()
+        self._drop_window("gsearch")
+
+        self._text(c, left, 42.5, "Генератор пароля", px=19, fill=_MV_EDIT_TITLE, bold=True)
+        c.create_image(P(left), P(76), image=self._rr(span, 63.5, _MV_FIELD_FILL, _MV_PANEL_LINE, 12), anchor="nw", tags="dyn")
+        long_password = len(self._gen_password) * 12.6 > span - 40
+        self._draw_password(
+            c, self._gen_password, left + 20, 108 if not long_password else 108, 21 if not long_password else 17, span - 40,
+            lines=1 if not long_password else 2, leading=22,
+        )
+
+        segments, word, color = self._gen_level()
+        for i in range(5):
+            c.create_image(P(left + 40.5 * i), P(158.5), image=self._bar(36, 4, color if i < segments else _MV_SEG_OFF), anchor="nw", tags="dyn")
+        self._text(c, left + 206, 161, f"{word} · {int(self._gen_bits)} бит", px=11.8, fill=color)
+
+        copy_w = span - 82.5 - 8
+        self._button(c, hits, left, 185, copy_w, 40, "Копировать", lambda: self.app._copy_to_clipboard(self._gen_password), accent=True, text_px=12.6)
+        self._button(c, hits, left + copy_w + 8, 185, 82.5, 40, "Другой", self._gen_again, accent=False, text_px=12)
+
+        c.create_image(P(left), P(248.5), image=self._rr(span, 40.5, None, _MV_TAB_LINE, 11), anchor="nw", tags="dyn")
+        tab_w = (span - 8) / 3
+        for i, (mode, label) in enumerate(_MV_GEN_TABS):
+            x = left + 4 + i * tab_w
+            on = mode == self._gen_mode
+            if on:
+                c.create_image(P(x), P(252.5), image=self._rr(tab_w, 32.5, _MV_TAB_ON, None, 8), anchor="nw", tags="dyn")
+            self._text(c, x + tab_w / 2, 269.5, label, px=12.5, fill=_MV_EDIT_TEXT if on else _MV_TAB_OFF_TEXT, bold=on, anchor="center")
+            hits.add(P(x), P(252.5), P(x + tab_w), P(285), lambda m=mode: self._gen_set_mode(m))
+
+        low, high, label = _MV_GEN_RANGES[self._gen_mode]
+        value = self._gen_len[self._gen_mode]
+        self._text(c, left, 320, label, px=11.7, fill="#8092a2")
+        self._text(c, right, 319.5, str(value), px=12.5, fill=_MV_EDIT_TITLE, bold=True, anchor="e")
+        c.create_image(P(left), P(338.5), image=self._bar(span, 6, _MV_TRACK), anchor="nw", tags="dyn")
+        thumb_x = left + 7.5 + (value - low) / (high - low) * (span - 15)
+        c.create_image(P(left), P(338.5), image=self._bar(thumb_x - left, 6, _MV_THUMB), anchor="nw", tags="dyn")
+        c.create_image(P(thumb_x), P(341.5), image=self._disc(15, _MV_THUMB), anchor="center", tags="dyn")
+        self._slider = (P(left), P(right), P(341.5))
+
+        top = 381
+        for key, text, hint in _MV_GEN_OPTIONS[self._gen_mode]:
+            on = self._gen_opts[key]
+            c.create_image(P(left), P(top - 8.5), image=self._checkbox(on), anchor="nw", tags="dyn")
+            self._text(c, left + 28.5, top, text, px=13.6, fill=_MV_PW_LETTER)
+            self._text(c, right, top, hint, px=12, fill="#526b88", anchor="e", mono=True)
+            hits.add(P(left), P(top - 15), P(right), P(top + 15), lambda k=key: self._gen_toggle(k))
+            top += 34
+
+        footer = self._footer_top(height)
+        c.create_line(P(left), P(footer - 17.5), P(right), P(footer - 17.5), fill=_MV_SEP_EDIT, tags="dyn")
+        self._text(c, left, footer + 20, "Пароль нигде не сохраняется", px=11, fill=_MV_FOOT_TEXT)
+        font = tkfont.Font(family=_mv_family(), size=-P(12.5), weight="bold")
+        btn_w = font.measure("Сохранить в запись...") / scale + 34.6
+        self._button(c, hits, right - btn_w, footer, btn_w, 40, "Сохранить в запись...", self._open_save_panel, accent=False, text_px=12.5)
+        c.configure(scrollregion=(0, 0, width, max(height, P(footer + 60))))
+
+    def _draw_save(self, c: tk.Canvas, hits: _Hits, width: int, height: int) -> None:
+        P = _px
+        scale = max(_UI_SCALE, 0.01)
+        left, right = 32, width / scale - 32
+        span = right - left
+        self._edit_used = set()
+        self._ensure_save_entry()
+        entries = self._entries()
+        if self._save_target is not None and not any(e is self._save_target for e in entries):
+            self._save_target = None
+
+        # «‹ Генератор»
+        c.create_line(P(left + 6.7), P(33), P(left + 2.2), P(37.8), P(left + 6.7), P(42.6), fill="#8b9db0", width=max(1, P(1.6)), tags="dyn")
+        self._text(c, left + 20.5, 38, "Генератор", px=11.9, fill="#8b9db0")
+        hits.add(P(left - 4), P(28), P(left + 90), P(50), self._back_to_generator)
+
+        self._text(c, left, 75.8, "Сохранить пароль", px=18.9, fill=_MV_EDIT_TITLE, bold=True)
+        self._text(c, left, 101, "Выберите запись, в которую подставить пароль.", px=11.3, fill="#899aae")
+
+        c.create_image(P(left), P(126), image=self._rr(span, 46, _MV_FIELD_FILL, _MV_PANEL_LINE, 11), anchor="nw", tags="dyn")
+        n = len(self._gen_password)
+        self._text(c, right - 17.5, 149.5, f"{n} {ru_plural(n, ('символ', 'символа', 'символов'))}", px=11.1, fill="#8a9cad", anchor="e")
+        self._draw_password(c, self._gen_password, left + 18, 149.5, 16, span - 36 - 90, 1)
+
+        border = _MV_FOCUS_LINE if self._focus == "gsearch" else "#243952"
+        c.create_image(P(left), P(186.5), image=self._rr(span, 39.2, _MV_FIELD_FILL, border, 10), anchor="nw", tags="dyn")
+        self._put("gsearch", self._save_entry, left + 16, 206.1, span - 32)
+
+        rows = self._save_rows()
+        top = 236.5
+        visible = rows[self._save_scroll : self._save_scroll + 4]
+        if not rows:
+            self._text(c, left + 16, top + 26, "Ничего не найдено" if entries else "Записей пока нет", px=12.5, fill=_MV_TEXT_DIM)
+        for entry in visible:
+            on = entry is self._save_target
+            c.create_image(P(left), P(top), image=self._rr(span, 52, _MV_ROW_ON_FILL if on else _MV_ROW_FILL, _MV_ROW_ON_LINE if on else _MV_ROW_LINE, 10), anchor="nw", tags="dyn")
+            c.create_image(P(left + 15), P(top + 11), image=self._tile(entry["site"], 30, _mv_color_for(entry["site"], _MV_AVATARS), 8), anchor="nw", tags="dyn")
+            self._text(c, left + 57.5, top + 17.6, entry["site"], px=13.3, fill=_MV_EDIT_TITLE, bold=True)
+            self._text(c, left + 57.5, top + 35.6, entry.get("username", ""), px=11.0, fill="#829eb9")
+            cx, cy = right - 18.5, top + 26
+            if on:
+                c.create_image(P(cx), P(cy), image=self._disc(21, None, _MV_RADIO_ON, 2), anchor="center", tags="dyn")
+                c.create_image(P(cx), P(cy), image=self._disc(11, "#7fafe3"), anchor="center", tags="dyn")
+            else:
+                c.create_image(P(cx), P(cy), image=self._disc(21, None, _MV_RADIO_OFF, 1.5), anchor="center", tags="dyn")
+            hits.add(P(left), P(top), P(right), P(top + 52), lambda e=entry: self._save_pick(e))
+            top += 58
+
+        c.create_image(P(left), P(472), image=self._dashed(span, 39.2, _MV_DASH, 10), anchor="nw", tags="dyn")
+        plus_w = max(1, P(1.7))
+        label = "Создать новую запись с этим паролем"
+        font = tkfont.Font(family=_mv_family(), size=-P(11.9), weight="bold")
+        total = 12 + 9 + font.measure(label) / scale
+        x0 = left + (span - total) / 2
+        px_, py_, arm = P(x0 + 5), P(492), P(5)
+        c.create_line(px_ - arm, py_, px_ + arm + 1, py_, fill="#8eb2dd", width=plus_w, tags="dyn")
+        c.create_line(px_, py_ - arm, px_, py_ + arm + 1, fill="#8eb2dd", width=plus_w, tags="dyn")
+        self._text(c, x0 + 21, 492.5, label, px=11.9, fill="#8eb2dd", bold=True)
+        hits.add(P(left), P(472), P(right), P(511), self._save_as_new)
+
+        c.create_image(P(left), P(525.5), image=self._rr(span, 63, None, _MV_INFO_LINE, 10), anchor="nw", tags="dyn")
+        target = self._save_target
+        info = (
+            f"Пароль в записи {target['site']} будет заменён. Старый пароль останется в истории записи."
+            if target is not None
+            else "Выберите запись, чтобы заменить в ней пароль, или создайте новую запись с этим паролем."
+        )
+        info_font = tkfont.Font(family=_mv_family(), size=-P(12.1))
+        lines, current = [], ""
+        for word in info.split():
+            trial = f"{current} {word}".strip()
+            if current and info_font.measure(trial) / scale > span - 32:
+                lines.append(current)
+                current = word
+            else:
+                current = trial
+        lines.append(current)
+        for i, line in enumerate(lines[:3]):
+            self._text(c, left + 16, 548.5 + 20 * i, line, px=12.1, fill="#bdccdc")
+
+        footer = self._footer_top(height)
+        c.create_line(P(left), P(footer - 16.5), P(right), P(footer - 16.5), fill=_MV_SEP_EDIT, tags="dyn")
+        bold = tkfont.Font(family=_mv_family(), size=-P(12.3), weight="bold")
+        w1 = bold.measure("Заменить пароль") / scale + 33.8
+        w2 = bold.measure("Отмена") / scale + 36.3
+        if target is not None:
+            self._button(c, hits, left, footer, w1, 40.4, "Заменить пароль", self._save_replace, accent=True, text_px=12.3)
+        else:
+            c.create_image(P(left), P(footer), image=self._rr(w1, 40.4, "#3a4350", None, 10), anchor="nw", tags="dyn")
+            self._text(c, left + w1 / 2, footer + 20.7, "Заменить пароль", px=12.3, fill="#7d8a98", bold=True, anchor="center")
+        self._button(c, hits, left + w1 + 10, footer, w2, 40.4, "Отмена", self.close_panel, accent=False, text_px=12.3)
+
+        for key in list(self._edit_items):
+            if key not in self._edit_used:
+                self._drop_window(key)
+        c.configure(scrollregion=(0, 0, width, max(height, P(footer + 60))))
+
+    def _back_to_generator(self) -> None:
+        self.panel = "gen"
+        self._drop_window("gsearch")
+        self._draw_detail()
 
     # --- действия панели -------------------------------------------------------------------------
 
@@ -4708,7 +5245,8 @@ class App(ttk.Window):
         AuditDialog(self, report)
 
     def _on_generate_standalone(self) -> None:
-        GeneratorDialog(self, on_copy=self._copy_to_clipboard)
+        """Кнопка «Генератор»: панель справа в главном окне (раздел 10.84), а не диалог."""
+        self._view.toggle_generator()
 
     def _on_assistant(self) -> None:
         AssistantDialog(self)
@@ -5415,263 +5953,6 @@ class AuditDialog(ttk.Toplevel):
             widget.bind(sequence, on_wheel)
         for child in widget.winfo_children():
             self._bind_wheel(child)
-
-
-class GeneratorDialog(ttk.Toplevel):
-    """Полноценный генератор паролей — переверстан по референсу
-    (см. CLAUDE.md, раздел 10.14): карточка с иконкой-бейджем, крупным
-    полем сгенерированного пароля, сегментированной шкалой надёжности,
-    слайдером длины вместо spinbox'а и переключателями-пилюлями для
-    наборов символов вместо обычных чекбоксов. Оценка энтропии в виде
-    текста (assistant.generator.explain_password) здесь больше не
-    единственный источник обратной связи — она дублируется бейджем и
-    цветом шкалы; для сохраняемой записи тот же текст показывается в
-    EntryDialog (раздел 10.13). Не трогает хранилище — работает и без
-    выбранной записи."""
-
-    def __init__(self, parent: App, on_copy) -> None:
-        super().__init__(title="Генератор паролей", master=parent, resizable=(False, False), iconphoto=None)
-        # Строим скрытым и показываем готовым — иначе на Windows видно, как
-        # окно дорисовывается по частям (раздел 10.55).
-        self.withdraw()
-        parent._dialog_chrome(self, "Генератор паролей")
-        self.transient(parent)
-        self._on_copy = on_copy
-
-        # Собранные функции перерисовки скруглённых подложек — та же
-        # причина и тот же порядок вызова (после update_idletasks), что
-        # и в ViewEntryDialog, раздел 10.9: `dynamic=True` тут не нужен,
-        # диалог не меняет размер после построения.
-        pending_backdrops: list[Callable[[], None]] = []
-
-        # Переменные состояния заводятся ДО любых виджетов: слайдер
-        # длины ниже вызывает свой `command` уже во время построения
-        # (сразу на `.set()`), а тот сразу зовёт `_on_generate()`,
-        # которому нужны все четыре `_use_*` — если завести их только в
-        # секции "Наборы символов" (после слайдера), это падает с
-        # AttributeError ещё на этапе создания диалога.
-        self._result_var = tk.StringVar()
-        self._length_var = tk.IntVar(value=DEFAULT_GENERATED_LENGTH)
-        self._use_lower = tk.BooleanVar(value=True)
-        self._use_upper = tk.BooleanVar(value=True)
-        self._use_digits = tk.BooleanVar(value=True)
-        self._use_symbols = tk.BooleanVar(value=True)
-
-        content = ttk.Frame(self, padding=_px(20))
-        content.pack(fill="both", expand=True)
-
-        # --- Заголовок: иконка-бейдж + название + подпись ---
-        header = ttk.Frame(content)
-        header.pack(fill="x")
-        badge = tk.Frame(header, width=_px(42), height=_px(42), bd=0, highlightthickness=0)
-        badge.pack(side="left", padx=(0, _px(12)))
-        badge_image = parent._rounded_image(42, _ACCENT, "#ffffff")
-        tk.Label(badge, image=badge_image, bd=0, highlightthickness=0).place(
-            x=0, y=0, relwidth=1, relheight=1
-        )
-        dice_icon = parent._button_icon("dice", "white")
-        if dice_icon is not None:
-            tk.Label(badge, image=dice_icon, bd=0, bg=_ACCENT, highlightthickness=0).place(
-                relx=0.5, rely=0.5, anchor="center"
-            )
-        title_stack = ttk.Frame(header)
-        title_stack.pack(side="left", fill="both", expand=True)
-        ttk.Label(title_stack, text="Генератор паролей", font=("", 14, "bold"), foreground=_SIDEBAR_BG).pack(
-            anchor="w"
-        )
-        ttk.Label(
-            title_stack,
-            text="secrets · криптостойкий · полностью офлайн",
-            foreground=_SEARCH_PLACEHOLDER_COLOR,
-            font=("", 9),
-        ).pack(anchor="w")
-
-        # --- Сгенерированный пароль ---
-        # Поле и кнопка копирования — два отдельных виджета (раздел 10.53):
-        # скруглённая плитка поля и рядом квадратная ячейка той же высоты.
-        password_row = ttk.Frame(content)
-        password_row.pack(fill="x", pady=(_px(14), 0))
-        field_height = _px(_GENERATOR_FIELD_HEIGHT)
-        password_box = ttk.Frame(password_row, height=field_height, padding=(_px(14), 0))
-        password_box.pack_propagate(False)
-        password_box.pack(side="left", fill="x", expand=True)
-        pending_backdrops.append(
-            parent._rounded_backdrop(
-                password_box,
-                _NEUTRAL_FILL,
-                corners=(True, True, True, True),
-                surface="#ffffff",
-                radius=_ROUNDED_RADIUS,
-                border_color=_NEUTRAL_BORDER,
-                border_width=1,
-            )
-        )
-        result_entry = ttk.Entry(
-            password_box, textvariable=self._result_var, state="readonly", font=("Consolas", 13)
-        )
-        # `NeutralField.TEntry` (раздел 10.17) — общий стиль с полем
-        # поиска главного экрана; раскладка `Entry.field` НЕ убирается
-        # (см. подробный разбор бага в `_setup_custom_styles`, разделы
-        # 10.16–10.17), поэтому цвет корректно применяется и здесь
-        # (`state="readonly"`), и там (обычное редактируемое поле).
-        result_entry.configure(style="NeutralField.TEntry")
-        result_entry.pack(fill="x", expand=True)
-        copy_cell = ttk.Frame(password_row, width=field_height, height=field_height)
-        copy_cell.pack_propagate(False)
-        copy_cell.pack(side="left", padx=(_px(8), 0))
-        self._copy_button = parent._styled(
-            ttk.Button(
-                copy_cell,
-                command=self._on_copy_click,
-                **{**parent._icon_kwargs("copy", "dark", center=True), "compound": "image"},
-            ),
-            parent._rounded_button_style(
-                "Rounded.IconToggleSquare",
-                _NEUTRAL_FILL,
-                _NEUTRAL_TEXT,
-                border_color=_NEUTRAL_BORDER,
-                padding=(0, 0),
-                element_padding=0,
-            ),
-        )
-        self._copy_button.pack(fill="both", expand=True)
-
-        # --- Надёжность: подпись + бейдж + сегментированная шкала ---
-        # Разметка вынесена в App._build_strength_meter (раздел 10.18) —
-        # тот же виджет использует CreateVaultDialog для мастер-пароля.
-        strength_section = ttk.Frame(content)
-        strength_section.pack(fill="x", pady=(_px(14), 0))
-        self._update_strength = parent._build_strength_meter(strength_section)
-
-        ttk.Separator(content).pack(fill="x", pady=_px(12))
-
-        # --- Длина: подпись + бейдж со значением + слайдер ---
-        length_section = ttk.Frame(content)
-        length_section.pack(fill="x")
-        length_header = ttk.Frame(length_section)
-        length_header.pack(fill="x")
-        ttk.Label(length_header, text="Длина пароля", font=("", 10, "bold"), foreground=_NEUTRAL_TEXT).pack(
-            side="left"
-        )
-        self._length_badge = ttk.Label(
-            length_header,
-            text=f"{DEFAULT_GENERATED_LENGTH} симв.",
-            background=_NEUTRAL_FILL,
-            foreground=_ACCENT,
-            font=("", 9, "bold"),
-            padding=(_px(8), _px(3)),
-        )
-        self._length_badge.pack(side="right")
-        length_scale = ttk.Scale(
-            length_section, from_=8, to=64, orient="horizontal", command=self._on_length_change
-        )
-        length_scale.set(DEFAULT_GENERATED_LENGTH)
-        length_scale.pack(fill="x", pady=(_px(10), 0))
-
-        ttk.Separator(content).pack(fill="x", pady=_px(12))
-
-        # --- Наборы символов: иконка-чип + подпись + переключатель ---
-        toggles = (
-            ("abc", "Строчные буквы", self._use_lower),
-            ("ABC", "Заглавные буквы", self._use_upper),
-            ("123", "Цифры", self._use_digits),
-            ("#$%", "Спецсимволы", self._use_symbols),
-        )
-        for chip_text, label_text, var in toggles:
-            row = ttk.Frame(content)
-            row.pack(fill="x", pady=_px(3))
-            ttk.Label(
-                row,
-                text=chip_text,
-                width=4,
-                anchor="center",
-                background=_NEUTRAL_FILL,
-                foreground=_NEUTRAL_TEXT,
-                font=("Consolas", 9, "bold"),
-                padding=(0, _px(6)),
-            ).pack(side="left")
-            ttk.Label(row, text=label_text, foreground=_NEUTRAL_TEXT, font=("", 10)).pack(
-                side="left", padx=(_px(10), 0)
-            )
-            # bootstyle="round-toggle" — современный переключатель вместо
-            # классического квадратного чекбокса; command сразу
-            # перегенерирует пароль с новым набором классов символов —
-            # тот же принцип "живой" обратной связи, что и у оценщика
-            # надёжности в EntryDialog (раздел 10.13), а не только по
-            # явному клику на отдельную кнопку.
-            ttk.Checkbutton(row, variable=var, bootstyle="round-toggle", command=self._on_generate).pack(
-                side="right"
-            )
-
-        # --- Действия ---
-        buttons = ttk.Frame(self, padding=(_px(24), 0, _px(24), _px(24)))
-        buttons.pack(fill="x")
-        parent._styled(
-            ttk.Button(buttons, command=self._on_generate, **parent._icon_kwargs("dice", "dark")),
-            parent._neutral_style(),
-        ).pack(side="left")
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Копировать",
-                command=self._on_copy_click,
-                **parent._icon_kwargs("copy", "dark"),
-            ),
-            parent._neutral_style(),
-        ).pack(side="left", padx=(_px(8), 0))
-        parent._styled(
-            ttk.Button(
-                buttons,
-                text="Готово",
-                command=self.destroy,
-                **parent._icon_kwargs("save", "white"),
-            ),
-            parent._accent_style(),
-        ).pack(side="right", padx=(_px(16), 0))
-
-        self._on_generate()
-        self.update_idletasks()
-        for redraw in pending_backdrops:
-            redraw()
-
-        parent._round_dialog_corners(self)
-        self.place_window_center()
-        parent._keep_dialog_in_work_area(self)
-        # Окно показывается только теперь, целиком готовым (раздел 10.55).
-        self.deiconify()
-        self.update_idletasks()
-        self.grab_set()
-
-    def _on_length_change(self, value: str) -> None:
-        # ttk.Scale даёт float даже при целочисленных from_/to — округляем
-        # до целого числа символов и сразу перегенерируем пароль, чтобы
-        # движение слайдера сразу отражалось на результате (как и
-        # переключатели наборов символов, см. ниже).
-        length = round(float(value))
-        self._length_var.set(length)
-        self._length_badge.configure(text=f"{length} симв.")
-        self._on_generate()
-
-    def _on_generate(self) -> None:
-        try:
-            password = generate_password(
-                length=self._length_var.get(),
-                use_lowercase=self._use_lower.get(),
-                use_uppercase=self._use_upper.get(),
-                use_digits=self._use_digits.get(),
-                use_symbols=self._use_symbols.get(),
-            )
-        except ValueError as exc:
-            messagebox.showerror("Ошибка", str(exc), parent=self)
-            return
-
-        self._result_var.set(password)
-        self._update_strength(password)
-
-    def _on_copy_click(self) -> None:
-        password = self._result_var.get()
-        if password:
-            self._on_copy(password)
 
 
 # --- Графика чата помощника (раздел 9.4): градиенты, пузыри, кнопка отправки --
