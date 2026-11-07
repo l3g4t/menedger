@@ -165,6 +165,35 @@ def format_last_login(iso: str | None, now: datetime | None = None) -> str | Non
     return f"{text}, {clock}"
 
 
+def _ru_plural(n: int, forms: tuple[str, str, str]) -> str:
+    n10, n100 = n % 10, n % 100
+    if n10 == 1 and n100 != 11:
+        return forms[0]
+    return forms[1] if 2 <= n10 <= 4 and not 12 <= n100 <= 14 else forms[2]
+
+
+def format_opened(iso: str | None, now: datetime | None = None) -> str | None:
+    """«Открыт сегодня, 09:14» / «Открыт вчера, 21:30» / «Открыт 3 дня назад» / «Открыт 2 месяца
+    назад» / «Открыт 1 год назад» — для списка «Выбор хранилища». Нет времени — None."""
+    moment = _parse(iso)
+    if moment is None:
+        return None
+    now = now or datetime.now().astimezone()
+    local = moment.astimezone(now.tzinfo)
+    days = (now.date() - local.date()).days
+    if days <= 0:
+        return f"Открыт сегодня, {local:%H:%M}"
+    if days == 1:
+        return f"Открыт вчера, {local:%H:%M}"
+    if days < 30:
+        return f"Открыт {days} {_ru_plural(days, ('день', 'дня', 'дней'))} назад"
+    if days < 365:
+        months = days // 30
+        return f"Открыт {months} {_ru_plural(months, ('месяц', 'месяца', 'месяцев'))} назад"
+    years = days // 365
+    return f"Открыт {years} {_ru_plural(years, ('год', 'года', 'лет'))} назад"
+
+
 def history_lines(entry: dict, today: date | None = None) -> list[str]:
     """Строки истории, новые сверху: «12 окт. — пароль изменён». У старых записей без
     истории — одна строка по `created_at`: честнее «пароль установлен», чем «создана»,

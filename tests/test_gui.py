@@ -637,14 +637,17 @@ def _unlock_view(app):
 
 
 def test_unlock_screen_shows_reference_texts_without_hints(app):
-    """Раздел 10.81: экран блокировки — как на референсе: гора, название, подпись, поле
-    пароля, «Открыть», «или», «Создать новое хранилище», подпись внизу; ни кнопки выбора
-    файла, ни «глаза», ни подсказок клавиш."""
+    """Раздел 10.83: экран блокировки — как на референсе: гора, название, подпись, карточка файла
+    с «Сменить», поле пароля, «Открыть», «или», «Создать новое хранилище», подпись внизу; ни
+    «глаза», ни подсказок клавиш."""
     view = _unlock_view(app)
     texts = _canvas_texts(view)
     for expected in (
         "Хранилище тайн",
-        "Введите мастер-пароль",
+        "Выберите файл и введите мастер-пароль",
+        "Файл хранилища",
+        Path(app._path_var.get()).name,
+        "Сменить",
         "Мастер-пароль",
         "Открыть",
         "или",
@@ -652,8 +655,138 @@ def test_unlock_screen_shows_reference_texts_without_hints(app):
         "Мастер-пароль не восстанавливается.",
     ):
         assert expected in texts, texts
-    assert not any("Ctrl" in text or "Выберите файл" in text for text in texts)
+    assert not any("Ctrl" in text for text in texts)
+    assert any("файл не найден" in text for text in texts)  # файла ещё нет — карточка честно об этом
     assert not _find_widgets_by_class(app, "TButton")  # ни одной ttk-кнопки на экране
+    assert view.mode == "unlock"
+
+
+def _recent_files(tmp_path, names=("Работа.vault", "Личное.vault", "Семья.vault")):
+    """Три файла-хранилища с разным временем последнего открытия (как в референсе «Выбор хранилища»)."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    paths = []
+    for name, kb in zip(names, (48, 126, 22)):
+        path = tmp_path / name
+        path.write_bytes(b"x" * (kb * 1024 - 100))
+        paths.append(path)
+    stamp = lambda days: (now - timedelta(days=days)).strftime(guiapp.CREATED_AT_FORMAT)  # noqa: E731
+    state = {
+        "last_vault": str(paths[0]),
+        "recent": [str(p) for p in paths],
+        "last_unlock": {str(paths[0]): stamp(0), str(paths[1]): stamp(3), str(paths[2]): stamp(70)},
+    }
+    Path(os.environ["MENEDGER_STATE"]).write_text(json.dumps(state), encoding="utf-8")
+    return paths
+
+
+def test_unlock_file_card_shows_name_folder_and_size(app, tmp_path):
+    paths = _recent_files(tmp_path)
+    app._path_var.set(str(paths[0]))
+    view = _unlock_view(app)
+    view.refresh()
+    app.update()
+    texts = _canvas_texts(view)
+    assert "Работа.vault" in texts and "Сменить" in texts
+    assert any(t.endswith("· 48 КБ") for t in texts), texts
+
+
+def test_pick_screen_lists_recent_files_and_marks_the_chosen_one(app, tmp_path):
+    paths = _recent_files(tmp_path)
+    app._path_var.set(str(paths[0]))
+    view = _unlock_view(app)
+    _click_text(view, "Сменить")
+    app.update()
+    assert view.mode == "pick" and view.pick_choice == paths[0]
+    texts = _canvas_texts(view)
+    for expected in (
+        "Назад",
+        "Выбор хранилища",
+        "Недавно открытые файлы на этом устройстве.",
+        "Работа.vault",
+        "Личное.vault",
+        "Семья.vault",
+        "или",
+        "Открыть другой файл…",
+        "Подходят файлы с расширением .vault.",
+        "Выбрать «Работа.vault»",
+    ):
+        assert expected in texts, texts
+    assert any(t.startswith("Открыт сегодня, ") and t.endswith("· 48 КБ") for t in texts), texts
+    assert "Открыт 3 дня назад · 126 КБ" in texts
+    assert "Открыт 2 месяца назад · 22 КБ" in texts
+
+
+def test_pick_screen_choose_other_card_then_confirm_sets_the_file(app, tmp_path):
+    paths = _recent_files(tmp_path)
+    app._path_var.set(str(paths[0]))
+    view = _unlock_view(app)
+    view.show_pick()
+    app.update()
+    _click_text(view, "Личное.vault")
+    app.update()
+    assert view.pick_choice == paths[1]
+    assert "Выбрать «Личное.vault»" in _canvas_texts(view)
+    _click_text(view, "Выбрать «Личное.vault»")
+    app.update()
+    assert view.mode == "unlock" and app._path_var.get() == str(paths[1])
+    assert "Личное.vault" in _canvas_texts(view)
+
+
+def test_pick_screen_back_keeps_the_current_file(app, tmp_path):
+    paths = _recent_files(tmp_path)
+    app._path_var.set(str(paths[0]))
+    view = _unlock_view(app)
+    view.show_pick()
+    app.update()
+    _click_text(view, "Семья.vault")
+    _click_text(view, "Назад")
+    app.update()
+    assert view.mode == "unlock" and app._path_var.get() == str(paths[0])
+
+
+def test_pick_screen_open_other_file_uses_file_dialog(app, tmp_path, monkeypatch):
+    paths = _recent_files(tmp_path)
+    other = tmp_path / "Чужое.vault"
+    other.write_bytes(b"x")
+    app._path_var.set(str(paths[0]))
+    view = _unlock_view(app)
+    view.show_pick()
+    app.update()
+    monkeypatch.setattr(guiapp.filedialog, "askopenfilename", lambda **k: str(other))
+    _click_text(view, "Открыть другой файл…")
+    app.update()
+    assert view.mode == "unlock" and app._path_var.get() == str(other)
+
+    view.show_pick()
+    monkeypatch.setattr(guiapp.filedialog, "askopenfilename", lambda **k: "")  # диалог закрыли без выбора
+    view.pick_other()
+    assert view.mode == "pick" and app._path_var.get() == str(other)
+
+
+def test_pick_screen_always_lists_the_current_file_even_if_never_opened(app, tmp_path):
+    lonely = tmp_path / "Новое.vault"
+    lonely.write_bytes(b"x")
+    app._path_var.set(str(lonely))
+    view = _unlock_view(app)
+    view.show_pick()
+    app.update()
+    texts = _canvas_texts(view)
+    assert "Новое.vault" in texts and "Ещё не открывали · 1 КБ" in texts and "Выбрать «Новое.vault»" in texts
+
+
+def test_pick_screen_escape_goes_back_and_ctrl_o_opens_dialog(app, tmp_path, monkeypatch):
+    paths = _recent_files(tmp_path)
+    app._path_var.set(str(paths[0]))
+    view = _unlock_view(app)
+    view.show_pick()
+    calls = []
+    monkeypatch.setattr(view, "pick_other", lambda: calls.append("other"))
+    view._on_control_key(SimpleNamespace(keysym="o"))
+    assert calls == ["other"]
+    view._on_escape()
     assert view.mode == "unlock"
 
 
@@ -689,7 +822,7 @@ def test_unlock_open_button_click_unlocks(app, monkeypatch):
     assert app.data is not None and app.master_password == MASTER
 
 
-def test_unlock_missing_file_shows_message(app):
+def test_unlock_missing_file_shows_message(app):  # noqa: E302
     view = _unlock_view(app)
     app._password_var.set(MASTER)
     app._on_unlock()

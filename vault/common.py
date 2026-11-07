@@ -105,4 +105,46 @@ def remember_unlock(path: str | os.PathLike, when: str | None = None) -> None:
         times = {}
     times[str(path)] = when or now_iso()
     state["last_unlock"] = times
+    recent = [str(path)] + [p for p in state.get("recent", []) if isinstance(p, str) and p != str(path)]
+    state["recent"] = recent[:RECENT_LIMIT]
     save_state(state)
+
+
+RECENT_LIMIT = 8  # сколько недавно открытых файлов помнить
+
+
+def recent_vaults(limit: int = 3, include: str | os.PathLike | None = None) -> list[Path]:
+    """Недавно открытые файлы хранилищ, новые первыми; удалённые с диска пропускаются.
+    `include` (текущий выбранный файл) всегда присутствует и стоит первым, даже если его ещё
+    не открывали — иначе выбранный файл не нашёлся бы в списке «Выбор хранилища»."""
+    found: list[Path] = []
+    if include is not None:
+        found.append(Path(include))
+    for value in load_state().get("recent", []):
+        path = Path(value) if isinstance(value, str) else None
+        if path is not None and path not in found and path.exists():
+            found.append(path)
+    return found[:limit]
+
+
+def display_dir(path: str | os.PathLike) -> str:
+    """Папка файла для показа человеку: «Documents/Хранилища» (от домашней папки), «~» для самой
+    домашней папки, а вне её — последние два имени папок."""
+    parent = Path(path).parent
+    try:
+        relative = parent.relative_to(Path.home())
+        return "~" if not relative.parts else "/".join(relative.parts)
+    except ValueError:
+        parts = [part for part in parent.parts if part not in ("/", "\\") and not part.endswith(":\\")]
+        return "/".join(parts[-2:]) or str(parent)
+
+
+def format_size(path: str | os.PathLike) -> str | None:
+    """«48 КБ» / «1,2 МБ»; None, если файла нет."""
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        return None
+    if size < 1024 * 1024:
+        return f"{max(1, round(size / 1024))} КБ"
+    return f"{size / (1024 * 1024):.1f}".replace(".", ",") + " МБ"

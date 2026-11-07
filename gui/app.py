@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,9 +54,12 @@ from vault.common import (
     CREATED_AT_FORMAT,
     DEFAULT_VAULT_PATH,
     MIN_MASTER_PASSWORD_LENGTH,
+    display_dir,
+    format_size,
     last_unlock_time,
     last_vault_path,
     now_iso,
+    recent_vaults,
     remember_unlock,
 )
 from vault.crypto import (
@@ -70,6 +74,7 @@ from vault.records import (
     activity_group,
     apply_edit,
     format_last_login,
+    format_opened,
     history_lines,
     last_activity,
     new_entry,
@@ -2069,7 +2074,17 @@ _UV_CHECK_MARK = "#3b3b3b"
 _UV_SEGMENT_OFF = "#2a4a6b"
 _UV_BUTTON_TEXT = "#12263a"
 _UV_WINDOW_SIZE = (390, 844)  # px, размер референса
-_UV_MIN_HEIGHT = {"unlock": 600, "create": 781}  # ниже — содержимое прокручивается колесом мыши
+_UV_TILE = "#17314d"  # плитка со значком файла
+_UV_GLYPH = "#9db0c3"
+_UV_CARD_FILL = "#0c1c2b"
+_UV_CARD_LINE = "#1e3a58"
+_UV_CARD_SEL_FILL = "#12304d"
+_UV_CARD_SEL_LINE = "#6f9fcc"
+_UV_FILE_CARD_LINE = "#2d4660"  # рамка карточки файла на экране блокировки
+_UV_RADIO = "#3a5672"
+_UV_LINK = "#7fb0e0"
+_UV_META = "#62788f"
+_UV_MIN_HEIGHT = {"unlock": 600, "create": 781, "pick": 704}  # ниже — содержимое прокручивается колесом мыши
 _UV_DEFAULT_NAME = "Личное"
 
 
@@ -2104,6 +2119,7 @@ class UnlockView(_DrawKit, tk.Canvas):
         self.status = ""  # ошибка под кнопкой «Открыть»
         self.error = ""  # ошибка формы создания (строка под «Повторите мастер-пароль»)
         self.last_login: str | None = None
+        self.pick_choice: Path | None = None  # выбранный файл на экране «Выбор хранилища»
         self._focus: str | None = None
         self._hits = _Hits(self)
         self._pending: str | None = None
@@ -2194,6 +2210,28 @@ class UnlockView(_DrawKit, tk.Canvas):
         self._schedule()
         self.after_idle(self.focus_main_field)
 
+    def show_pick(self) -> None:
+        """Экран «Выбор хранилища»: недавно открытые файлы и «Открыть другой файл…»."""
+        self.mode = "pick"
+        self.pick_choice = Path(self.app._path_var.get())
+        self.yview_moveto(0)
+        self._schedule()
+
+    def pick_other(self) -> None:
+        if self.app._on_browse():
+            self.show_unlock()
+
+    def pick_confirm(self) -> None:
+        if self.pick_choice is not None:
+            self.app._path_var.set(str(self.pick_choice))
+            self.status = ""
+        self.show_unlock()
+        self.refresh()
+
+    def _pick_select(self, path: Path) -> None:
+        self.pick_choice = path
+        self._schedule()
+
     def show_unlock(self) -> None:
         self.mode = "unlock"
         for var in (self.pw1_var, self.pw2_var):
@@ -2216,14 +2254,17 @@ class UnlockView(_DrawKit, tk.Canvas):
         self._schedule()
 
     def _on_escape(self) -> None:
-        if self.mode == "create":
+        if self.mode in ("create", "pick"):
             self.show_unlock()
 
     def _on_control_key(self, event: tk.Event) -> None:
         if not self.winfo_ismapped():
             return
         if event.keysym in ("o", "O", "Cyrillic_shcha", "Cyrillic_SHCHA"):
-            self.app._on_browse(create=self.mode == "create")
+            if self.mode == "pick":
+                self.pick_other()
+            else:
+                self.app._on_browse(create=self.mode == "create")
 
     def _wheel(self, step: int) -> None:
         if self._scrollable():
@@ -2320,7 +2361,7 @@ class UnlockView(_DrawKit, tk.Canvas):
         else:
             self.configure(scrollregion=(0, 0, width_px, height_px))
             self.yview_moveto(0)
-        (self._draw_unlock if self.mode == "unlock" else self._draw_create)(W, vh)
+        {"unlock": self._draw_unlock, "create": self._draw_create, "pick": self._draw_pick}[self.mode](W, vh)
         for key in list(self._items):
             if key not in self._used:
                 self.delete(self._items.pop(key))
@@ -2332,13 +2373,25 @@ class UnlockView(_DrawKit, tk.Canvas):
         if mountain is not None:
             self.create_image(_px(m), _px(72), image=mountain, anchor="nw", tags="dyn")
         self._t(m, 144.75, "Хранилище тайн", 23, "#ffffff", bold=True)
-        self._t(m, 173.75, "Введите мастер-пароль", 13, _UV_SOFT)
-        self._t(m, 247, "Мастер-пароль", 12, _UV_SOFT)
-        self._field(m, 261, w, "pw", 52.5)
-        self._put("pw", m + 14, 288, w - 30)
-        self._button(m, 325, w, "Открыть", self.app._on_unlock, primary=True, h=52.5)
+        self._t(m, 173.75, "Выберите файл и введите мастер-пароль", 13, _UV_SOFT)
+        self._t(m, 226.5, "Файл хранилища", 12, _UV_SOFT)
+        path = Path(self.app._path_var.get())
+        top = 241.5
+        self.create_image(
+            _px(m), _px(top), image=self._rr(w, 65, _UV_CARD_FILL, _UV_FILE_CARD_LINE, 14), anchor="nw", tags="dyn"
+        )
+        self._file_tile(m + 14.5, top + 12)
+        size = format_size(path)
+        self._t(m + 66.5, top + 23.25, path.name, 14, "#ffffff", bold=True)
+        self._t(m + 66.5, top + 43, f"{display_dir(path)} · {size or 'файл не найден'}", 11, _UV_FOOT)
+        self._t(W - m - 14.5, top + 32.25, "Сменить", 12, _UV_LINK, bold=True, anchor="e")
+        self._hits.add(_px(W - m - 80), _px(top + 14), _px(W - m), _px(top + 51), self.show_pick)
+        self._t(m, 335, "Мастер-пароль", 12, _UV_SOFT)
+        self._field(m, 349, w, "pw", 52.5)
+        self._put("pw", m + 14, 377, w - 30)
+        self._button(m, 413, w, "Открыть", self.app._on_unlock, primary=True, h=52.5)
         if self.status:
-            self._t(m, 393, self.status, 12, _MV_RED, anchor="nw", width=_px(w))
+            self._t(m, 481, self.status, 12, _MV_RED, anchor="nw", width=_px(w))
 
         # нижняя группа прижата к низу окна (в референсе окно 844 px высотой)
         b = vh - _UV_WINDOW_SIZE[1]
@@ -2352,6 +2405,105 @@ class UnlockView(_DrawKit, tk.Canvas):
         self._t(m, 784.75 + b, "Мастер-пароль не восстанавливается.", 11, _UV_FOOT)
         if self.last_login:
             self._t(m, 803.25 + b, f"Последний вход: {self.last_login}", 11, _UV_FOOT)
+
+    # --- значки: файл, галочка, папка (рисуются с суперсэмплингом; размеры в px референса) ---
+
+    def _vec(self, kind: str, w: float, h: float, color: str, extra: str = ""):
+        W, H = max(1, _px(w)), max(1, _px(h))
+        key = ("vec", kind, W, H, color, extra)
+        if key not in self._images:
+            k = 8
+            big = Image.new("RGBA", (W * k, H * k), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            u = _px(1) * k  # один px референса в пикселях большого холста
+            if kind == "file":  # лист с загнутым уголком и замочной скважиной
+                lw = max(1, round(1.2 * u))
+                l, r, t, b = 1.2 * u, w * _UI_SCALE * k - 1.2 * u, 1.2 * u, h * _UI_SCALE * k - 1.2 * u
+                ear = 4 * u
+                draw.line([(l, t), (r - ear, t), (r, t + ear), (r, b), (l, b), (l, t)], fill=color, width=lw, joint="curve")
+                draw.line([(r - ear, t), (r - ear, t + ear), (r, t + ear)], fill=color, width=lw, joint="curve")
+                cx, cy = (l + r) / 2, (t + b) / 2 + 1.2 * u
+                draw.ellipse([cx - 1.9 * u, cy - 1.9 * u, cx + 1.9 * u, cy + 1.9 * u], outline=color, width=lw)
+                draw.line([(cx, cy + 1.9 * u), (cx, cy + 4.6 * u)], fill=color, width=lw)
+            elif kind == "check":  # круг с галочкой: extra — цвет галочки
+                draw.ellipse([0, 0, W * k - 1, H * k - 1], fill=color)
+                cx, cy = W * k / 2, H * k / 2
+                pts = [(cx - 4 * u, cy + 1 * u), (cx - 1 * u, cy + 4.1 * u), (cx + 4 * u, cy - 2.2 * u)]
+                draw.line(pts, fill=extra, width=round(1.9 * u), joint="curve")
+                for x, y in (pts[0], pts[2]):
+                    draw.ellipse([x - 0.95 * u, y - 0.95 * u, x + 0.95 * u, y + 0.95 * u], fill=extra)
+            elif kind == "ring":  # пустой кружок
+                lw = max(1, round(1.6 * u))
+                draw.ellipse([lw / 2, lw / 2, W * k - 1 - lw / 2, H * k - 1 - lw / 2], outline=color, width=lw)
+            elif kind == "folder":
+                lw = max(1, round(1.4 * u))
+                l, r, b = 0.9 * u, W * k - 0.9 * u, H * k - 0.9 * u
+                t0, t1 = 0.9 * u, 3.4 * u
+                pts = [(l, t0), (l + 5.4 * u, t0), (l + 7.8 * u, t1), (r, t1), (r, b), (l, b), (l, t0)]
+                draw.line(pts, fill=color, width=lw, joint="curve")
+            self._images[key] = self.app._tk_image(big.resize((W, H), Image.LANCZOS))
+        return self._images[key]
+
+    def _file_tile(self, x: float, y: float) -> None:
+        """Плитка 40×40 со значком файла-хранилища (карточка файла и список «Выбор хранилища»)."""
+        self.create_image(_px(x), _px(y), image=self._rr(40, 40, _UV_TILE, None, 11), anchor="nw", tags="dyn")
+        self.create_image(_px(x + 20), _px(y + 19.7), image=self._vec("file", 12.6, 17.2, _UV_GLYPH), anchor="center", tags="dyn")
+
+    def _draw_pick(self, W: float, vh: float) -> None:
+        m = self.MARGIN
+        w = W - 2 * m
+        self.create_line(
+            _px(32.7), _px(67.2), _px(27.3), _px(71.8), _px(32.5), _px(76.4),
+            fill=_UV_SOFT, width=max(1, _px(1.6)), capstyle="round", joinstyle="round", tags="dyn",
+        )
+        self._t(43.7, 72.75, "Назад", 14, _UV_SOFT)
+        self._hits.add(_px(m), _px(58), _px(120), _px(88), self.show_unlock)
+        self._t(m, 126, "Выбор хранилища", 23, "#ffffff", bold=True)
+        self._t(m, 156.75, "Недавно открытые файлы на этом устройстве.", 13, _UV_SOFT)
+
+        files = recent_vaults(3, include=self.app._path_var.get())
+        if self.pick_choice is None or self.pick_choice not in files:
+            self.pick_choice = files[0]
+        tops = (192.0, 287.0, 382.5)
+        for index, path in enumerate(files):
+            top = tops[index]
+            selected = path == self.pick_choice
+            fill, line = (_UV_CARD_SEL_FILL, _UV_CARD_SEL_LINE) if selected else (_UV_CARD_FILL, _UV_CARD_LINE)
+            self.create_image(_px(m), _px(top), image=self._rr(w, 85.5, fill, line, 14), anchor="nw", tags="dyn")
+            self._file_tile(m + 14.5, top + 23)
+            opened = format_opened(last_unlock_time(path)) or "Ещё не открывали"
+            size = format_size(path)
+            self._t(m + 66.5, top + 24.5, path.name, 14, "#ffffff", bold=True)
+            self._t(m + 66.5, top + 44.5, display_dir(path), 11, _UV_FOOT)
+            self._t(m + 66.5, top + 62.75, f"{opened} · {size}" if size else opened, 11, _UV_META)
+            cx, cy = W - m - 25.5, top + 42.75
+            if selected:
+                image = self._vec("check", 22, 22, _UV_LINK, _UV_CARD_FILL)
+            else:
+                image = self._vec("ring", 22, 22, _UV_RADIO)
+            self.create_image(_px(cx), _px(cy), image=image, anchor="center", tags="dyn")
+            self._hits.add(_px(m), _px(top), _px(W - m), _px(top + 85.5), lambda p=path: self._pick_select(p))
+        last = tops[len(files) - 1] + 85.5  # нижний край последней карточки
+
+        cx = W / 2
+        y = last + 26.75
+        for x0, x1 in ((m, cx - 23), (cx + 22.5, W - m)):
+            self.create_rectangle(_px(x0), _px(y - 1), _px(x1), _px(y + 1), fill=_UV_LINE_SOFT, outline="", tags="dyn")
+            self.create_rectangle(_px(x0), _px(y - 0.5), _px(x1), _px(y + 0.5), fill=_UV_LINE, outline="", tags="dyn")
+        self._t(cx, y + 1.5, "или", 11, _UV_DIM, anchor="center")
+        btn_top = last + 51
+        self._button(m, btn_top, w, "", self.pick_other, primary=False, h=52.5)
+        text = "Открыть другой файл…"
+        font = tkfont.Font(family=_mv_family(), size=-_px(14), weight="bold")
+        text_w = font.measure(text) / max(_UI_SCALE, 0.01)
+        group = 16.3 + 13 + text_w
+        gx = cx - group / 2
+        self.create_image(_px(gx + 1.5), _px(btn_top + 27.25), image=self._vec("folder", 16.3, 13, _UV_TEXT), anchor="w", tags="dyn")
+        self._t(gx + 29.3, btn_top + 27.25, text, 14, _UV_TEXT, bold=True)
+        self._t(m, btn_top + 73.25, "Подходят файлы с расширением .vault.", 11, _UV_FOOT)
+
+        name = self.pick_choice.name
+        self._button(m, max(vh - 84, 620), w, f"Выбрать «{name}»", self.pick_confirm, primary=True)
 
     def _strength(self):
         key = (self.pw1_var.get(), self.name_var.get())
@@ -4251,9 +4403,10 @@ class App(ttk.Window):
         """«сегодня, 09:14» для строки «Последний вход» (None, если этот файл ещё не открывали)."""
         return format_last_login(last_unlock_time(self._path_var.get()))
 
-    def _on_browse(self, create: bool = False) -> None:
-        """Ctrl+O на экране блокировки (в референсе кнопки выбора файла нет): открыть другой файл
-        хранилища, а на экране «Новое хранилище» — выбрать, где его создать."""
+    def _on_browse(self, create: bool = False) -> bool:
+        """Выбрать файл: «Открыть другой файл…» на экране «Выбор хранилища» и Ctrl+O на экране
+        блокировки; на экране «Новое хранилище» Ctrl+O выбирает, где создать хранилище.
+        Возвращает True, если файл выбран."""
         initial_dir = Path(self._path_var.get()).parent
         options = {
             "initialdir": str(initial_dir) if initial_dir.exists() else str(Path.home()),
@@ -4269,6 +4422,7 @@ class App(ttk.Window):
             self._path_var.set(path)
             self._unlock_view.set_status("")
             self._unlock_view.refresh()
+        return bool(path)
 
     def _on_unlock(self) -> None:
         path = Path(self._path_var.get())
