@@ -45,6 +45,7 @@ from assistant.advisor import WEAK_ENTROPY_THRESHOLD_BITS, AdvisorReport, analyz
 from assistant.analyzer import analyze as analyze_password
 from assistant.analyzer import summary as analysis_summary
 from assistant.generator import DEFAULT_LENGTH as DEFAULT_GENERATED_LENGTH
+from assistant.chat import ChatPlan, plan_reply
 from assistant.generator import (
     MAX_LENGTH as GEN_MAX_LENGTH,
     MIN_LENGTH as GEN_MIN_LENGTH,
@@ -965,6 +966,20 @@ _MV_GEN_OPTIONS = {  # режим -> (ключ, подпись, подсказк
     "pin": (),
 }
 _MV_SAVE_HINT = "Найти запись"
+# чат помощника в правой панели (раздел 10.85)
+_MV_CHAT_HINT = "Спросите про записи или попросите пароль"
+_MV_CHAT_NOTE = "Помощник видит названия записей, даты и результаты проверки. Сами пароли ему недоступны."
+_MV_BUBBLE = "#18314d"
+_MV_CHAT_TEXT = "#dde8f5"
+_MV_CHAT_LABEL = "#8294aa"
+_MV_CHAT_SUB = "#7f92a6"
+_MV_CHAT_ROW_LINE = "#16293f"
+_MV_CHAT_BOX_LINE = "#1d2e43"
+_MV_CHAT_NOTE_COLOR = "#7f90a6"
+_MV_CHAT_STATUS = "#97a9bc"
+_MV_CHAT_INPUT_LINE = "#263c50"
+_MV_CHAT_HEADER_LINE = "#182b42"
+_MV_CHAT_FOOTER_LINE = "#16263e"
 _MV_SEARCH_HINT = "Поиск"
 _MV_GROUP_TITLES = {"today": "Сегодня", "week": "На этой неделе", "earlier": "Ранее"}
 
@@ -1152,6 +1167,15 @@ class MainView(_DrawKit, tk.Frame):
         self._save_active = False
         self._save_var = tk.StringVar(value=_MV_SAVE_HINT)
         self._save_entry: tk.Entry | None = None
+        # чат помощника (раздел 10.85)
+        self._chat: list[dict] = []
+        self._chat_offset = 0.0
+        self._chat_follow = True
+        self._chat_active = False
+        self._chat_var = tk.StringVar(value=_MV_CHAT_HINT)
+        self._chat_entry: tk.Entry | None = None
+        self._chat_busy = False
+        self._chat_results: queue.Queue = queue.Queue()
 
         line = max(1, _px(1))
         self.sidebar = tk.Canvas(self, width=_px(224), bg=_MV_SIDEBAR_BG, bd=0, highlightthickness=0)
@@ -1349,6 +1373,11 @@ class MainView(_DrawKit, tk.Frame):
         self._save_target, self._save_scroll = None, 0
         self._save_active = False
         self._save_var.set(_MV_SAVE_HINT)
+        self._chat, self._chat_offset, self._chat_follow, self._chat_busy = [], 0.0, True, False
+        self._chat_active = False
+        self._chat_var.set(_MV_CHAT_HINT)
+        if self._chat_entry is not None:
+            self._chat_entry.configure(fg=_MV_TEXT_DIM)
         for var in self._ev.values():
             var.set("")
         if self._ev:
@@ -1520,7 +1549,7 @@ class MainView(_DrawKit, tk.Frame):
             (249, 102, "Помощник", lambda: self.app._on_assistant(), True),
             (359, 83, "Генератор", lambda: self.app._on_generate_standalone(), False),
         ):
-            on = label == "Генератор" and self.panel is not None
+            on = (label == "Генератор" and self.panel in ("gen", "save")) or (label == "Помощник" and self.panel == "assistant")
             c.create_image(
                 _px(left - x0),
                 _px(16),
@@ -1597,7 +1626,7 @@ class MainView(_DrawKit, tk.Frame):
             self._draw_edit(c, hits, width, height)
             return
         if self.panel and self.app.data is not None:
-            (self._draw_gen if self.panel == "gen" else self._draw_save)(c, hits, width, height)
+            {"gen": self._draw_gen, "save": self._draw_save, "assistant": self._draw_chat}[self.panel](c, hits, width, height)
             return
         entry = self.selected
         if entry is None or self.app.data is None:
@@ -2133,7 +2162,7 @@ class MainView(_DrawKit, tk.Frame):
 
     def toggle_generator(self) -> None:
         """Кнопка «Генератор»: открыть панель справа или закрыть, если она уже открыта."""
-        if self.panel:
+        if self.panel in ("gen", "save"):
             self.close_panel()
         else:
             self.open_generator()
@@ -2141,8 +2170,10 @@ class MainView(_DrawKit, tk.Frame):
     def open_generator(self) -> None:
         if self.app.data is None or (self.editing and not self._leave_edit_ok()):
             return
-        self._panel_prev = self.selected
+        if not self.panel:
+            self._panel_prev = self.selected
         self.selected, self.password_visible = None, False
+        self._drop_window("chat")
         self.panel = "gen"
         self._gen_regenerate()
         self._draw_head()
@@ -2158,6 +2189,7 @@ class MainView(_DrawKit, tk.Frame):
         self._gen_password, self._gen_bits = "", 0.0
         self._slider, self._slider_drag = None, False
         self._drop_window("gsearch")
+        self._drop_window("chat")
         if restore and self._panel_prev is not None and any(e is self._panel_prev for e in self._entries()):
             self.selected = self._panel_prev
         self._panel_prev = None
@@ -2226,7 +2258,11 @@ class MainView(_DrawKit, tk.Frame):
             self._gen_set_length(self._slider_value_at(self.detail.canvasx(event.x)))
 
     def _on_detail_wheel(self, direction: int) -> None:
-        if self.panel == "save":
+        if self.panel == "assistant":
+            self._chat_offset = max(0.0, self._chat_offset + 40 * direction)
+            self._chat_follow = False
+            self._draw_detail()
+        elif self.panel == "save":
             self._save_scroll = max(0, min(max(0, len(self._save_rows()) - 4), self._save_scroll + direction))
             self._draw_detail()
         elif not self.panel:
@@ -2560,6 +2596,349 @@ class MainView(_DrawKit, tk.Frame):
         self.panel = "gen"
         self._drop_window("gsearch")
         self._draw_detail()
+
+    # --- чат помощника в правой панели (CLAUDE.md, раздел 10.85) -----------------------------------
+
+    def toggle_assistant(self) -> None:
+        """Кнопка «Помощник»: открыть чат справа или закрыть, если он уже открыт."""
+        if self.panel == "assistant":
+            self.close_panel()
+        else:
+            self.open_assistant()
+
+    def open_assistant(self) -> None:
+        if self.app.data is None or (self.editing and not self._leave_edit_ok()):
+            return
+        if not self.panel:
+            self._panel_prev = self.selected
+        elif self.panel in ("gen", "save"):
+            self._gen_password, self._gen_bits = "", 0.0
+            self._slider, self._slider_drag = None, False
+            self._drop_window("gsearch")
+        self.selected, self.password_visible = None, False
+        self.panel = "assistant"
+        self._chat_follow = True
+        self._draw_head()
+        self._draw_list()
+        self._draw_detail()
+        self.after_idle(lambda: self._chat_entry is not None and self.panel == "assistant" and self._chat_entry.focus_set())
+
+    def _greeting(self) -> str:
+        if self.app._assistant.llm.available:
+            return "Здравствуйте! Спросите про пароли и безопасность — отвечу по результатам раздела «Проблемы»."
+        return (
+            "Здравствуйте! Я помощник на базе знаний: отвечаю на вопросы про пароли и безопасность, а про ваше "
+            "хранилище — по результатам раздела «Проблемы». Спросите, например, про слабые, повторяющиеся и "
+            "устаревшие пароли или попросите придумать новый пароль для записи."
+        )
+
+    def _ensure_chat_entry(self) -> None:
+        if self._chat_entry is not None:
+            return
+        entry = tk.Entry(
+            self.detail, textvariable=self._chat_var, bd=0, highlightthickness=0, relief="flat", bg=_MV_FIELD_FILL,
+            fg=_MV_TEXT_DIM, insertbackground=_MV_EDIT_TEXT, selectbackground=_MV_SELECT, selectforeground=_MV_EDIT_TEXT,
+            font=_mv_font(13.1),
+        )
+
+        def focus_in(_e) -> None:
+            if not self._chat_active:
+                self._chat_var.set("")
+                self._chat_active = True
+            entry.configure(fg=_MV_EDIT_TEXT)
+            self._set_focus("chat")
+
+        def focus_out(_e) -> None:
+            if not self._chat_var.get():
+                self._chat_active = False
+                self._chat_var.set(_MV_CHAT_HINT)
+                entry.configure(fg=_MV_TEXT_DIM)
+            self._set_focus(None, only="chat")
+
+        entry.bind("<FocusIn>", focus_in)
+        entry.bind("<FocusOut>", focus_out)
+        entry.bind("<Return>", lambda _e: (self._chat_send(), "break")[1])
+        entry.bind("<Escape>", lambda _e: self.close_panel())
+        self._chat_entry = entry
+
+    def _chat_send(self, question: str | None = None) -> None:
+        """Отправить вопрос. Всё, что похоже на пароль, скрывается ДО отправки и в самой ленте
+        (`assistant.prompt.redact_secrets`); в историю для модели идёт только скрытый текст."""
+        if self._chat_busy or self.app.data is None:
+            return
+        raw = question if question is not None else (self._chat_var.get() if self._chat_active else "")
+        shown = redact_secrets(raw.strip())
+        if not shown:
+            return
+        if question is None:
+            self._chat_var.set("")
+        history = list(self.app._assistant_history)
+        stamp = datetime.now().strftime("%H:%M")
+        self._chat.append({"role": "user", "text": shown})
+        self.app._assistant_history.append({"role": "user", "content": shown, "time": stamp})
+        self._chat_follow = True
+        plan = plan_reply(shown, self.app.data)
+        if plan is not None:
+            self._chat_add_plan(plan)
+        else:
+            assistant = self.app._assistant
+            context = self.app._assistant_context()
+            if assistant.llm.available:
+                self._chat_busy = True
+
+                def work() -> None:
+                    try:
+                        self._chat_results.put(assistant.reply(shown, history, context).text)
+                    except Exception:  # noqa: BLE001 — поток не должен падать молча
+                        self._chat_results.put("Не получилось ответить. Попробуйте ещё раз.")
+
+                threading.Thread(target=work, daemon=True).start()
+                self.after(30, self._chat_poll)
+            else:
+                self._chat_add_text(assistant.reply(shown, history, context).text)
+        self._draw_detail()
+        if self._chat_entry is not None and self.panel == "assistant":
+            self.after_idle(self._chat_entry.focus_set)
+
+    def _chat_poll(self) -> None:
+        try:
+            text = self._chat_results.get_nowait()
+        except queue.Empty:
+            self.after(30, self._chat_poll)
+            return
+        self._chat_busy = False
+        if self.app.data is None:
+            return  # хранилище заблокировали, пока шёл ответ
+        self._chat_add_text(text)
+        if self.panel == "assistant":
+            self._draw_detail()
+
+    def _chat_add_text(self, text: str) -> None:
+        self._chat.append({"role": "assistant", "kind": "text", "text": text})
+        self.app._assistant_history.append({"role": "assistant", "content": text, "time": datetime.now().strftime("%H:%M")})
+        self._chat_follow = True
+
+    def _chat_add_plan(self, plan: ChatPlan) -> None:
+        """Готовый блок: список записей с «Открыть» или новый пароль. Сам пароль живёт только здесь,
+        в памяти окна: в историю для модели идёт лишь текст ответа."""
+        entries = self._entries()
+
+        def find(site: str | None, username: str | None) -> dict | None:
+            return next((e for e in entries if e["site"] == site and e["username"] == username), None)
+
+        if plan.kind == "problems":
+            items = [
+                {"entry": e, "title": i.site, "subtitle": i.subtitle}
+                for i in plan.items
+                if (e := find(i.site, i.username)) is not None
+            ]
+            self._chat.append({"role": "assistant", "kind": "problems", "text": plan.text, "items": items})
+        else:
+            password = generate_password(plan.length, True, True, True, True, True)  # без похожих знаков
+            self._chat.append(
+                {
+                    "role": "assistant", "kind": "password", "text": plan.text, "password": password,
+                    "entry": find(plan.site, plan.username), "visible": False, "applied": False,
+                }
+            )
+        self.app._assistant_history.append({"role": "assistant", "content": plan.text, "time": datetime.now().strftime("%H:%M")})
+        self._chat_follow = True
+
+    def _chat_open_entry(self, entry: dict) -> None:
+        self.select(entry)
+
+    def _chat_toggle_visible(self, message: dict) -> None:
+        message["visible"] = not message["visible"]
+        self._draw_detail()
+
+    def _chat_copy(self, message: dict) -> None:
+        self.app._copy_to_clipboard(message["password"])
+
+    def _chat_apply(self, message: dict) -> None:
+        entry = message.get("entry")
+        if entry is None or message.get("applied") or not any(e is entry for e in self._entries()):
+            return
+        fields = {
+            "site": entry.get("site", ""), "username": entry.get("username", ""), "password": message["password"],
+            "url": entry.get("url", ""), "note": entry.get("note", ""), "tags": list(entry.get("tags", []) or []),
+        }
+        self.app._store_entry(entry, fields)
+        message["applied"] = True
+        if self.panel == "assistant":  # `finish_edit` выбрал запись; панель остаётся открытой
+            self.selected = None
+            self._draw_list()
+            self._draw_detail()
+
+    # рисование чата
+
+    def _chat_font(self, px: float, bold: bool = False):
+        cache = self.__dict__.setdefault("_chat_fonts", {})
+        key = (px, bold, _UI_SCALE)
+        if key not in cache:
+            cache[key] = tkfont.Font(family=_mv_family(), size=-_px(px), weight="bold" if bold else "normal")
+        return cache[key]
+
+    def _chat_text_width(self, text: str, px: float, bold: bool = False) -> float:
+        return self._chat_font(px, bold).measure(text) / max(_UI_SCALE, 0.01)
+
+    def _chat_wrap(self, text: str, px: float, width: float, bold: bool = False) -> list[str]:
+        lines: list[str] = []
+        for paragraph in text.split("\n"):
+            current = ""
+            for word in paragraph.split():
+                trial = f"{current} {word}".strip()
+                if current and self._chat_text_width(trial, px, bold) > width:
+                    lines.append(current)
+                    current = word
+                else:
+                    current = trial
+            lines.append(current)
+        return lines or [""]
+
+    def _chat_bubble(self, w: float, h: float):
+        """Пузырь пользователя: углы 14 px, правый нижний — 4 px («хвостик»)."""
+        W, H, R, r = max(1, _px(w)), max(1, _px(h)), _px(14), _px(4)
+        key = ("chatbubble", W, H)
+        if key not in self._images:
+            f = 4
+            big = Image.new("RGBA", (W * f, H * f), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            draw.rounded_rectangle([0, 0, W * f - 1, H * f - 1], radius=min(R, min(W, H) // 2) * f, fill=_MV_BUBBLE)
+            draw.rounded_rectangle([W * f - R * f, H * f - R * f, W * f - 1, H * f - 1], radius=r * f, fill=_MV_BUBBLE)
+            self._images[key] = self.app._tk_image(big.resize((W, H), Image.LANCZOS))
+        return self._images[key]
+
+    def _draw_chat(self, c: tk.Canvas, hits: _Hits, width: int, height: int) -> None:
+        P = _px
+        scale = max(_UI_SCALE, 0.01)
+        left, right = 32, width / scale - 32
+        span = right - left
+        H = height / scale
+        dy = max(H - 700.0, -170.0)  # нижняя часть (подпись, поле ввода) прижата к низу окна
+        view_top, view_bottom = 64.5, 572.0 + dy
+        self._edit_used = set()
+        self._drop_window("gsearch")
+        self._ensure_chat_entry()
+
+        def hit(x0: float, y0: float, x1: float, y1: float, command) -> None:
+            y0, y1 = max(y0, view_top), min(y1, view_bottom)
+            if y1 > y0:
+                hits.add(P(x0), P(y0), P(x1), P(y1), command)
+
+        messages = list(self._chat) or [{"role": "assistant", "kind": "text", "text": self._greeting()}]
+        if self._chat_busy:
+            messages.append({"role": "assistant", "kind": "text", "text": "печатает…", "typing": True})
+
+        # --- раскладка: (сообщение, верх, строки, низ) в координатах содержимого ---
+        placed = []
+        y, prev = 84.0, None
+        for m in messages:
+            if m["role"] == "user":
+                lines = self._chat_wrap(m["text"], 13.1, span * 0.8 - 28)
+                text_w = max(self._chat_text_width(line, 13.1) for line in lines)
+                h = 41.0 + 21.3 * (len(lines) - 1)
+                top = y if prev is None else y + (15.7 if prev == "assistant" else 14.0)
+                placed.append((m, top, lines, top + h, text_w))
+                y, prev = top + h, "user"
+            else:
+                lines = self._chat_wrap(m["text"], 13.1, span)
+                top = y if prev is None else y + (14.5 if prev == "user" else 20.0)
+                last = top + 8 + 22.7 + 21.3 * (len(lines) - 1)
+                kind = m.get("kind", "text")
+                if kind == "problems" and m["items"]:
+                    bottom = last + 16.3 + 60.4 * len(m["items"])
+                elif kind == "password":
+                    bottom = last + 19.3 + 47.0
+                else:
+                    bottom = last + 11.0
+                placed.append((m, top, lines, bottom, 0.0))
+                y, prev = bottom, "assistant"
+        content_end = y
+        max_offset = max(0.0, content_end + 12.0 - view_bottom)
+        if self._chat_follow or self._chat_offset >= max_offset:
+            self._chat_offset, self._chat_follow = max_offset, True
+        self._chat_offset = max(0.0, min(self._chat_offset, max_offset))
+        off = self._chat_offset
+
+        # --- сообщения ---
+        for m, top, lines, bottom, text_w in placed:
+            if bottom - off < view_top - 5 or top - off > view_bottom + 5:
+                continue
+            t = top - off
+            if m["role"] == "user":
+                bw = text_w + 28.5
+                c.create_image(P(right - bw), P(t), image=self._chat_bubble(bw, bottom - top), anchor="nw", tags="dyn")
+                for i, line in enumerate(lines):
+                    self._text(c, right - bw + 14.5, t + 20.5 + 21.3 * i, line, px=13.1, fill="#eef8ff")
+                continue
+            self._text(c, left, t + 8, "Помощник", px=11.2, fill=_MV_CHAT_LABEL)
+            line_color = _MV_CHAT_LABEL if m.get("typing") else _MV_CHAT_TEXT
+            for i, line in enumerate(lines):
+                self._text(c, left, t + 30.7 + 21.3 * i, line, px=13.1, fill=line_color)
+            last = t + 8 + 22.7 + 21.3 * (len(lines) - 1)
+            kind = m.get("kind", "text")
+            if kind == "problems":
+                sep = last + 16.3
+                for item in m["items"]:
+                    c.create_line(P(left), P(sep), P(right), P(sep), fill=_MV_CHAT_ROW_LINE, tags="dyn")
+                    self._text(c, left, sep + 19.6, item["title"], px=12.8, fill="#f1f7fc", bold=True)
+                    self._text(c, left, sep + 43.6, item["subtitle"], px=11.3, fill=_MV_CHAT_SUB)
+                    bx = right - 77.3
+                    c.create_image(P(bx), P(sep + 15.9), image=self._rr(77.3, 29.6, None, _MV_CANCEL_LINE, 10), anchor="nw", tags="dyn")
+                    self._text(c, bx + 38.65, sep + 30.9, "Открыть", px=11.1, fill="#deecf7", bold=True, anchor="center")
+                    hit(bx, sep + 15.9, right, sep + 45.5, lambda e=item["entry"]: self._chat_open_entry(e))
+                    sep += 60.4
+                c.create_line(P(left), P(sep), P(right), P(sep), fill=_MV_CHAT_ROW_LINE, tags="dyn")
+            elif kind == "password":
+                box = last + 19.3
+                c.create_image(P(left), P(box), image=self._rr(span, 47, _MV_FIELD_FILL, _MV_CHAT_BOX_LINE, 12), anchor="nw", tags="dyn")
+                password = m["password"]
+                if m["visible"]:
+                    shown = password if len(password) <= 26 else password[:25] + "…"
+                    self._text(c, left + 16.5, box + 24.4, shown, px=13, fill="#f2f4ef", mono=True)
+                else:
+                    for i in range(min(len(password), 20)):
+                        cx = left + 19.2 + 10.55 * i
+                        c.create_image(P(cx), P(box + 24.4), image=self._disc(4, "#f6f3ef"), anchor="center", tags="dyn")
+                show_x = right - 12.5 - 83.2
+                c.create_image(P(show_x), P(box + 8.4), image=self._rr(83.2, 30.4, None, _MV_CANCEL_LINE, 10), anchor="nw", tags="dyn")
+                self._text(c, show_x + 41.6, box + 23.8, "Скрыть" if m["visible"] else "Показать", px=11.1, fill="#ddebf6", bold=True, anchor="center")
+                hit(show_x, box + 8.4, show_x + 83.2, box + 38.8, lambda mm=m: self._chat_toggle_visible(mm))
+                apply_x = show_x - 7.6 - 92.3
+                entry = m.get("entry")
+                if entry is not None and m.get("applied"):
+                    c.create_image(P(apply_x), P(box + 8.4), image=self._rr(92.3, 30.4, None, _MV_CANCEL_LINE, 10), anchor="nw", tags="dyn")
+                    self._text(c, apply_x + 46.15, box + 23.8, "Применено", px=11.1, fill=_MV_CHAT_LABEL, bold=True, anchor="center")
+                else:
+                    label, command = ("Применить", lambda mm=m: self._chat_apply(mm)) if entry is not None else ("Копировать", lambda mm=m: self._chat_copy(mm))
+                    c.create_image(P(apply_x), P(box + 8.4), image=self._rr(92.3, 30.4, _MV_CREAM, None, 10), anchor="nw", tags="dyn")
+                    self._text(c, apply_x + 46.15, box + 23.8, label, px=11.1, fill=_MV_SAVE_TEXT, bold=True, anchor="center")
+                    hit(apply_x, box + 8.4, apply_x + 92.3, box + 38.8, command)
+
+        # --- шапка и нижняя часть закрывают прокручиваемую ленту ---
+        c.create_rectangle(0, 0, width, P(view_top), fill=_MV_BG, outline="", tags="dyn")
+        c.create_rectangle(0, P(view_bottom), width, max(height, P(view_bottom) + 1), fill=_MV_BG, outline="", tags="dyn")
+        self._text(c, left, 32.5, "Помощник", px=18.5, fill="#f8f8fa", bold=True)
+        c.create_oval(P(right - 178.4 - 8.4 + 0), P(27.4), P(right - 178.4), P(35.8), fill=_MV_GREEN, outline=_MV_GREEN, tags="dyn")
+        self._text(c, right, 33.3, "Работает на этом устройстве", px=11.2, fill=_MV_CHAT_STATUS, anchor="e")
+        c.create_line(0, P(63.6), width, P(63.6), fill=_MV_CHAT_HEADER_LINE, tags="dyn")
+
+        foot = 621.6 + dy
+        for i, line in enumerate(self._chat_wrap(_MV_CHAT_NOTE, 11.4, span + 1)[:2]):
+            self._text(c, left, 583.4 + dy + 16.1 * i, line, px=11.4, fill=_MV_CHAT_NOTE_COLOR)
+        c.create_line(0, P(foot), width, P(foot), fill=_MV_CHAT_FOOTER_LINE, tags="dyn")
+        border = _MV_FOCUS_LINE if self._focus == "chat" else _MV_CHAT_INPUT_LINE
+        c.create_image(P(left), P(foot + 14.6), image=self._rr(340.1, 43.6, _MV_FIELD_FILL, border, 12), anchor="nw", tags="dyn")
+        self._put("chat", self._chat_entry, left + 16, foot + 14.6 + 21.8, 340.1 - 32)
+        send_x = left + 348.3
+        c.create_image(P(send_x), P(foot + 14.6), image=self._rr(span - 348.3, 43.4, _MV_CREAM, None, 12), anchor="nw", tags="dyn")
+        self._text(c, send_x + (span - 348.3) / 2, foot + 14.6 + 21.9, "Отправить", px=12.2, fill=_MV_SAVE_TEXT, bold=True, anchor="center")
+        hits.add(P(send_x), P(foot + 14.6), P(right), P(foot + 58), self._chat_send)
+
+        for key in list(self._edit_items):
+            if key not in self._edit_used:
+                self._drop_window(key)
+        c.configure(scrollregion=(0, 0, width, height))
 
     # --- действия панели -------------------------------------------------------------------------
 
@@ -5249,7 +5628,8 @@ class App(ttk.Window):
         self._view.toggle_generator()
 
     def _on_assistant(self) -> None:
-        AssistantDialog(self)
+        """Кнопка «Помощник»: чат открывается справа в главном окне (раздел 10.85)."""
+        self._view.toggle_assistant()
 
     def _on_change_master(self) -> None:
         """Смена мастер-пароля (раздел 10.66): диалог запрашивает текущий
@@ -5953,639 +6333,6 @@ class AuditDialog(ttk.Toplevel):
             widget.bind(sequence, on_wheel)
         for child in widget.winfo_children():
             self._bind_wheel(child)
-
-
-# --- Графика чата помощника (раздел 9.4): градиенты, пузыри, кнопка отправки --
-
-_CHAT_BG = "#eef2ff"  # фон ленты сообщений — мягкий индиго
-_CHAT_BLUE = "#3b82f6"
-_CHAT_VIOLET = "#8b5cf6"
-_CHAT_PILL_BG = "#dbe3fb"
-_CHAT_TEXT = "#26324d"
-_CHAT_TIME = "#8a96b3"
-_CHAT_BOT_BORDER = "#d9e1f5"
-
-
-_CHAT_CARD_RADIUS = 16  # скругление шапки и ленты чата, px
-_CHAT_CARD_PADDING = 8  # отступ ленты от края скруглённой подложки, px
-
-
-def _round_image_corners(image: Image.Image, radius: int, surface: str) -> Image.Image:
-    """Скруглить ВСЕ углы картинки: за дугой — цвет `surface` (без прозрачности,
-    урок раздела 10.5). Маска рисуется с 4-кратным суперсэмплингом."""
-    width, height = image.size
-    radius = max(0, min(radius, width // 2 - 1, height // 2 - 1))
-    factor = 4
-    mask = Image.new("L", (width * factor, height * factor), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        (0, 0, width * factor - 1, height * factor - 1), radius=radius * factor, fill=255
-    )
-    mask = mask.resize((width, height), Image.LANCZOS)
-    return Image.composite(image, Image.new("RGB", (width, height), surface), mask)
-
-
-def _gradient_image(
-    width: int, height: int, stops: list[tuple[float, str]], *, mix_x: float = 1.0, mix_y: float = 0.0
-) -> Image.Image:
-    """Линейный градиент по нескольким остановкам `(позиция 0..1, цвет)`.
-    Направление задаётся долями `mix_x`/`mix_y`: (1, 0) — слева направо,
-    (0.5, 0.5) — по диагонали из левого верхнего угла в правый нижний."""
-    colors = [(pos, _hex_to_rgb(color)) for pos, color in stops]
-    if len(colors) == 1 or all(c == colors[0][1] for _p, c in colors):
-        return Image.new("RGB", (width, height), colors[0][1])
-    total = (mix_x + mix_y) or 1.0
-
-    def at(t: float) -> tuple[int, int, int]:
-        if t <= colors[0][0]:
-            return colors[0][1]
-        for (p0, c0), (p1, c1) in zip(colors, colors[1:]):
-            if t <= p1:
-                k = (t - p0) / ((p1 - p0) or 1.0)
-                return tuple(round(a + (b - a) * k) for a, b in zip(c0, c1))  # type: ignore[return-value]
-        return colors[-1][1]
-
-    # t зависит от x и y линейно — значения по x и по y считаются один раз.
-    xs = [mix_x * x / max(width - 1, 1) for x in range(width)]
-    ys = [mix_y * y / max(height - 1, 1) for y in range(height)]
-    cache: dict[int, tuple[int, int, int]] = {}
-    data = []
-    for yt in ys:
-        for xt in xs:
-            key = round((xt + yt) / total * 255)
-            color = cache.get(key)
-            if color is None:
-                color = cache[key] = at(key / 255)
-            data.append(color)
-    image = Image.new("RGB", (width, height))
-    image.putdata(data)
-    return image
-
-
-def _render_bubble(
-    width: int,
-    height: int,
-    fill_a: str,
-    fill_b: str,
-    radius: int,
-    corners: tuple[bool, bool, bool, bool],
-    surface: str,
-    border: str | None = None,
-    factor: int = 3,
-) -> Image.Image:
-    """Пузырь сообщения: скруглённый по маске `corners` прямоугольник,
-    залитый градиентом `fill_a` -> `fill_b` (одинаковые цвета — сплошной), с
-    необязательной рамкой в 1 px. Края сглажены суперсэмплингом маски."""
-
-    # Радиус строго меньше половины стороны: при ровно половине Pillow падает на
-    # пузырях с нескруглённым углом (`y1 must be >= y0`).
-    radius = max(1, min(radius, width // 2 - 1, height // 2 - 1))
-
-    def mask(inset: int) -> Image.Image:
-        big = Image.new("L", (width * factor, height * factor), 0)
-        d = inset * factor
-        ImageDraw.Draw(big).rounded_rectangle(
-            [d, d, width * factor - 1 - d, height * factor - 1 - d],
-            radius=max(radius * factor - d, 0),
-            fill=255,
-            corners=corners,
-        )
-        return big.resize((width, height), Image.LANCZOS)
-
-    base = Image.new("RGB", (width, height), surface)
-    if border:
-        base.paste(Image.new("RGB", (width, height), border), (0, 0), mask(0))
-        inner = mask(1)
-    else:
-        inner = mask(0)
-    base.paste(_gradient_image(width, height, [(0.0, fill_a), (1.0, fill_b)]), (0, 0), inner)
-    return base
-
-
-def _render_send_button(size: int, state: str = "normal", factor: int = 4) -> Image.Image:
-    """Круглая кнопка отправки с бумажным самолётиком; `state`: normal /
-    hover (светлее) / disabled (серая). Фон — цвет ленты (`_CHAT_BG`... кнопка
-    стоит на белом поле ввода, поэтому поверхность белая)."""
-    big = size * factor
-    if state == "disabled":
-        body = Image.new("RGB", (big, big), "#c4cde0")
-    else:
-        body = _gradient_image(big, big, [(0.0, _CHAT_BLUE), (1.0, _CHAT_VIOLET)], mix_x=0.5, mix_y=0.5)
-        if state == "hover":
-            body = Image.blend(body, Image.new("RGB", (big, big), "#ffffff"), 0.18)
-    mask = Image.new("L", (big, big), 0)
-    ImageDraw.Draw(mask).ellipse([0, 0, big - 1, big - 1], fill=255)
-    canvas = Image.new("RGB", (big, big), "#ffffff")
-    canvas.paste(body, (0, 0), mask)
-    draw = ImageDraw.Draw(canvas)
-    plane = [(0.29, 0.30), (0.75, 0.50), (0.29, 0.70), (0.38, 0.50)]
-    draw.polygon([(x * big, y * big) for x, y in plane], fill="#ffffff")
-    return canvas.resize((size, size), Image.LANCZOS)
-
-
-
-class AssistantDialog(ttk.Toplevel):
-    """Чат с локальным помощником по безопасности (CLAUDE.md, раздел 9.4) в
-    формате современного мессенджера: цветная шапка с градиентом и статусом,
-    лента на мягком индиго-фоне с плашкой «Сегодня», сообщения пользователя —
-    справа в сине-фиолетовом градиенте, помощника — слева, белые; у каждого
-    пузыря время; пока ответ готовится — пузырь с тремя бегущими точками;
-    быстрые ответы-«чипы», поле ввода в виде таблетки и круглая кнопка
-    отправки с самолётиком. Правый щелчок по пузырю копирует текст.
-
-    Модель работает на этом же компьютере без сети и получает только
-    метаданные хранилища (`assistant.prompt`): ни паролей, ни логинов, ни
-    мастер-пароля. Всё, что в вопросе похоже на пароль, скрывается ДО
-    отправки и в самом чате. Ответ считается в отдельном потоке, чтобы
-    окно не замирало. Если модели нет — отвечает база знаний (assistant/faq.py)
-    (`assistant.offline`), режим показан в шапке."""
-
-    QUICK_QUESTIONS = (
-        "Что со слабыми паролями?",
-        "Что исправить в первую очередь?",
-        "Как придумать пароль?",
-    )
-    BUBBLE_WRAP = 330  # px, максимальная ширина текста в пузыре
-    MIN_TYPING_SECONDS = 0.7  # минимальное время показа «печатает»
-    _HINT = "Не вводите пароли в чат: всё, что на них похоже, скрывается. Правый щелчок по сообщению — копировать."
-
-    def __init__(self, parent: App) -> None:
-        super().__init__(title="Помощник", master=parent, resizable=(False, False), iconphoto=None)
-        self.withdraw()
-        parent._dialog_chrome(self, "Помощник", theme="dark")
-        self.transient(parent)
-        self._parent = parent
-        self._busy = False
-        self._results: queue.Queue = queue.Queue()
-        self._messages: list[tuple[str, str]] = []  # (роль, текст) — то, что показано в ленте
-        self._typing_row: SimpleNamespace | None = None
-        self._typing_job: str | None = None
-        self._sent_at = 0.0
-        self._photos: list[ImageTk.PhotoImage] = []  # картинки пузырей — держим живыми
-
-        self._build_header()
-
-        content = ttk.Frame(self, padding=(_px(20), _px(14), _px(20), _px(18)))
-        content.pack(fill="both", expand=True)
-
-        # Лента сообщений: канвас с внутренним фреймом (как в AuditDialog).
-        # Лента лежит на скруглённой подложке (`_rounded_backdrop`): отступ
-        # вокруг самой ленты больше 0,3 радиуса, поэтому её прямые углы не
-        # выходят за дугу.
-        chat_card = ttk.Frame(content, padding=_px(_CHAT_CARD_PADDING))
-        chat_card.pack(fill="both", expand=True)
-        parent._rounded_backdrop(
-            chat_card,
-            _CHAT_BG,
-            (True, True, True, True),
-            surface="#ffffff",
-            radius=_px(_CHAT_CARD_RADIUS),
-            border_color=_CHAT_BOT_BORDER,
-            border_width=1,
-            dynamic=True,
-        )
-        chat_frame = tk.Frame(chat_card, background=_CHAT_BG, highlightthickness=0, bd=0)
-        chat_frame.pack(fill="both", expand=True)
-        self._chat_card = chat_card
-        self._canvas = tk.Canvas(
-            chat_frame, width=_px(560), height=_px(280), highlightthickness=0, bd=0, background=_CHAT_BG
-        )
-        scrollbar = ttk.Scrollbar(chat_frame, orient="vertical", command=self._canvas.yview)
-        self._canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        self._canvas.pack(side="left", fill="both", expand=True)
-        # Вся лента — пункты ОДНОГО канваса (без вложенных виджетов): удаление
-        # индикатора «печатает…», появление ответа и прокрутка попадают в одну
-        # перерисовку, так что нет промежуточных кадров (раздел 9.4).
-        self._y = 0  # нижняя граница уже нарисованного, в координатах канваса
-        self._tag_counter = 0
-        self._chat_rows: list = []
-        self._laid_width = self._canvas.winfo_reqwidth()
-        self._follow_end = True  # лента «прилипла» к низу, пока пользователь сам не прокрутил вверх
-        self._canvas.bind("<Configure>", self._on_canvas_configure)
-
-        def on_wheel(event) -> None:
-            self._follow_end = False  # пользователь листает сам — не возвращаем к концу
-            if event.num == 4:
-                self._canvas.yview_scroll(-1, "units")
-            elif event.num == 5:
-                self._canvas.yview_scroll(1, "units")
-            else:
-                self._canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-
-        self._on_wheel = on_wheel
-        self._bind_wheel(self._canvas)
-
-        self._add_date_pill("Сегодня")
-
-        # Быстрые ответы — «чипы» в цвете акцента.
-        quick_row = ttk.Frame(content)
-        quick_row.pack(fill="x", pady=(_px(12), 0))
-        chip_style = parent._rounded_button_style(
-            "Rounded.Chip", "#e7edff", "#3558d6", border_color="#c9d6ff", padding=(_px(10), _px(5))
-        )
-        self._quick_buttons = []
-        for question in self.QUICK_QUESTIONS:
-            button = parent._styled(
-                ttk.Button(quick_row, text=question, command=lambda q=question: self._send(q)), chip_style
-            )
-            button.pack(side="left", padx=(0, _px(6)))
-            self._quick_buttons.append(button)
-
-        # Поле ввода-«таблетка» и круглая кнопка отправки.
-        input_row = ttk.Frame(content)
-        input_row.pack(fill="x", pady=(_px(12), 0))
-        self._question_var = tk.StringVar()
-        field_height = _MASTER_FIELD_HEIGHT + 6
-        box, self._entry = parent._rounded_field(
-            input_row, self._question_var, height=field_height, radius=field_height // 2
-        )
-        box.pack(side="left", fill="x", expand=True, padx=(0, _px(10)))
-        self._entry.bind("<Return>", lambda _e: self._send())
-        size = _px(field_height)
-        self._send_images = {
-            state: ImageTk.PhotoImage(_render_send_button(size, state)) for state in ("normal", "hover", "disabled")
-        }
-        self._send_button = tk.Label(
-            input_row, image=self._send_images["normal"], bd=0, highlightthickness=0, background="#ffffff", cursor="hand2"
-        )
-        self._send_button.pack(side="left")
-        self._send_button.bind("<Button-1>", lambda _e: self._send())
-        self._send_button.bind("<Enter>", lambda _e: self._set_send_look("hover"))
-        self._send_button.bind("<Leave>", lambda _e: self._set_send_look("normal"))
-
-        self._status_var = tk.StringVar(value=self._HINT)
-        ttk.Label(
-            content, textvariable=self._status_var, foreground=_SEARCH_PLACEHOLDER_COLOR, font=("", 9)
-        ).pack(anchor="w", pady=(_px(10), 0))
-
-        self._refresh_mode()
-        if parent._assistant_history:
-            for turn in parent._assistant_history:
-                self._add_message(turn["role"], turn["content"], turn.get("time", ""))
-        else:
-            self._add_message("assistant", self._greeting(), self._now())
-
-        self._entry.focus_set()
-        self.update_idletasks()
-        parent._round_dialog_corners(self)
-        self.place_window_center()
-        parent._keep_dialog_in_work_area(self)
-        self.deiconify()
-        self.update_idletasks()
-        self._scroll_to_end()
-        self.grab_set()
-
-    # --- шапка ---------------------------------------------------------------
-
-    _HEADER_HEIGHT = 92
-
-    def _build_header(self) -> None:
-        """Шапка на канвасе: градиент (тёмно-синий -> синий -> фиолетовый), иконка
-        приложения, название и строка статуса с цветной точкой. Пункты канваса
-        прозрачны, поэтому текст лежит прямо на градиенте."""
-        # Отступы вокруг шапки-карточки должны быть БЕЛЫМИ: фон самого окна —
-        # ключевой цвет прозрачности (скруглённые углы окна, раздел 10.46), и всё,
-        # что не закрыто виджетом, на Windows стало бы дырой до рабочего стола.
-        holder = tk.Frame(self, background="#ffffff", bd=0, highlightthickness=0)
-        holder.pack(fill="x")
-        self._header = tk.Canvas(
-            holder, height=_px(self._HEADER_HEIGHT), highlightthickness=0, bd=0, background="#ffffff"
-        )
-        self._header.pack(fill="x", padx=_px(20), pady=(_px(14), 0))
-        self._header_width = 0
-        self._header.bind("<Configure>", lambda e: self._draw_header(e.width))
-
-    def _draw_header(self, width: int) -> None:
-        if width < 10 or width == self._header_width:
-            return
-        self._header_width = width
-        height = _px(self._HEADER_HEIGHT)
-        canvas = self._header
-        canvas.delete("all")
-        image = _gradient_image(
-            width, height, [(0.0, _SIDEBAR_BG), (0.55, "#2f6fed"), (1.0, _CHAT_VIOLET)], mix_x=0.55, mix_y=0.45
-        )
-        image = _round_image_corners(image.convert("RGB"), _px(_CHAT_CARD_RADIUS), "#ffffff")
-        self._header_photo = ImageTk.PhotoImage(image)
-        canvas.create_image(0, 0, anchor="nw", image=self._header_photo)
-        x = _px(22)
-        mid = height // 2
-        icon = getattr(self._parent, "_icon_image_medium", None)
-        if icon is not None:
-            canvas.create_image(x, mid, anchor="w", image=icon)
-            x += icon.width() + _px(14)
-        canvas.create_text(x, mid - _px(13), anchor="w", text="Помощник", fill="#ffffff", font=("", 15, "bold"))
-        self._status_dot = canvas.create_oval(
-            x, mid + _px(9), x + _px(9), mid + _px(18), fill="#34d399", outline=""
-        )
-        self._mode_text = canvas.create_text(
-            x + _px(16), mid + _px(14), anchor="w", text=self._mode_label, fill="#dbe4ff", font=("", 9)
-        )
-
-    @property
-    def _mode_label(self) -> str:
-        reason = self._parent._assistant.llm.status()
-        if reason:
-            # Модель не подключена — это обычный режим: помощник на базе знаний
-            # (assistant/faq.py, раздел 9.5). Причину («нет файла модели») не
-            # показываем — для пользователя это не проблема.
-            return "помощник на базе знаний · без интернета"
-        return "локальная модель · на вашем компьютере, без интернета"
-
-    def _refresh_mode(self) -> None:
-        reason = self._parent._assistant.llm.status()
-        if self._header_width:
-            self._header.itemconfigure(self._mode_text, text=self._mode_label)
-            self._header.itemconfigure(self._status_dot, fill="#fbbf24" if reason else "#34d399")
-
-    # --- вспомогательное -------------------------------------------------
-
-    @staticmethod
-    def _now() -> str:
-        return datetime.now().strftime("%H:%M")
-
-    def chat_text(self) -> str:
-        """Весь показанный текст переписки (для проверок и копирования)."""
-        return "\n".join(text for _role, text in self._messages)
-
-    def _greeting(self) -> str:
-        if self._parent._assistant.llm.available:
-            return "Здравствуйте! Спросите про пароли и безопасность — отвечу по результатам раздела «Проблемы»."
-        return (
-            "Здравствуйте! Я помощник на базе знаний: отвечаю на вопросы про пароли и "
-            "безопасность, а про ваше хранилище — по результатам раздела «Проблемы». Спросите, "
-            "например, про слабые, повторяющиеся и устаревшие пароли."
-        )
-
-    def _bind_wheel(self, widget: tk.Misc) -> None:
-        widget.bind("<MouseWheel>", self._on_wheel)
-        widget.bind("<Button-4>", self._on_wheel)
-        widget.bind("<Button-5>", self._on_wheel)
-
-    def _scroll_to_end(self) -> None:
-        self._follow_end = True
-        self._update_scrollregion()
-
-    def _update_scrollregion(self) -> None:
-        """Область прокрутки по нарисованному и, если лента прилипла к низу,
-        прокрутка к концу — в том же обработчике, до перерисовки канваса."""
-        self._canvas.configure(scrollregion=(0, 0, self._laid_width, max(self._y + _px(10), 1)))
-        if self._follow_end:
-            self._canvas.yview_moveto(1.0)
-
-    def _on_canvas_configure(self, event: tk.Event) -> None:
-        """Ширина канваса стала другой, чем при раскладке: пузыри пользователя
-        (справа) и плашка даты (по центру) сдвигаются на разницу."""
-        if event.width <= 1 or event.width == self._laid_width:
-            return
-        delta = event.width - self._laid_width
-        self._canvas.move("right", delta, 0)
-        self._canvas.move("center", delta / 2, 0)
-        self._laid_width = event.width
-        self._update_scrollregion()
-
-    def _set_send_look(self, state: str) -> None:
-        if self._busy:
-            state = "disabled"
-        self._send_button.configure(image=self._send_images[state], cursor="arrow" if self._busy else "hand2")
-
-    _ROW_GAP = 8  # px между строками ленты
-    _ROW_MARGIN = 12  # px от края ленты до пузыря
-
-    def _new_tag(self) -> str:
-        self._tag_counter += 1
-        return f"chat{self._tag_counter}"
-
-    def _add_date_pill(self, text: str) -> None:
-        """Плашка-«таблетка» с датой по центру ленты (как «Сегодня» в
-        мессенджерах): картинка-подложка и прозрачный текст на канвасе."""
-        canvas = self._canvas
-        tag = self._new_tag()
-        pad_x, pad_y = _px(14), _px(4)
-        item = canvas.create_text(0, 0, anchor="nw", text=text, fill="#5b6b95", font=("", 8, "bold"), tags=(tag,))
-        x1, y1, x2, y2 = canvas.bbox(item)
-        width, height = (x2 - x1) + 2 * pad_x, (y2 - y1) + 2 * pad_y
-        photo = ImageTk.PhotoImage(
-            _render_bubble(width, height, _CHAT_PILL_BG, _CHAT_PILL_BG, height, (True,) * 4, _CHAT_BG)
-        )
-        self._photos.append(photo)
-        top = self._y + _px(10)
-        left = (self._laid_width - width) // 2
-        backdrop = canvas.create_image(left, top, anchor="nw", image=photo, tags=(tag,))
-        canvas.coords(item, left + pad_x, top + pad_y)
-        canvas.tag_lower(backdrop, item)
-        canvas.addtag_withtag("center", tag)
-        self._y = top + height + _px(2)
-
-    def _draw_message(self, role: str, text: str, time_text: str) -> SimpleNamespace:
-        """Нарисовать строку ленты (справа у пользователя, слева у помощника):
-        картинка пузыря (градиент или белый фон с рамкой), прозрачный текст
-        поверх, время под ним и иконка помощника — всё пункты одного канваса.
-        Размер считается по тексту, так что подложка точно по размеру."""
-        canvas = self._canvas
-        is_user = role == "user"
-        tag = self._new_tag()
-        pad_x, pad_y = _px(14), _px(9)
-        icon = None if is_user else getattr(self._parent, "_icon_image_tiny", None)
-        left = (icon.width() + _px(8)) if icon is not None else 0
-        item = canvas.create_text(
-            0, 0, anchor="nw", text=text, width=_px(self.BUBBLE_WRAP), font=("", 10),
-            fill="#ffffff" if is_user else _CHAT_TEXT, tags=(tag,),
-        )
-        x1, y1, x2, y2 = canvas.bbox(item)
-        bubble_w, bubble_h = (x2 - x1) + 2 * pad_x, (y2 - y1) + 2 * pad_y
-        image = _render_bubble(
-            bubble_w,
-            bubble_h,
-            _CHAT_BLUE if is_user else "#ffffff",
-            _CHAT_VIOLET if is_user else "#ffffff",
-            _px(18),
-            # «Хвостик»: у пузыря не скруглён угол со стороны автора.
-            (True, True, False, True) if is_user else (True, True, True, False),
-            _CHAT_BG,
-            border=None if is_user else _CHAT_BOT_BORDER,
-        )
-        photo = ImageTk.PhotoImage(image)
-        self._photos.append(photo)
-        top = self._y + _px(self._ROW_GAP)
-        total_w = left + bubble_w
-        x0 = (self._laid_width - _px(self._ROW_MARGIN) - total_w) if is_user else _px(self._ROW_MARGIN)
-        backdrop = canvas.create_image(x0 + left, top, anchor="nw", image=photo, tags=(tag,))
-        canvas.coords(item, x0 + left + pad_x, top + pad_y)
-        canvas.tag_lower(backdrop, item)
-        height = bubble_h
-        if icon is not None:
-            canvas.create_image(x0, top + bubble_h - _px(16), anchor="sw", image=icon, tags=(tag,))
-        if time_text:
-            stamp = canvas.create_text(
-                (x0 + left + bubble_w - _px(4)) if is_user else (x0 + left + _px(4)),
-                top + bubble_h + _px(2),
-                anchor="ne" if is_user else "nw",
-                text=time_text,
-                fill=_CHAT_TIME,
-                font=("", 8),
-                tags=(tag,),
-            )
-            height = canvas.bbox(stamp)[3] - top + _px(1)
-        canvas.addtag_withtag("right" if is_user else "left", tag)
-        canvas.tag_bind(tag, "<Button-3>", lambda event, t=text: self._copy_menu(event, t))
-        self._y = top + height
-        return SimpleNamespace(
-            role=role, text=text, time_text=time_text, side="right" if is_user else "left", tag=tag
-        )
-
-    def _copy_menu(self, event: tk.Event, text: str) -> str:
-        menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Копировать", command=lambda: self._copy_text(text))
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
-        return "break"
-
-    def _copy_text(self, text: str) -> None:
-        self._parent._copy_to_clipboard(text)
-
-    def _add_message(self, role: str, text: str, time_text: str) -> None:
-        """Добавить пузырь. Индикатор «печатает…» убирается и ответ рисуется в
-        ОДНОМ обработчике, вместе с областью прокрутки: Tk перерисует канвас
-        только после него, поэтому нет кадров «пусто между индикатором и
-        ответом», «пузырь обрезан внизу» и «прокрутка прыгает потом»."""
-        self._messages.append((role, text))
-        if role == "assistant" and self._typing_row is not None:
-            self._hide_typing()
-        self._chat_rows.append(self._draw_message(role, text, time_text))
-        self._follow_end = True
-        self._update_scrollregion()
-
-    # --- «печатает…» -----------------------------------------------------
-
-    def _show_typing(self) -> None:
-        """Пузырь с тремя точками, по которым бежит акцент."""
-        canvas = self._canvas
-        tag = self._new_tag()
-        icon = getattr(self._parent, "_icon_image_tiny", None)
-        left = (icon.width() + _px(8)) if icon is not None else 0
-        width, height = _px(66), _px(38)
-        photo = ImageTk.PhotoImage(
-            _render_bubble(width, height, "#ffffff", "#ffffff", _px(18), (True, True, True, False), _CHAT_BG,
-                           border=_CHAT_BOT_BORDER)
-        )
-        self._photos.append(photo)
-        top = self._y + _px(self._ROW_GAP)
-        x0 = _px(self._ROW_MARGIN)
-        canvas.create_image(x0 + left, top, anchor="nw", image=photo, tags=(tag,))
-        if icon is not None:
-            canvas.create_image(x0, top + height, anchor="sw", image=icon, tags=(tag,))
-        dots = []
-        for i in range(3):
-            cx = x0 + left + width // 2 + (i - 1) * _px(14)
-            cy = top + height // 2
-            dots.append(canvas.create_oval(cx - _px(4), cy - _px(4), cx + _px(4), cy + _px(4),
-                                           fill="#c4cde6", outline="", tags=(tag,)))
-        canvas.addtag_withtag("left", tag)
-        self._typing_row = SimpleNamespace(tag=tag, dots=dots, is_typing=True, y_before=self._y)
-        self._y = top + height
-        self._follow_end = True
-        self._update_scrollregion()
-
-        def tick(step: int = 0) -> None:
-            try:
-                for i, dot in enumerate(dots):
-                    canvas.itemconfigure(dot, fill=_CHAT_BLUE if i == step % 3 else "#c4cde6")
-                self._typing_job = self.after(350, tick, step + 1)
-            except tk.TclError:
-                self._typing_job = None
-
-        tick()
-
-    def _hide_typing(self) -> None:
-        if self._typing_job is not None:
-            try:
-                self.after_cancel(self._typing_job)
-            except tk.TclError:
-                pass
-            self._typing_job = None
-        if self._typing_row is not None:
-            try:
-                self._canvas.delete(self._typing_row.tag)
-            except tk.TclError:
-                pass
-            self._y = self._typing_row.y_before
-            self._typing_row = None
-
-    def _set_busy(self, busy: bool) -> None:
-        self._busy = busy
-        state = "disabled" if busy else "normal"
-        for button in self._quick_buttons:
-            button.configure(state=state)
-        self._set_send_look("normal")
-        self._status_var.set("Помощник печатает…" if busy else self._HINT)
-        if busy:
-            self._show_typing()
-        else:
-            self._hide_typing()
-
-    # --- отправка ----------------------------------------------------------
-
-    def _send(self, question: str | None = None) -> None:
-        if self._busy:
-            return
-        raw = question if question is not None else self._question_var.get()
-        shown = redact_secrets(raw.strip())
-        if not shown:
-            return
-        self._question_var.set("")
-        history = list(self._parent._assistant_history)
-        stamp = self._now()
-        self._add_message("user", shown, stamp)
-        self._parent._assistant_history.append({"role": "user", "content": shown, "time": stamp})
-        self._sent_at = time.time()
-        self._set_busy(True)
-        context = self._parent._assistant_context()
-        assistant = self._parent._assistant
-
-        def work() -> None:
-            try:
-                self._results.put(assistant.reply(shown, history, context))
-            except Exception as exc:  # noqa: BLE001 — поток не должен падать молча
-                self._results.put(exc)
-
-        threading.Thread(target=work, daemon=True).start()
-        self.after(30, self._poll)
-
-    def _poll(self) -> None:
-        try:
-            result = self._results.get_nowait()
-        except queue.Empty:
-            try:
-                self.after(30, self._poll)
-            except tk.TclError:
-                pass
-            return
-        remaining = self.MIN_TYPING_SECONDS - (time.time() - self._sent_at)
-        try:
-            if remaining > 0:
-                self.after(int(remaining * 1000), self._deliver, result)
-            else:
-                self._deliver(result)
-        except tk.TclError:
-            pass  # окно закрыли, пока шла генерация
-
-    def _deliver(self, result) -> None:
-        try:
-            if isinstance(result, Exception):
-                text = "Не получилось ответить. Попробуйте ещё раз."
-            else:
-                text = result.text
-            stamp = self._now()
-            self._parent._assistant_history.append({"role": "assistant", "content": text, "time": stamp})
-            self._add_message("assistant", text, stamp)  # встаёт на место индикатора
-            self._set_busy(False)
-            self._refresh_mode()
-            self._entry.focus_set()
-        except tk.TclError:
-            pass  # окно закрыли, пока шла генерация
 
 
 def main() -> None:

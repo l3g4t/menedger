@@ -591,7 +591,6 @@ def test_dialogs_show_key_color_only_in_rounded_corners(app, monkeypatch, tmp_pa
     radius = guiapp._px(guiapp._VIEW_WINDOW_RADIUS)
     allowed = 4 * (radius + 4) ** 2  # четыре квадрата угла с запасом
     dialogs = [
-        guiapp.AssistantDialog(app),
         guiapp.CreateVaultDialog(app),
         guiapp.AuditDialog(app, AdvisorReport()),
     ]
@@ -1430,158 +1429,6 @@ def _wait_idle(dialog, timeout=5.0):
         dialog.update()
         time.sleep(0.02)
     dialog.update()
-
-
-def test_assistant_dialog_answers_hides_secrets_and_clears_on_lock(app, monkeypatch, tmp_path):
-    """Раздел 9.4: чат отвечает (без модели — шаблоны), пароль в вопросе
-    скрывается в чате и в истории, при блокировке история сбрасывается."""
-    _create_vault(app, monkeypatch)
-    app.data["entries"] = [
-        {"site": "github.com", "username": "bob", "password": "Password1", "created_at": "2020-01-01T00:00:00Z"}
-    ]
-    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")  # модели нет
-    dialog = guiapp.AssistantDialog(app)
-    dialog.update()
-    dialog._question_var.set("мой пароль Zq8#vLm2$Pw9xK надёжный?")
-    dialog._send()
-    _wait_idle(dialog)
-    chat = dialog.chat_text()
-    assert "Zq8#vLm2$Pw9xK" not in chat and "[пароль скрыт]" in chat
-    assert "Я не вижу" in chat
-    dialog._send("Что исправить в первую очередь?")
-    _wait_idle(dialog)
-    assert "github.com" in dialog.chat_text()
-    history = json.dumps(app._assistant_history, ensure_ascii=False)
-    assert "Zq8#vLm2$Pw9xK" not in history and len(app._assistant_history) == 4
-    dialog.destroy()
-    app._on_lock()
-    assert app._assistant_history == []
-
-
-def test_round_image_corners_cuts_corners_but_keeps_center():
-    from PIL import Image
-
-    image = Image.new("RGB", (120, 60), (10, 20, 30))
-    out = guiapp._round_image_corners(image, 16, "#ffffff")
-    assert out.size == image.size
-    assert out.getpixel((0, 0)) == (255, 255, 255)  # угол срезан
-    assert out.getpixel((119, 59)) == (255, 255, 255)
-    assert out.getpixel((60, 30)) == (10, 20, 30)  # середина не тронута
-    # радиус больше половины стороны не должен ронять Pillow
-    guiapp._round_image_corners(Image.new("RGB", (30, 10), (0, 0, 0)), 999, "#ffffff")
-
-
-def test_assistant_dialog_header_and_chat_panel_are_rounded(app, monkeypatch, tmp_path):
-    """Шапка — картинка со срезанными углами (за дугой белый фон), а лента чата
-    лежит на скруглённой подложке с отступом больше 0,3 радиуса."""
-    _create_vault(app, monkeypatch)
-    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
-    dialog = guiapp.AssistantDialog(app)
-    dialog.update()
-    from PIL import ImageTk  # noqa: F401
-
-    assert dialog._header.cget("background") == "#ffffff"
-    assert dialog._chat_card.winfo_width() > 100
-    radius = guiapp._px(guiapp._CHAT_CARD_RADIUS)
-    assert guiapp._px(guiapp._CHAT_CARD_PADDING) >= 0.29 * radius
-    dialog.destroy()
-
-
-def test_assistant_dialog_ignores_empty_question_and_double_send(app, monkeypatch, tmp_path):
-    _create_vault(app, monkeypatch)
-    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
-    dialog = guiapp.AssistantDialog(app)
-    dialog._send("   ")
-    assert app._assistant_history == []
-    dialog._send("Как придумать пароль?")
-    dialog._send("Как придумать пароль?")  # второй вызов во время ответа игнорируется
-    _wait_idle(dialog)
-    assert [turn["role"] for turn in app._assistant_history] == ["user", "assistant"]
-    dialog.destroy()
-
-
-def test_assistant_chat_is_messenger_style(app, monkeypatch, tmp_path):
-    """Чат в формате мессенджера: пузыри пользователя справа, помощника слева,
-    у каждого есть время; пока ответ готовится, виден пузырь «печатает»."""
-    _create_vault(app, monkeypatch)
-    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
-    dialog = guiapp.AssistantDialog(app)
-    dialog.update()
-    dialog._send("Как придумать пароль?")
-    assert dialog._typing_row is not None  # индикатор виден сразу после отправки
-    dialog.update()
-    assert getattr(dialog._typing_row, "is_typing", False) and len(dialog._typing_row.dots) == 3
-    _wait_idle(dialog)
-    assert dialog._typing_row is None  # после ответа индикатора нет
-
-    rows = dialog._chat_rows  # плашка «Сегодня» в строки не входит
-    assert len(rows) == 3  # приветствие, вопрос, ответ
-    sides = []
-    for row in rows:
-        sides.append(row.side)
-        assert len(row.time_text) == 5 and row.time_text[2] == ":"  # «12:34»
-    assert sides == ["left", "right", "left"]
-    assert [role for role, _text in dialog._messages] == ["assistant", "user", "assistant"]
-    dialog.destroy()
-
-
-def test_assistant_answer_replaces_typing_indicator_in_one_step(app, monkeypatch, tmp_path):
-    """Ответ рисуется на месте индикатора «печатает…» без промежуточных состояний:
-    в том же обработчике индикатор удалён, область прокрутки обновлена, лента
-    прокручена к концу. (Раньше при ответе на экране были кадры «пусто», «пузырь
-    обрезан внизу» и «прокрутка прыгает потом».)"""
-    _create_vault(app, monkeypatch)
-    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
-    dialog = guiapp.AssistantDialog(app)
-    dialog.update()
-    canvas = dialog._canvas
-    dialog._add_message("user", "Как придумать пароль?", "12:00")
-    dialog._set_busy(True)
-    typing_tag = dialog._typing_row.tag
-    assert canvas.find_withtag(typing_tag)
-    y_before_typing = dialog._typing_row.y_before
-
-    long_answer = "Длинный ответ помощника. " * 12
-    dialog._add_message("assistant", long_answer, "12:01")  # ровно один вызов, без update()
-    assert dialog._typing_row is None and not canvas.find_withtag(typing_tag)
-    answer = dialog._chat_rows[-1]
-    top = min(canvas.bbox(answer.tag)[1], canvas.bbox(answer.tag)[3])
-    assert top >= y_before_typing  # ответ стоит там, где был индикатор
-    region_bottom = int(float(canvas.cget("scrollregion").split()[3]))
-    assert region_bottom >= canvas.bbox(answer.tag)[3]  # область прокрутки уже охватывает ответ
-    assert canvas.yview()[1] == 1.0  # и лента уже прокручена к концу
-    dialog.destroy()
-
-
-def test_assistant_chat_keeps_right_bubbles_flush_when_width_changes(app, monkeypatch, tmp_path):
-    _create_vault(app, monkeypatch)
-    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")
-    dialog = guiapp.AssistantDialog(app)
-    dialog.update()
-    user_row = dialog._add_message("user", "Привет", "12:00") or dialog._chat_rows[-1]
-    canvas = dialog._canvas
-    right_edge = canvas.bbox(user_row.tag)[2]
-    left_edge = canvas.bbox(dialog._chat_rows[0].tag)[0]
-    event = type("E", (), {"width": dialog._laid_width + 40})()
-    dialog._on_canvas_configure(event)
-    assert canvas.bbox(user_row.tag)[2] == right_edge + 40  # пузырь справа сдвинулся
-    assert canvas.bbox(dialog._chat_rows[0].tag)[0] == left_edge  # слева — на месте
-    dialog.destroy()
-
-
-def test_render_bubble_survives_pill_radius_and_tiny_sizes():
-    """Регрессия: радиус ровно в полвысоты роняет Pillow на пузыре с одним
-    нескруглённым углом."""
-    for height in (20, 21, 35, 36, 51, 100):
-        for corners in ((True, True, False, True), (True, True, True, False), (True,) * 4):
-            image = guiapp._render_bubble(200, height, "#3b82f6", "#8b5cf6", 99, corners, "#eef2ff", border="#d9e1f5")
-            assert image.size == (200, height)
-
-
-def test_gradient_image_runs_between_stops():
-    image = guiapp._gradient_image(100, 10, [(0.0, "#000000"), (1.0, "#ff0000")])
-    assert image.getpixel((0, 5)) == (0, 0, 0) and image.getpixel((99, 5))[0] == 255
-    assert guiapp._gradient_image(10, 10, [(0.0, "#123456"), (1.0, "#123456")]).getpixel((5, 5)) == (0x12, 0x34, 0x56)
 
 
 # --- смена мастер-пароля (CLAUDE.md, раздел 10.66) ----------------------------
@@ -2839,3 +2686,133 @@ def test_generator_pill_is_highlighted_while_panel_is_open(app, monkeypatch):
     assert not on()
     _click_text(view.head, "Генератор")
     assert view.panel == "gen" and on()
+
+
+# --- Помощник — чат в правой панели (раздел 10.85) --------------------------------
+
+
+def _assistant_vault(app, monkeypatch, tmp_path):
+    shared = "Zq8#vLm2$Pw9xK-4"
+    entries = [
+        _rec("Яндекс ID", "login@example.com", password=shared),
+        _rec("Notion", "team@example.com", password=shared, days=5),
+        _rec("Hetzner Cloud", "admin@example.com", password="password", days=3),
+        _rec("GitHub", "dev@example.com", password="Xk9#mP2$vL7qRt4Wz!", days=3),
+    ]
+    view = _open_main(app, monkeypatch, *entries)
+    monkeypatch.setattr(app._assistant.llm, "path", tmp_path / "none.gguf")  # модели нет
+    _click_text(view.head, "Помощник")
+    view.update()
+    return view, entries
+
+
+def test_assistant_pill_opens_chat_panel_and_toggles(app, monkeypatch, tmp_path):
+    view, entries = _assistant_vault(app, monkeypatch, tmp_path)
+    assert view.panel == "assistant" and view.selected is None
+    texts = _canvas_texts(view.detail)
+    for wanted in ("Помощник", "Работает на этом устройстве", "Отправить",
+                   "Помощник видит названия записей, даты и результаты проверки. Сами пароли"):
+        assert wanted in texts, wanted
+    assert any(t.startswith("Здравствуйте!") for t in texts)  # приветствие, пока переписки нет
+    on = lambda: any(k[0] == "rr" and k[3] == guiapp._MV_PILL_ON_FILL for k in view._images)  # noqa: E731
+    assert on()
+    view.select(entries[0])
+    assert view.panel is None
+    _click_text(view.head, "Помощник")
+    _click_text(view.head, "Помощник")  # повторное нажатие закрывает
+    assert view.panel is None
+
+
+def test_assistant_priority_question_shows_rows_with_open_buttons(app, monkeypatch, tmp_path):
+    view, entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view._chat_var.set("Какие пароли стоит заменить в первую очередь?")
+    view._chat_active = True
+    view._chat_send()
+    view.update()
+    texts = _canvas_texts(view.detail)
+    assert "Какие пароли стоит заменить в первую очередь?" in texts
+    assert any(t.startswith("Сначала вот эти три") for t in texts)
+    assert texts.count("Открыть") == 3 and "тот же пароль, что у Яндекс ID" in texts
+    _click_text(view.detail, "Открыть", nth=0)
+    assert view.panel is None and view.selected is not None  # запись открыта в обычной панели
+
+
+def test_assistant_new_password_proposal_apply_show_and_history(app, monkeypatch, tmp_path):
+    view, entries = _assistant_vault(app, monkeypatch, tmp_path)
+    hetzner = entries[2]
+    old = hetzner["password"]
+    view._chat_send("Придумай новый для Hetzner")
+    view.update()
+    message = view._chat[-1]
+    password = message["password"]
+    assert message["kind"] == "password" and message["entry"] is hetzner and len(password) == 24
+    assert not any(ch in "0O1lI" for ch in password)
+    texts = _canvas_texts(view.detail)
+    assert "Подготовил: 24 символа, без похожих знаков. Пока ничего не сохранено." in " ".join(texts)
+    assert "Применить" in texts and "Показать" in texts and password not in texts
+    _click_text(view.detail, "Показать")
+    assert password in _canvas_texts(view.detail) and "Скрыть" in _canvas_texts(view.detail)
+    assert hetzner["password"] == old  # пока ничего не сохранено
+    _click_text(view.detail, "Применить")
+    assert hetzner["password"] == password and hetzner["history"][-1]["event"] == "password"
+    assert "Применено" in _canvas_texts(view.detail) and view.panel == "assistant" and view.selected is None
+    # в историю для модели пароль не попал
+    assert password not in json.dumps(app._assistant_history, ensure_ascii=False)
+    assert password not in "\n".join(_canvas_texts(view.sidebar))
+
+
+def test_assistant_new_password_without_record_offers_copy(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view._chat_send("Придумай пароль на 30 символов")
+    message = view._chat[-1]
+    assert message["entry"] is None and len(message["password"]) == 30
+    view.update()
+    assert "Копировать" in _canvas_texts(view.detail) and "Применить" not in _canvas_texts(view.detail)
+    _click_text(view.detail, "Копировать")
+    assert _clipboard(app) == message["password"]
+
+
+def test_assistant_text_answers_hide_secrets_and_clear_on_lock(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view._chat_send("мой пароль Zq8#vLm2$Pw9xK надёжный?")
+    texts = " ".join(_canvas_texts(view.detail))
+    assert "Zq8#vLm2$Pw9xK" not in texts and "[пароль скрыт]" in texts and "Я не вижу" in texts
+    history = json.dumps(app._assistant_history, ensure_ascii=False)
+    assert "Zq8#vLm2$Pw9xK" not in history and len(app._assistant_history) == 2
+    view._chat_send("Как придумать надёжный пароль?")  # обычный вопрос — ответ базы знаний
+    assert view._chat[-1]["kind"] == "text" and len(view._chat) == 4
+    app._on_lock()
+    assert app._assistant_history == [] and view._chat == [] and view.panel is None
+
+
+def test_assistant_ignores_empty_question_and_input_placeholder(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view._chat_send()
+    assert view._chat == [] and app._assistant_history == []
+    assert view._chat_var.get() == guiapp._MV_CHAT_HINT or view._chat_active  # подсказка в поле, пока оно пустое
+    _click_text(view.detail, "Отправить")
+    assert view._chat == []
+
+
+def test_assistant_chat_scrolls_to_last_message_and_wheel_moves_it(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    for _ in range(4):
+        view._chat_send("Какие пароли стоит заменить в первую очередь?")
+    view.update()
+    assert view._chat_follow and view._chat_offset > 0
+    bottom = view._chat_offset
+    view._on_detail_wheel(-1)
+    assert view._chat_offset < bottom and not view._chat_follow
+    for item in view.detail.find_withtag("dyn"):
+        box = view.detail.bbox(item)
+        assert box is None or box[2] <= view.detail.winfo_width() + 2
+
+
+def test_assistant_and_generator_panels_replace_each_other(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    _click_text(view.head, "Генератор")
+    assert view.panel == "gen" and "Генератор пароля" in _canvas_texts(view.detail)
+    _click_text(view.head, "Помощник")
+    assert view.panel == "assistant" and view._gen_password == ""
+    _click_text(view.head, "Помощник")
+    assert view.panel is None
