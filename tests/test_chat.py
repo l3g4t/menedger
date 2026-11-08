@@ -57,6 +57,24 @@ def test_topic_questions_list_entries_but_concept_questions_do_not():
     assert plan_reply("Что такое фишинг?", _data()) is None
 
 
+def test_weak_password_phrasings_show_the_weak_entries():
+    weak = {"Hetzner Cloud", "Wi-Fi, квартира"}
+    for question in (
+        "где сейчас слабые пароли", "Где сейчас слабые пароли?", "найди слабые пароли", "слабые пароли",
+        "Слабые пароли?", "перечисли слабые пароли", "выведи слабые пароли хранилища", "покажи слабые пароли",
+        "список слабых паролей", "есть слабые пароли", "какие слабые",
+    ):
+        plan = plan_reply(question, _data())
+        assert plan is not None and plan.kind == "problems", question
+        assert {i.site for i in plan.items} == weak, question
+    reused = plan_reply("где одинаковые пароли", _data())
+    assert {i.site for i in reused.items} == {"Яндекс ID", "Notion"}
+    assert plan_reply("найди старые пароли", _data()).items[0].site == "GitHub"
+    # советы и понятия — по-прежнему в базу знаний, а не список записей
+    for question in ("Как укрепить слабые пароли?", "Что делать со слабыми паролями?", "Чем опасны слабые пароли?"):
+        assert plan_reply(question, _data()) is None, question
+
+
 def test_new_password_request_finds_record_by_one_word():
     plan = plan_reply("Придумай новый для Hetzner", _data())
     assert plan.kind == "password" and (plan.site, plan.username) == ("Hetzner Cloud", "admin@x.ru")

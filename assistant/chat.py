@@ -33,6 +33,17 @@ MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH = 8, 64
 _VERBS = ("придумай", "сгенерируй", "создай", "сделай", "предложи", "подбери", "дай", "составь")
 _NUMBER_WORDS = {1: "эту запись", 2: "эти две", 3: "эти три"}
 
+# К «статусным» словам offline.py добавляем просьбы показать список: «где сейчас слабые
+# пароли», «найди повторяющиеся», «перечисли старые».
+_LIST_CUES = (
+    "где", "сейчас", "найди", "найти", "выведи", "вывести", "перечисли", "список", "назови",
+    "отобрази", "дай ", "собери", "покаж", "пришли", "отфильтруй", "все ", "всех ",
+)
+# Вопросы «как/чем/можно ли…» про слабые пароли — это совет, а не просьба показать записи.
+_ADVICE_CUES = (" как ", " чем ", "можно ли", "стоит ли", "нужно ли", "зачем", "почему", "что делать")
+# Короткая реплика из одного названия темы («слабые пароли») тоже считается просьбой показать список.
+_BARE_TOPIC_MAX_WORDS = 4
+
 
 @dataclass
 class ChatItem:
@@ -165,6 +176,17 @@ def _password_length(text: str) -> int:
     return DEFAULT_PASSWORD_LENGTH
 
 
+def _asks_for_list(text: str) -> bool:
+    """Вопрос про проблемную категорию, на который нужно ответить списком записей хранилища."""
+    padded = f" {text} "
+    if any(c in padded for c in _ADVICE_CUES):
+        return False
+    if any(f" {c}" in padded for c in (*_STATUS_CUES, *_LIST_CUES)):
+        return True
+    # «слабые пароли», «повторяющиеся пароли?» — короткая реплика без глагола.
+    return len(re.findall(r"[\w\-]+", text)) <= _BARE_TOPIC_MAX_WORDS
+
+
 def plan_reply(question: str, data: dict | None) -> ChatPlan | None:
     """Разобрать вопрос. None — обычный текстовый ответ (база знаний или модель)."""
     if data is None:
@@ -205,7 +227,7 @@ def plan_reply(question: str, data: dict | None) -> ChatPlan | None:
         return ChatPlan("problems", lead, items=shown)
 
     topic = _status_topic(text)
-    if topic and any(f" {c}" in f" {text}" for c in _STATUS_CUES):
+    if topic and _asks_for_list(text):
         items = groups[topic][:TOPIC_LIMIT]
         if not items:
             return None
