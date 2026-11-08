@@ -2490,7 +2490,7 @@ def test_edit_form_opens_in_the_right_panel_with_reference_texts_and_geometry(ap
     texts = _canvas_texts(view.detail)
     for expected in ("Изменение записи", "Не сохранено", "Название", "Сайт", "Логин", "Пароль", "Заметка", "Теги",
                      "работа", "+ тег", "Показать", "Сгенерировать", "Сохранить", "Отмена",
-                     "Старый пароль останется в истории"):
+                     "Смена пароля попадёт в историю"):
         assert expected in texts, expected
     assert any(t.startswith("Надёжный · 18 символов") for t in texts)
     assert view._ev["site"].get() == "GitHub" and view._ev["url"].get() == "github.com"
@@ -2511,7 +2511,7 @@ def test_edit_form_for_a_new_record_has_its_own_title_and_no_history_hint(app, m
     texts = _canvas_texts(view.detail)
     assert view.editing and view._edit_entry is None and view.selected is None
     assert "Новая запись" in texts and "Изменение записи" not in texts
-    assert "Старый пароль останется в истории" not in texts
+    assert "Смена пароля попадёт в историю" not in texts
     assert view._ev["site"].get() == "" and view._edit_tags == []
 
 

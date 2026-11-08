@@ -2093,7 +2093,7 @@ class MainView(_DrawKit, tk.Frame):
         self._text(c, left + 125.6 + 47.5, footer + 21, "Отмена", px=13, fill=_MV_EDIT_TEXT, bold=True, anchor="center")
         hits.add(P(left + 125.6), P(footer), P(left + 220.6), P(footer + 42), self._cancel_edit)
         if not new:
-            self._text(c, right, footer + 21, "Старый пароль останется в истории", px=11, fill=_MV_HINT, anchor="e")
+            self._text(c, right, footer + 21, "Смена пароля попадёт в историю", px=11, fill=_MV_HINT, anchor="e")
 
         if self._tag_input_open and input_box is not None:
             found, create = self._tag_matches()
@@ -2522,7 +2522,7 @@ class MainView(_DrawKit, tk.Frame):
         c.create_image(P(left), P(525.5), image=self._rr(span, 63, None, _MV_INFO_LINE, 10), anchor="nw", tags="dyn")
         target = self._save_target
         info = (
-            f"Пароль в записи {target['site']} будет заменён. Старый пароль останется в истории записи."
+            f"Пароль в записи {target['site']} будет заменён. В истории записи останется только пометка о смене."
             if target is not None
             else "Выберите запись, чтобы заменить в ней пароль, или создайте новую запись с этим паролем."
         )
