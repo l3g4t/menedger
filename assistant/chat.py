@@ -1,17 +1,20 @@
 """
 assistant.chat — действия помощника в окне чата (CLAUDE.md, раздел 10.85).
 
-Кроме текстовых ответов (`assistant.offline`, модель) чат умеет два «действия»,
-которые показываются не абзацем, а готовым блоком:
-  * список записей с проблемами и кнопкой «Открыть» («что исправить в первую очередь?»);
-  * новый пароль для записи («придумай новый для Hetzner»).
+Кроме текстовых ответов (`assistant.offline`, модель) чат умеет одно «действие»,
+которое показывается не абзацем, а готовым блоком: список записей с проблемами и
+кнопкой «Открыть» («что исправить в первую очередь?»).
+
+**Помощник ничего не меняет в паролях** (CLAUDE.md, раздел 10.87): он не создаёт,
+не генерирует и не подставляет пароли, не меняет их у записей и не кладёт в буфер.
+Просьбу «придумай/смени пароль» чат понимает и вежливо отклоняет (`REFUSAL_TEXT`),
+отправляя человека в «Генератор» и в форму записи, где пароль меняется руками.
+«Открыть» только выбирает запись в обычной панели.
 
 Здесь только РАЗБОР вопроса и тексты ответов. Это обычный код на этой же машине,
 он НЕ связан с языковой моделью: модель по-прежнему получает только метаданные
 (`assistant.prompt`). В готовых ответах — названия сайтов, числа и причины
-(«тот же пароль, что у …», «всего 8 символов»), но никогда сам пароль. Сам новый
-пароль генерирует окно (`assistant.generator`), и в историю чата для модели он
-не попадает.
+(«тот же пароль, что у …», «всего 8 символов»), но никогда сам пароль.
 """
 
 from __future__ import annotations
@@ -27,10 +30,22 @@ from .offline import _CONCEPT_CUES, _PRIORITY_PHRASES, _STATUS_CUES, _status_top
 # Сколько записей показываем в ответе «что исправить в первую очередь».
 PRIORITY_LIMIT = 3
 TOPIC_LIMIT = 5
-DEFAULT_PASSWORD_LENGTH = 24
-MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH = 8, 64
 
-_VERBS = ("придумай", "сгенерируй", "создай", "сделай", "предложи", "подбери", "дай", "составь")
+# Что чат отвечает на просьбу создать или поменять пароль: он этого не делает.
+REFUSAL_TEXT = (
+    "Я не создаю и не меняю пароли — это делаете вы сами. Новый пароль можно сгенерировать в "
+    "«Генераторе», а у записи его меняет карандаш в панели записи. Я могу показать, какие записи "
+    "стоит исправить в первую очередь."
+)
+
+# Просьба создать пароль: глагол в начале слова («придумай», «сгенерируй»…).
+_CREATE_VERBS = ("придумай", "сгенерируй", "создай", "сделай", "предложи", "подбери", "дай", "составь")
+# Просьба сменить пароль: только повелительное наклонение целым словом, чтобы «что заменить»
+# и «какие пароли поменять» оставались вопросами про состояние хранилища.
+_CHANGE_VERBS = frozenset({
+    "смени", "поменяй", "измени", "обнови", "замени", "установи", "задай", "перезапиши",
+    "подставь", "сохрани", "примени", "запиши", "поставь",
+})
 _NUMBER_WORDS = {1: "эту запись", 2: "эти две", 3: "эти три"}
 
 # К «статусным» словам offline.py добавляем просьбы показать список: «где сейчас слабые
@@ -56,13 +71,9 @@ class ChatItem:
 
 @dataclass
 class ChatPlan:
-    kind: str  # "problems" | "password"
+    kind: str  # "problems" (список записей) | "text" (готовый текст, например отказ)
     text: str
     items: list[ChatItem] = field(default_factory=list)
-    # для "password": запись, к которой подставить пароль (или None), и параметры генерации
-    site: str | None = None
-    username: str | None = None
-    length: int = DEFAULT_PASSWORD_LENGTH
 
 
 def _label(entry: dict) -> str:
@@ -142,38 +153,17 @@ def _prioritized(groups: dict[str, list[ChatItem]]) -> list[ChatItem]:
     return result
 
 
-def _find_entry(text: str, entries: list[dict]) -> dict | None:
-    """Запись, чьё название упомянуто в вопросе: целиком («hetzner cloud») или одним
-    словом из названия («hetzner»)."""
-    words = set(re.findall(r"[\w\-]+", text))
-    for entry in sorted(entries, key=lambda e: -len(e["site"])):
-        site = normalize(entry["site"])
-        if site and site in text:
-            return entry
-    for entry in entries:
-        site_words = [w for w in re.findall(r"[\w\-]+", normalize(entry["site"])) if len(w) >= 4]
-        if any(w in words for w in site_words):
-            return entry
-    return None
-
-
-def _wants_new_password(text: str) -> bool:
+def _asks_to_set_password(text: str) -> bool:
+    """Просьба создать, сгенерировать или поменять пароль (в том числе у конкретной записи)."""
     padded = f" {text} "
-    if " как " in padded or "почему" in text or "зачем" in text:
+    if " как " in padded or "почему" in text or "зачем" in text or "можно ли" in text:
         return False  # «как придумать пароль?» — вопрос про совет, а не просьба
-    first = re.findall(r"[\w\-]+", text)
-    if not any(w.startswith(verb) for w in first for verb in _VERBS):
-        return False
+    words = re.findall(r"[\w\-]+", text)
     if "запис" in text and "парол" not in text:
         return False  # «создай новую запись» — не про пароль
-    return "парол" in text or "нов" in text
-
-
-def _password_length(text: str) -> int:
-    match = re.search(r"(\d{1,3})\s*(символ|знак|цифр|букв)", text)
-    if match:
-        return max(MIN_PASSWORD_LENGTH, min(MAX_PASSWORD_LENGTH, int(match.group(1))))
-    return DEFAULT_PASSWORD_LENGTH
+    wants_create = any(w.startswith(verb) for w in words for verb in _CREATE_VERBS) and ("парол" in text or "нов" in text)
+    wants_change = any(w in _CHANGE_VERBS for w in words) and "парол" in text
+    return wants_create or wants_change
 
 
 def _asks_for_list(text: str) -> bool:
@@ -192,23 +182,9 @@ def plan_reply(question: str, data: dict | None) -> ChatPlan | None:
     if data is None:
         return None
     text = normalize(question)
-    entries = data.get("entries", [])
 
-    if _wants_new_password(text):
-        length = _password_length(text)
-        target = _find_entry(text, entries)
-        words = f"{length} {plural(length, ('символ', 'символа', 'символов'))}"
-        lead = f"Подготовил: {words}, без похожих знаков. "
-        if target is not None:
-            body = "Пока ничего не сохранено."
-        elif re.search(r"\bдля\s+\S+", text):
-            body = "Записи с таким названием не нашёл, поэтому пароль ни к чему не привязан. Пока ничего не сохранено."
-        else:
-            body = "Пока ничего не сохранено."
-        return ChatPlan(
-            "password", lead + body,
-            site=target["site"] if target else None, username=target["username"] if target else None, length=length,
-        )
+    if _asks_to_set_password(text):
+        return ChatPlan("text", REFUSAL_TEXT)
 
     concept = any(c in text for c in _CONCEPT_CUES)
     if concept:

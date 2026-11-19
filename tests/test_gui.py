@@ -30,6 +30,7 @@ from types import SimpleNamespace
 import pytest
 
 from assistant.advisor import AdvisorReport, EntryIssue
+from assistant.chat import REFUSAL_TEXT
 
 tk = pytest.importorskip("tkinter")
 
@@ -2737,39 +2738,22 @@ def test_assistant_priority_question_shows_rows_with_open_buttons(app, monkeypat
     assert view.panel is None and view.selected is not None  # запись открыта в обычной панели
 
 
-def test_assistant_new_password_proposal_apply_show_and_history(app, monkeypatch, tmp_path):
+def test_assistant_refuses_to_create_or_change_passwords(app, monkeypatch, tmp_path):
     view, entries = _assistant_vault(app, monkeypatch, tmp_path)
-    hetzner = entries[2]
-    old = hetzner["password"]
-    view._chat_send("Придумай новый для Hetzner")
-    view.update()
-    message = view._chat[-1]
-    password = message["password"]
-    assert message["kind"] == "password" and message["entry"] is hetzner and len(password) == 24
-    assert not any(ch in "0O1lI" for ch in password)
-    texts = _canvas_texts(view.detail)
-    assert "Подготовил: 24 символа, без похожих знаков. Пока ничего не сохранено." in " ".join(texts)
-    assert "Применить" in texts and "Показать" in texts and password not in texts
-    _click_text(view.detail, "Показать")
-    assert password in _canvas_texts(view.detail) and "Скрыть" in _canvas_texts(view.detail)
-    assert hetzner["password"] == old  # пока ничего не сохранено
-    _click_text(view.detail, "Применить")
-    assert hetzner["password"] == password and hetzner["history"][-1]["event"] == "password"
-    assert "Применено" in _canvas_texts(view.detail) and view.panel == "assistant" and view.selected is None
-    # в историю для модели пароль не попал
-    assert password not in json.dumps(app._assistant_history, ensure_ascii=False)
-    assert password not in "\n".join(_canvas_texts(view.sidebar))
-
-
-def test_assistant_new_password_without_record_offers_copy(app, monkeypatch, tmp_path):
-    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
-    view._chat_send("Придумай пароль на 30 символов")
-    message = view._chat[-1]
-    assert message["entry"] is None and len(message["password"]) == 30
-    view.update()
-    assert "Копировать" in _canvas_texts(view.detail) and "Применить" not in _canvas_texts(view.detail)
-    _click_text(view.detail, "Копировать")
-    assert _clipboard(app) == message["password"]
+    before = [(e["site"], e["password"], e.get("history")) for e in entries]
+    for question in ("Придумай новый для Hetzner", "Придумай пароль на 30 символов", "Смени пароль для Hetzner"):
+        view._chat_send(question)
+        view.update()
+        message = view._chat[-1]
+        assert message["kind"] == "text" and message["text"] == REFUSAL_TEXT
+        assert "password" not in message and "entry" not in message
+        texts = _canvas_texts(view.detail)
+        assert "Применить" not in texts and "Показать" not in texts and "Копировать" not in texts
+    assert [(e["site"], e["password"], e.get("history")) for e in entries] == before
+    # у класса нет методов, которыми чат мог бы подставить или скопировать пароль
+    for name in ("_chat_apply", "_chat_copy", "_chat_toggle_visible"):
+        assert not hasattr(view, name)
+    assert app._clipboard_timer is None and app._clipboard_value is None  # в буфер ничего не попадало
 
 
 def test_assistant_text_answers_hide_secrets_and_clear_on_lock(app, monkeypatch, tmp_path):

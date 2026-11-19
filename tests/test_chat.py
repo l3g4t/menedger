@@ -1,8 +1,9 @@
-"""Тесты assistant.chat — разбор вопросов, на которые чат отвечает готовым блоком (раздел 10.85)."""
+"""Тесты assistant.chat — разбор вопросов, на которые чат отвечает готовым блоком (разделы 10.85, 10.87)."""
 
 from datetime import datetime, timedelta, timezone
 
-from assistant.chat import plan_reply, problem_items
+from assistant import chat
+from assistant.chat import REFUSAL_TEXT, ChatPlan, plan_reply, problem_items
 from vault.records import new_entry
 
 
@@ -75,25 +76,33 @@ def test_weak_password_phrasings_show_the_weak_entries():
         assert plan_reply(question, _data()) is None, question
 
 
-def test_new_password_request_finds_record_by_one_word():
-    plan = plan_reply("Придумай новый для Hetzner", _data())
-    assert plan.kind == "password" and (plan.site, plan.username) == ("Hetzner Cloud", "admin@x.ru")
-    assert plan.text == "Подготовил: 24 символа, без похожих знаков. Пока ничего не сохранено."
-    assert plan.length == 24
+def test_requests_to_create_or_change_a_password_are_refused_without_any_password():
+    for question in (
+        "Придумай новый для Hetzner", "Сгенерируй пароль 30 символов для GitHub", "Придумай новый пароль для Foo",
+        "Придумай пароль", "придумай мне пароль", "Дай новый пароль для gmail", "Смени пароль для GitHub",
+        "поменяй пароль у Hetzner", "Обнови пароль для Notion", "замени пароль", "Установи пароль 12345678 для Notion",
+        "Подставь новый пароль в запись Hetzner Cloud",
+    ):
+        plan = plan_reply(question, _data())
+        assert plan is not None and plan.kind == "text" and plan.text == REFUSAL_TEXT, question
+        assert not plan.items, question
+    assert "Генератор" in REFUSAL_TEXT and "карандаш" in REFUSAL_TEXT
 
 
-def test_new_password_request_with_length_unknown_site_and_no_site():
-    plan = plan_reply("Сгенерируй пароль 30 символов для GitHub", _data())
-    assert plan.site == "GitHub" and plan.length == 30 and "30 символов" in plan.text
-    unknown = plan_reply("Придумай новый пароль для Foo", _data())
-    assert unknown.site is None and "не нашёл" in unknown.text
-    assert plan_reply("Придумай пароль 500 символов", _data()).length == 64
-    assert plan_reply("Придумай пароль", _data()).site is None
+def test_chat_plans_have_no_way_to_carry_a_password():
+    # Нет ни ключей для пароля и записи, ни длины: ответ чата — только текст и список записей.
+    assert set(ChatPlan.__dataclass_fields__) == {"kind", "text", "items"}
+    assert not hasattr(chat, "DEFAULT_PASSWORD_LENGTH") and not hasattr(chat, "_find_entry")
 
 
 def test_how_to_questions_and_new_record_are_not_password_requests():
     assert plan_reply("Как придумать надёжный пароль?", _data()) is None
+    assert plan_reply("Как поменять пароль?", _data()) is None
+    assert plan_reply("Можно ли поменять пароль у записи?", _data()) is None
     assert plan_reply("Создай новую запись", _data()) is None
+    # вопросы про состояние хранилища не принимаются за просьбу сменить пароль
+    assert plan_reply("Какие пароли стоит заменить в первую очередь?", _data()).kind == "problems"
+    assert plan_reply("Что поменять первым?", _data()).kind == "problems"
 
 
 def test_plan_never_contains_passwords():

@@ -967,7 +967,7 @@ _MV_GEN_OPTIONS = {  # режим -> (ключ, подпись, подсказк
 }
 _MV_SAVE_HINT = "Найти запись"
 # чат помощника в правой панели (раздел 10.85)
-_MV_CHAT_HINT = "Спросите про записи или попросите пароль"
+_MV_CHAT_HINT = "Спросите про записи или безопасность"
 _MV_CHAT_NOTE = "Помощник видит названия записей, даты и результаты проверки. Сами пароли ему недоступны."
 _MV_BUBBLE = "#18314d"
 _MV_CHAT_TEXT = "#dde8f5"
@@ -2629,7 +2629,7 @@ class MainView(_DrawKit, tk.Frame):
         return (
             "Здравствуйте! Я помощник на базе знаний: отвечаю на вопросы про пароли и безопасность, а про ваше "
             "хранилище — по результатам раздела «Проблемы». Спросите, например, про слабые, повторяющиеся и "
-            "устаревшие пароли или попросите придумать новый пароль для записи."
+            "устаревшие пароли. Паролей я не создаю и не меняю — для этого есть «Генератор» и правка записи."
         )
 
     def _ensure_chat_entry(self) -> None:
@@ -2719,55 +2719,27 @@ class MainView(_DrawKit, tk.Frame):
         self._chat_follow = True
 
     def _chat_add_plan(self, plan: ChatPlan) -> None:
-        """Готовый блок: список записей с «Открыть» или новый пароль. Сам пароль живёт только здесь,
-        в памяти окна: в историю для модели идёт лишь текст ответа."""
+        """Готовый ответ: список записей с «Открыть» или обычный текст (например, отказ создавать
+        и менять пароли — раздел 10.87). Помощник паролей не показывает и не меняет."""
+        if plan.kind != "problems":
+            self._chat_add_text(plan.text)
+            return
         entries = self._entries()
 
         def find(site: str | None, username: str | None) -> dict | None:
             return next((e for e in entries if e["site"] == site and e["username"] == username), None)
 
-        if plan.kind == "problems":
-            items = [
-                {"entry": e, "title": i.site, "subtitle": i.subtitle}
-                for i in plan.items
-                if (e := find(i.site, i.username)) is not None
-            ]
-            self._chat.append({"role": "assistant", "kind": "problems", "text": plan.text, "items": items})
-        else:
-            password = generate_password(plan.length, True, True, True, True, True)  # без похожих знаков
-            self._chat.append(
-                {
-                    "role": "assistant", "kind": "password", "text": plan.text, "password": password,
-                    "entry": find(plan.site, plan.username), "visible": False, "applied": False,
-                }
-            )
+        items = [
+            {"entry": e, "title": i.site, "subtitle": i.subtitle}
+            for i in plan.items
+            if (e := find(i.site, i.username)) is not None
+        ]
+        self._chat.append({"role": "assistant", "kind": "problems", "text": plan.text, "items": items})
         self.app._assistant_history.append({"role": "assistant", "content": plan.text, "time": datetime.now().strftime("%H:%M")})
         self._chat_follow = True
 
     def _chat_open_entry(self, entry: dict) -> None:
         self.select(entry)
-
-    def _chat_toggle_visible(self, message: dict) -> None:
-        message["visible"] = not message["visible"]
-        self._draw_detail()
-
-    def _chat_copy(self, message: dict) -> None:
-        self.app._copy_to_clipboard(message["password"])
-
-    def _chat_apply(self, message: dict) -> None:
-        entry = message.get("entry")
-        if entry is None or message.get("applied") or not any(e is entry for e in self._entries()):
-            return
-        fields = {
-            "site": entry.get("site", ""), "username": entry.get("username", ""), "password": message["password"],
-            "url": entry.get("url", ""), "note": entry.get("note", ""), "tags": list(entry.get("tags", []) or []),
-        }
-        self.app._store_entry(entry, fields)
-        message["applied"] = True
-        if self.panel == "assistant":  # `finish_edit` выбрал запись; панель остаётся открытой
-            self.selected = None
-            self._draw_list()
-            self._draw_detail()
 
     # рисование чата
 
@@ -2847,8 +2819,6 @@ class MainView(_DrawKit, tk.Frame):
                 kind = m.get("kind", "text")
                 if kind == "problems" and m["items"]:
                     bottom = last + 16.3 + 60.4 * len(m["items"])
-                elif kind == "password":
-                    bottom = last + 19.3 + 47.0
                 else:
                     bottom = last + 11.0
                 placed.append((m, top, lines, bottom, 0.0))
@@ -2889,31 +2859,6 @@ class MainView(_DrawKit, tk.Frame):
                     hit(bx, sep + 15.9, right, sep + 45.5, lambda e=item["entry"]: self._chat_open_entry(e))
                     sep += 60.4
                 c.create_line(P(left), P(sep), P(right), P(sep), fill=_MV_CHAT_ROW_LINE, tags="dyn")
-            elif kind == "password":
-                box = last + 19.3
-                c.create_image(P(left), P(box), image=self._rr(span, 47, _MV_FIELD_FILL, _MV_CHAT_BOX_LINE, 12), anchor="nw", tags="dyn")
-                password = m["password"]
-                if m["visible"]:
-                    shown = password if len(password) <= 26 else password[:25] + "…"
-                    self._text(c, left + 16.5, box + 24.4, shown, px=13, fill="#f2f4ef", mono=True)
-                else:
-                    for i in range(min(len(password), 20)):
-                        cx = left + 19.2 + 10.55 * i
-                        c.create_image(P(cx), P(box + 24.4), image=self._disc(4, "#f6f3ef"), anchor="center", tags="dyn")
-                show_x = right - 12.5 - 83.2
-                c.create_image(P(show_x), P(box + 8.4), image=self._rr(83.2, 30.4, None, _MV_CANCEL_LINE, 10), anchor="nw", tags="dyn")
-                self._text(c, show_x + 41.6, box + 23.8, "Скрыть" if m["visible"] else "Показать", px=11.1, fill="#ddebf6", bold=True, anchor="center")
-                hit(show_x, box + 8.4, show_x + 83.2, box + 38.8, lambda mm=m: self._chat_toggle_visible(mm))
-                apply_x = show_x - 7.6 - 92.3
-                entry = m.get("entry")
-                if entry is not None and m.get("applied"):
-                    c.create_image(P(apply_x), P(box + 8.4), image=self._rr(92.3, 30.4, None, _MV_CANCEL_LINE, 10), anchor="nw", tags="dyn")
-                    self._text(c, apply_x + 46.15, box + 23.8, "Применено", px=11.1, fill=_MV_CHAT_LABEL, bold=True, anchor="center")
-                else:
-                    label, command = ("Применить", lambda mm=m: self._chat_apply(mm)) if entry is not None else ("Копировать", lambda mm=m: self._chat_copy(mm))
-                    c.create_image(P(apply_x), P(box + 8.4), image=self._rr(92.3, 30.4, _MV_CREAM, None, 10), anchor="nw", tags="dyn")
-                    self._text(c, apply_x + 46.15, box + 23.8, label, px=11.1, fill=_MV_SAVE_TEXT, bold=True, anchor="center")
-                    hit(apply_x, box + 8.4, apply_x + 92.3, box + 38.8, command)
 
         # --- шапка и нижняя часть закрывают прокручиваемую ленту ---
         c.create_rectangle(0, 0, width, P(view_top), fill=_MV_BG, outline="", tags="dyn")
