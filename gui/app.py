@@ -21,6 +21,7 @@ gui.app — главное окно менеджера паролей.
 from __future__ import annotations
 
 import base64
+import copy
 import faulthandler
 import io
 import math
@@ -1878,7 +1879,7 @@ class MainView(_DrawKit, tk.Frame):
         if not fields["password"]:
             messagebox.showerror("Ошибка", "Пароль не может быть пустым.", parent=self.app)
             return
-        self.app._store_entry(self._edit_entry, fields)
+        self.app._store_entry(self._edit_entry, fields)  # при сбое форма остаётся открытой
 
     def _generate_password(self) -> None:
         self._ev["password"].set(generate_password())
@@ -2342,8 +2343,8 @@ class MainView(_DrawKit, tk.Frame):
             "note": entry.get("note", ""),
             "tags": list(entry.get("tags", []) or []),
         }
-        self.close_panel(restore=False)
-        self.app._store_entry(entry, fields)
+        if self.app._store_entry(entry, fields):  # при сбое панель и пароль остаются на месте
+            self.close_panel(restore=False)
 
     def _save_as_new(self) -> None:
         password = self._gen_password
@@ -2895,11 +2896,16 @@ class MainView(_DrawKit, tk.Frame):
         entry = self.selected
         if entry is None:
             return
-        if entry.get("favorite"):
+        was_favorite = bool(entry.get("favorite"))
+        if was_favorite:
             entry.pop("favorite", None)
         else:
             entry["favorite"] = True
-        self.app._save_vault()
+        if not self.app._save_vault():  # не записалось — звезда возвращается как была (раздел 10.88)
+            if was_favorite:
+                entry["favorite"] = True
+            else:
+                entry.pop("favorite", None)
         self.refresh()
 
     def _open_url(self, url: str) -> None:
@@ -5397,16 +5403,18 @@ class App(ttk.Window):
         except ConcurrentChangeError as exc:
             messagebox.showerror(
                 "Хранилище изменено",
-                f"{exc}\n\nНичего не записано, чтобы не потерять чужие данные. "
+                f"{exc}\n\nНичего не записано, чтобы не потерять чужие данные. Ваше изменение отменено. "
                 "Закройте хранилище и откройте его заново, затем повторите действие.",
                 parent=self,
             )
             return False
         except VaultBusyError as exc:
-            messagebox.showerror("Хранилище занято", str(exc), parent=self)
+            messagebox.showerror("Хранилище занято", f"{exc}\n\nИзменение не сохранено и отменено.", parent=self)
             return False
         except OSError as exc:
-            messagebox.showerror("Ошибка", f"Не удалось сохранить хранилище: {exc}", parent=self)
+            messagebox.showerror(
+                "Ошибка", f"Не удалось сохранить хранилище: {exc}\n\nИзменение не сохранено и отменено.", parent=self
+            )
             return False
         self.data, self._snapshot = merged, snapshot
         self._view.set_saved_at(datetime.now())
@@ -5432,11 +5440,16 @@ class App(ttk.Window):
         """Карандаш в панели записи: форма «Изменение записи» справа (раздел 10.80)."""
         self._view.begin_edit(entry)
 
-    def _store_entry(self, entry: dict | None, fields: dict) -> None:
+    def _store_entry(self, entry: dict | None, fields: dict) -> bool:
         """Сохранить форму: `entry` None — новая запись, иначе правка. Смена пароля,
-        заметки и сайта/логина попадает в историю записи (`vault.records`)."""
+        заметки и сайта/логина попадает в историю записи (`vault.records`).
+
+        Запись в файл может не получиться (диск, блокировка, чужая смена пароля). Тогда
+        изменение откатывается в памяти (иначе на экране было бы то, чего нет в файле), форма
+        остаётся открытой с введёнными значениями, а возвращается False — вызывающий код не
+        должен считать операцию выполненной (раздел 10.88)."""
         if entry is None:
-            entry = new_entry(
+            stored = new_entry(
                 fields["site"],
                 fields["username"],
                 fields["password"],
@@ -5444,11 +5457,21 @@ class App(ttk.Window):
                 note=fields["note"],
                 tags=normalize_tags(fields["tags"]),
             )
-            self.data.setdefault("entries", []).append(entry)
+            entries = self.data.setdefault("entries", [])
+            entries.append(stored)
+            if not self._save_vault():
+                self.data["entries"] = [e for e in self.data.get("entries", []) if e is not stored]
+                return False
         else:
+            stored = entry
+            before = copy.deepcopy(entry)
             apply_edit(entry, **fields)
-        self._save_vault()
-        self._view.finish_edit(entry)
+            if not self._save_vault():
+                entry.clear()
+                entry.update(before)  # тот же объект: ссылки в списке и в панели остаются верными
+                return False
+        self._view.finish_edit(stored)
+        return True
 
     def _delete_entry(self, entry: dict) -> None:
         confirmed = messagebox.askyesno(
@@ -5465,8 +5488,9 @@ class App(ttk.Window):
         # исчезнуть именно выбранная, а не первая совпадающая по данным
         # (тот же принцип, что и в vault/cli.py, команда delete).
         self.data["entries"] = [e for e in entries if e is not entry]
-        if self._save_vault():
-            self._refresh_tree()
+        if not self._save_vault():
+            self.data["entries"] = entries  # в файле запись осталась — и в списке тоже
+        self._refresh_tree()
 
     def _clipboard_hwnd(self):
         """Описатель окна верхнего уровня (владелец буфера в Win32)."""

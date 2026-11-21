@@ -2800,3 +2800,98 @@ def test_assistant_and_generator_panels_replace_each_other(app, monkeypatch, tmp
     assert view.panel == "assistant" and view._gen_password == ""
     _click_text(view.head, "Помощник")
     assert view.panel is None
+
+
+# --- Сбой записи в файл не должен выглядеть как успех (раздел 10.88) ---------------------------
+
+
+def _failing_save(app, monkeypatch):
+    """Подменить запись в файл так, чтобы она падала, и собрать показанные сообщения."""
+    errors = []
+    monkeypatch.setattr(guiapp.messagebox, "showerror", lambda *a, **k: errors.append(a))
+
+    def broken(*args, **kwargs):
+        raise OSError("диск недоступен")
+
+    monkeypatch.setattr(guiapp, "save_merged", broken)
+    return errors
+
+
+def _on_disk(app):
+    from vault.crypto import decrypt_vault
+    from vault.storage import load_vault_file
+
+    return decrypt_vault(load_vault_file(app.vault_path), MASTER)["entries"]
+
+
+def test_failed_save_of_edit_keeps_form_open_and_rolls_back_the_entry(app, monkeypatch):
+    view, entry = _edit_entry_fixture(app, monkeypatch)
+    assert app._save_vault()
+    old_password, old_history = entry["password"], list(entry.get("history", []))
+    view.begin_edit(entry)
+    app.update()
+    view._ev["password"].set("new-Pass#99xY-zq")
+    view._ev["site"].set("GitHub Inc")
+    errors = _failing_save(app, monkeypatch)
+    view._save_edit()
+    app.update()
+    assert errors and "не сохранено и отменено" in errors[0][1]
+    assert view.editing  # форма не закрылась, введённое не потеряно
+    assert view._ev["password"].get() == "new-Pass#99xY-zq" and view._ev["site"].get() == "GitHub Inc"
+    assert entry["password"] == old_password and entry["site"] == "GitHub"  # в памяти то же, что в файле
+    assert entry.get("history", []) == old_history
+    assert any(e is entry for e in app.data["entries"])  # тот же объект
+    assert [e["password"] for e in _on_disk(app) if e["site"] == "GitHub"] == [old_password]
+
+
+def test_failed_save_of_new_record_removes_it_and_keeps_form(app, monkeypatch):
+    view = _open_main(app, monkeypatch)
+    app._on_add()
+    view._ev["site"].set("added.com")
+    view._ev["username"].set("bob")
+    view._ev["password"].set("pw12345Xy#-ab")
+    errors = _failing_save(app, monkeypatch)
+    view._save_edit()
+    assert errors and view.editing and app.data["entries"] == [] and view._entries() == []
+    assert view._ev["site"].get() == "added.com"  # можно нажать «Сохранить» ещё раз
+
+
+def test_failed_delete_keeps_entry_in_list_and_file(app, monkeypatch):
+    entry = _rec("keep.com")
+    view = _open_main(app, monkeypatch, entry)
+    assert app._save_vault()
+    monkeypatch.setattr(guiapp.messagebox, "askyesno", lambda *a, **k: True)
+    errors = _failing_save(app, monkeypatch)
+    app._delete_entry(entry)
+    app.update()
+    assert errors
+    assert any(e is entry for e in app.data["entries"]) and any(e is entry for e in view._entries())
+    assert [e["site"] for e in _on_disk(app)] == ["keep.com"]
+    assert "keep.com" in _canvas_texts(view.list)
+
+
+def test_failed_favorite_toggle_restores_the_star(app, monkeypatch):
+    entry = _rec("example.com")
+    view = _open_main(app, monkeypatch, entry)
+    assert app._save_vault()
+    view.select(entry)
+    _failing_save(app, monkeypatch)
+    view._toggle_favorite()
+    assert "favorite" not in entry
+    entry["favorite"] = True
+    view._toggle_favorite()
+    assert entry["favorite"] is True
+
+
+def test_failed_replace_from_generator_keeps_panel_and_password(app, monkeypatch):
+    github = _rec("GitHub", "dev@example.com", password="Old#Pass1x9")
+    view = _open_main(app, monkeypatch, github)
+    assert app._save_vault()
+    view.select(github)
+    _click_text(view.head, "Генератор")
+    password = view._gen_password
+    _click_text(view.detail, "Сохранить в запись...")
+    _failing_save(app, monkeypatch)
+    _click_text(view.detail, "Заменить пароль")
+    assert github["password"] == "Old#Pass1x9" and view.panel == "save" and view._gen_password == password
+    assert _on_disk(app)[0]["password"] == "Old#Pass1x9"
