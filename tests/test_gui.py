@@ -2802,6 +2802,89 @@ def test_assistant_and_generator_panels_replace_each_other(app, monkeypatch, tmp
     assert view.panel is None
 
 
+# --- Инструкция по использованию помощника (раздел 10.89) -----------------------------------------------
+
+
+def _click_help_button(view):
+    """Настоящий щелчок по кнопке «?» в шапке чата (она рисуется картинкой, надпись «?» — её центр)."""
+    _click_text(view.detail, "?")
+
+
+def test_help_button_opens_instruction_and_back_returns_to_chat(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    assert not view._chat_help
+    _click_help_button(view)
+    assert view._chat_help and view.panel == "assistant"
+    texts = _canvas_texts(view.detail)
+    for wanted in (guiapp._MV_HELP_TITLE, guiapp._MV_HELP_STATUS, "Перейти к чату", guiapp._MV_HELP_HINT,
+                   "ЧЕГО ОН НЕ ДЕЛАЕТ", *guiapp._MV_HELP_QUESTIONS, *(t for _k, t, _s in guiapp._MV_HELP_CAN)):
+        assert wanted in texts, wanted
+    assert "Отправить" not in texts  # поле ввода чата под инструкцией не показывается
+    assert "chat" not in view._edit_items
+    view.detail.event_generate("<Button-1>", x=guiapp._px(44), y=guiapp._px(32))  # стрелка «назад»
+    view.update()
+    assert not view._chat_help and "Отправить" in _canvas_texts(view.detail)
+
+
+def test_help_continue_button_returns_to_chat_and_pill_stays_active(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view.open_help()
+    view.update()
+    assert any(k[0] == "rr" and k[3] == guiapp._MV_PILL_ON_FILL for k in view._images)
+    _click_text(view.detail, "Перейти к чату")
+    assert not view._chat_help and view.panel == "assistant"
+
+
+def test_help_example_chip_sends_the_question_to_chat(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view.open_help()
+    view.update()
+    _click_text(view.detail, "Где сейчас слабые пароли?")
+    texts = _canvas_texts(view.detail)
+    assert not view._chat_help and "Где сейчас слабые пароли?" in texts
+    assert any(m["role"] == "assistant" for m in view._chat)  # помощник ответил на вопрос
+
+
+def test_help_is_reset_by_closing_the_panel_and_by_lock(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view.open_help()
+    _click_text(view.head, "Помощник")  # закрыли панель вместе с инструкцией
+    assert view.panel is None and not view._chat_help
+    _click_text(view.head, "Помощник")
+    assert not view._chat_help  # открывается чат, а не инструкция
+    view.open_help()
+    view.clear()
+    assert not view._chat_help
+
+
+def test_help_does_nothing_without_chat_panel(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view.close_panel()
+    view.open_help()
+    assert not view._chat_help
+
+
+def test_help_layout_fits_default_window_and_wheel_scrolls_in_small_one(app, monkeypatch, tmp_path):
+    view, _entries = _assistant_vault(app, monkeypatch, tmp_path)
+    view.open_help()
+    view.update()
+    assert view._help_offset <= 4  # в окне по умолчанию почти всё помещается без прокрутки
+    app.geometry(f"{app.winfo_width()}x{guiapp._px(520)}")
+    app.update()
+    view._draw_detail()
+    view._on_detail_wheel(1)
+    assert view._help_offset > 0
+    view._on_detail_wheel(-10)
+    assert view._help_offset == 0
+
+
+def test_help_texts_do_not_promise_password_changes():
+    """Инструкция не должна обещать то, чего помощник не делает (раздел 10.87)."""
+    joined = " ".join(guiapp._MV_HELP_CANNOT).lower()
+    assert "не создаёт и не меняет пароли" in joined and "не видит пароли и логины" in joined
+    assert not any("пароль" in q.lower() and q.lower().startswith(("придумай", "смени")) for q in guiapp._MV_HELP_QUESTIONS)
+
+
 # --- Сбой записи в файл не должен выглядеть как успех (раздел 10.88) ---------------------------
 
 

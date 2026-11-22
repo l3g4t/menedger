@@ -981,6 +981,38 @@ _MV_CHAT_STATUS = "#97a9bc"
 _MV_CHAT_INPUT_LINE = "#263c50"
 _MV_CHAT_HEADER_LINE = "#182b42"
 _MV_CHAT_FOOTER_LINE = "#16263e"
+# Инструкция по использованию помощника (раздел 10.89): координаты и цвета сняты с утверждённого макета.
+_MV_HELP_TITLE = "Как пользоваться помощником"
+_MV_HELP_STATUS = "Работает на этом устройстве, без интернета"
+_MV_HELP_CAN = (
+    ("chat", "Отвечает про пароли и безопасность",
+     "Как придумать надёжный пароль, что такое двухфакторная защита, как узнать фишинг."),
+    ("warn", "Показывает проблемные записи",
+     "Слабые, повторяющиеся и давно не менявшиеся пароли; кнопка «Открыть» ведёт к записи."),
+    ("list", "Подсказывает, с чего начать",
+     "«Что исправить в первую очередь?» — до трёх записей по важности."),
+)
+_MV_HELP_QUESTIONS = (
+    "Что стоит заменить в первую очередь?",
+    "Где сейчас слабые пароли?",
+    "Какие пароли повторяются?",
+    "Как придумать надёжный пароль?",
+)
+_MV_HELP_CANNOT = (
+    "Не создаёт и не меняет пароли — для этого «Генератор» и карандаш в записи.",
+    "Не видит пароли и логины — только названия записей, даты и результаты проверки.",
+    "Это не нейросеть: ответы из базы знаний, работает без интернета.",
+    "Не вводите пароли в чат — вопросы он видит.",
+)
+_MV_HELP_HINT = "Эта подсказка открывается кнопкой «?» в шапке чата"
+_MV_HELP_CAPTION = "#8a9caf"
+_MV_HELP_ICON_FILL = "#18314d"
+_MV_HELP_ITEM_TEXT = "#e8eef4"
+_MV_HELP_CHIP_FILL = "#0c1b2b"
+_MV_HELP_CHIP_LINE = "#1b3450"
+_MV_HELP_WARN_LINE = "#5b4a36"
+_MV_HELP_WARN_TEXT = "#c6d3e0"
+_MV_HELP_BACK_LINE = "#283f5a"
 _MV_SEARCH_HINT = "Поиск"
 _MV_GROUP_TITLES = {"today": "Сегодня", "week": "На этой неделе", "earlier": "Ранее"}
 
@@ -1177,6 +1209,8 @@ class MainView(_DrawKit, tk.Frame):
         self._chat_entry: tk.Entry | None = None
         self._chat_busy = False
         self._chat_results: queue.Queue = queue.Queue()
+        self._chat_help = False  # показана инструкция вместо ленты чата (раздел 10.89)
+        self._help_offset = 0.0
 
         line = max(1, _px(1))
         self.sidebar = tk.Canvas(self, width=_px(224), bg=_MV_SIDEBAR_BG, bd=0, highlightthickness=0)
@@ -1376,6 +1410,7 @@ class MainView(_DrawKit, tk.Frame):
         self._save_var.set(_MV_SAVE_HINT)
         self._chat, self._chat_offset, self._chat_follow, self._chat_busy = [], 0.0, True, False
         self._chat_active = False
+        self._chat_help, self._help_offset = False, 0.0
         self._chat_var.set(_MV_CHAT_HINT)
         if self._chat_entry is not None:
             self._chat_entry.configure(fg=_MV_TEXT_DIM)
@@ -1627,7 +1662,7 @@ class MainView(_DrawKit, tk.Frame):
             self._draw_edit(c, hits, width, height)
             return
         if self.panel and self.app.data is not None:
-            {"gen": self._draw_gen, "save": self._draw_save, "assistant": self._draw_chat}[self.panel](c, hits, width, height)
+            {"gen": self._draw_gen, "save": self._draw_save, "assistant": self._draw_help if self._chat_help else self._draw_chat}[self.panel](c, hits, width, height)
             return
         entry = self.selected
         if entry is None or self.app.data is None:
@@ -2187,6 +2222,7 @@ class MainView(_DrawKit, tk.Frame):
         if not self.panel:
             return
         self.panel = None
+        self._chat_help, self._help_offset = False, 0.0
         self._gen_password, self._gen_bits = "", 0.0
         self._slider, self._slider_drag = None, False
         self._drop_window("gsearch")
@@ -2259,7 +2295,10 @@ class MainView(_DrawKit, tk.Frame):
             self._gen_set_length(self._slider_value_at(self.detail.canvasx(event.x)))
 
     def _on_detail_wheel(self, direction: int) -> None:
-        if self.panel == "assistant":
+        if self.panel == "assistant" and self._chat_help:
+            self._help_offset = max(0.0, self._help_offset + 40 * direction)
+            self._draw_detail()
+        elif self.panel == "assistant":
             self._chat_offset = max(0.0, self._chat_offset + 40 * direction)
             self._chat_follow = False
             self._draw_detail()
@@ -2618,6 +2657,7 @@ class MainView(_DrawKit, tk.Frame):
             self._drop_window("gsearch")
         self.selected, self.password_visible = None, False
         self.panel = "assistant"
+        self._chat_help, self._help_offset = False, 0.0
         self._chat_follow = True
         self._draw_head()
         self._draw_list()
@@ -2742,6 +2782,172 @@ class MainView(_DrawKit, tk.Frame):
     def _chat_open_entry(self, entry: dict) -> None:
         self.select(entry)
 
+    # --- инструкция по использованию помощника (раздел 10.89) ------------------------------------
+
+    def open_help(self) -> None:
+        """Кнопка «?» в шапке чата: показать инструкцию вместо ленты."""
+        if self.panel != "assistant" or self.app.data is None:
+            return
+        self._chat_help, self._help_offset = True, 0.0
+        self._draw_detail()
+
+    def close_help(self) -> None:
+        """«Назад» и «Перейти к чату»: вернуться к ленте чата."""
+        if not self._chat_help:
+            return
+        self._chat_help = False
+        self._chat_follow = True
+        self._draw_detail()
+        if self._chat_entry is not None and self.panel == "assistant":
+            self.after_idle(lambda: self._chat_entry is not None and self.panel == "assistant" and self._chat_entry.focus_set())
+
+    def _help_ask(self, question: str) -> None:
+        """Чип с примером: инструкция закрывается, вопрос уходит в чат как обычное сообщение."""
+        self._chat_help = False
+        self._chat_send(question)
+
+    def _help_glyph(self, kind: str):
+        """Линейная иконка 18×18 (чат, предупреждение, список) цвета ссылки; рисуется в сетке 24×24."""
+        S = _px(18)
+        key = ("helpglyph", kind, S)
+        if key not in self._images:
+            f = 8
+            big = Image.new("RGBA", (S * f, S * f), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(big)
+            u = S * f / 24
+            width = max(1, round(1.8 * u))
+            color = _MV_LINK
+
+            def pt(x: float, y: float) -> tuple[float, float]:
+                return (x * u, y * u)
+
+            def line(points) -> None:
+                pts = [pt(*p) for p in points]
+                draw.line(pts, fill=color, width=width, joint="curve")
+                for x, y in pts:  # круглые концы и изгибы
+                    draw.ellipse([x - width / 2, y - width / 2, x + width / 2, y + width / 2], fill=color)
+
+            if kind == "chat":
+                draw.arc([*pt(5, 4), *pt(21, 20)], 0, 117, fill=color, width=width)
+                draw.arc([*pt(5, 4), *pt(21, 20)], 157, 360, fill=color, width=width)
+                line([(9.4, 19.1), (4, 20), (5, 15.4)])
+            elif kind == "warn":
+                line([(12, 3), (21, 19), (3, 19), (12, 3)])
+                line([(12, 10), (12, 14)])
+                x, y = pt(12, 17)
+                draw.ellipse([x - 0.9 * u, y - 0.9 * u, x + 0.9 * u, y + 0.9 * u], fill=color)
+            else:
+                line([(4, 6), (20, 6)])
+                line([(4, 12), (14, 12)])
+                line([(4, 18), (10, 18)])
+            self._images[key] = self.app._tk_image(big.resize((S, S), Image.LANCZOS))
+        return self._images[key]
+
+    def _spaced(self, c: tk.Canvas, x: float, y: float, text: str, px: float, fill: str, spacing: float) -> None:
+        """Подпись с разрядкой (в Tk её нет): символы ставятся по одному, шаг = ширина + разрядка."""
+        for ch in text:
+            self._text(c, x, y, ch, px=px, fill=fill, bold=True)
+            x += self._chat_text_width(ch, px, True) + spacing
+
+    def _draw_help(self, c: tk.Canvas, hits: _Hits, width: int, height: int) -> None:
+        P = _px
+        scale = max(_UI_SCALE, 0.01)
+        left, right = 28, width / scale - 28
+        span = right - left
+        H = height / scale
+        dy = max(H - 700.0, -170.0)  # нижняя часть прижата к низу окна, как у чата
+        view_top, view_bottom = 72.5, 628.0 + dy
+        self._edit_used = set()
+        self._drop_window("gsearch")
+        self._drop_window("chat")  # поле ввода чата под инструкцией не нужно
+
+        # --- раскладка (px референса, как на макете: 106/164/222 -> подписи -> чипы -> рамка) ---
+        # Макет нарисован для высоты 700 px; в окне по умолчанию панель ниже на строку заголовка
+        # окна (36 px), поэтому промежутки сжимаются на `r` (0…1), а остаток прокручивается.
+        r = min(1.0, max(0.0, -dy) / 36.0)
+        sec1 = 88.0 - 4 * r
+        y = 106.0 - 5 * r
+        items = []
+        for kind, title, text in _MV_HELP_CAN:
+            lines = self._chat_wrap(text, 12, 410)
+            items.append((y, kind, title, lines))
+            y += 24 + 16.2 * len(lines) + 1.6 * (1 - r)
+        sec2 = y + 16 - 5 * r
+        chips = []
+        cx, cy = left, sec2 + 22 - 3 * r
+        for question in _MV_HELP_QUESTIONS:
+            w = self._chat_text_width(question, 12.5) + 28
+            if cx > left and cx + w > right:
+                cx, cy = left, cy + 40 - 3 * r
+            chips.append((cx, cy, w, question))
+            cx += w + 8
+        warn_top = cy + 32 + 16 - 6 * r
+        bullets = [self._chat_wrap(t, 12.5, 420) for t in _MV_HELP_CANNOT]
+        gap = 7 - 2 * r
+        ul_top = 42 - 4 * r
+        ul_h = sum(16.875 * len(b) for b in bullets) + gap * (len(bullets) - 1)
+        warn_h = max(172.0 - 5 * r, ul_top + ul_h + 7)
+        content_end = warn_top + warn_h
+        max_offset = max(0.0, content_end + 10 - 6 * r - view_bottom)
+        self._help_offset = max(0.0, min(self._help_offset, max_offset))
+        off = self._help_offset
+
+        def hit(x0: float, y0: float, x1: float, y1: float, command) -> None:
+            y0, y1 = max(y0, view_top), min(y1, view_bottom)
+            if y1 > y0:
+                hits.add(P(x0), P(y0), P(x1), P(y1), command)
+
+        # --- содержимое (прокручивается) ---
+        self._spaced(c, left, sec1 + 6.6 - off, "ЧТО ОН УМЕЕТ", 11, _MV_HELP_CAPTION, 0.88)
+        for top, kind, title, lines in items:
+            t = top - off
+            c.create_image(P(left), P(t + 6), image=self._rr(36, 36, _MV_HELP_ICON_FILL, None, 10), anchor="nw", tags="dyn")
+            c.create_image(P(left + 9), P(t + 15), image=self._help_glyph(kind), anchor="nw", tags="dyn")
+            self._text(c, left + 50, t + 12.2, title, px=13.5, fill=_MV_HELP_ITEM_TEXT, bold=True)
+            for i, line in enumerate(lines):
+                self._text(c, left + 50, t + 32.1 + 16.2 * i, line, px=12, fill=_MV_CHAT_SUB)
+        self._spaced(c, left, sec2 + 6.6 - off, "ПОПРОБУЙТЕ СПРОСИТЬ", 11, _MV_HELP_CAPTION, 0.88)
+        for x, top, w, question in chips:
+            t = top - off
+            c.create_image(P(x), P(t), image=self._rr(w, 32, _MV_HELP_CHIP_FILL, _MV_HELP_CHIP_LINE, 16), anchor="nw", tags="dyn")
+            self._text(c, x + 14, t + 16, question, px=12.5, fill=_MV_LINK)
+            hit(x, t, x + w, t + 32, lambda q=question: self._help_ask(q))
+        t = warn_top - off
+        c.create_image(P(left), P(t), image=self._rr(span, warn_h, _MV_HELP_CHIP_FILL, _MV_HELP_WARN_LINE, 12), anchor="nw", tags="dyn")
+        self._text(c, left + 17, t + 22.3, "ЧЕГО ОН НЕ ДЕЛАЕТ", px=12, fill=_MV_AMBER_TEXT, bold=True)
+        ly = t + 1 + ul_top
+        for number, lines in enumerate(bullets):
+            color = _MV_AMBER_TEXT if number == len(bullets) - 1 else _MV_HELP_WARN_TEXT
+            c.create_oval(P(left + 19), P(ly + 5.9), P(left + 24), P(ly + 10.9), fill=_MV_AMBER_TEXT, outline="", tags="dyn")
+            for i, line in enumerate(lines):
+                self._text(c, left + 33, ly + 8.4 + 16.875 * i, line, px=12.5, fill=color)
+            ly += 16.875 * len(lines) + gap
+
+        # --- шапка и нижняя часть закрывают прокручиваемое содержимое ---
+        c.create_rectangle(0, 0, width, P(view_top), fill=_MV_BG, outline="", tags="dyn")
+        foot = 628.0 + dy
+        c.create_rectangle(0, P(foot), width, max(height, P(foot) + 1), fill=_MV_BG, outline="", tags="dyn")
+        c.create_image(P(left), P(16), image=self._rr(32, 32, None, _MV_HELP_BACK_LINE, 9), anchor="nw", tags="dyn")
+        self._text(c, left + 16, 32, "←", px=15, fill=_MV_TEXT_SOFT, anchor="center")
+        hits.add(P(left), P(16), P(left + 32), P(48), self.close_help)
+        self._text(c, 74, 25.9, _MV_HELP_TITLE, px=18, fill=_MV_EDIT_TITLE, bold=True)
+        c.create_oval(P(74), P(43.7), P(80.5), P(50.2), fill=_MV_GREEN, outline="", tags="dyn")
+        self._text(c, 88, 47.3, _MV_HELP_STATUS, px=12, fill=_MV_CHAT_STATUS)
+        c.create_line(0, P(72.5), width, P(72.5), fill=_MV_CHAT_HEADER_LINE, tags="dyn")
+        c.create_line(0, P(foot), width, P(foot), fill=_MV_CHAT_FOOTER_LINE, tags="dyn")
+        label = "Перейти к чату"
+        bw = self._chat_text_width(label, 13, True) + 36
+        c.create_image(P(left), P(foot + 17), image=self._rr(bw, 38, _MV_CREAM, None, 10), anchor="nw", tags="dyn")
+        self._text(c, left + bw / 2, foot + 36, label, px=13, fill=_MV_SAVE_TEXT, bold=True, anchor="center")
+        hits.add(P(left), P(foot + 17), P(left + bw), P(foot + 55), self.close_help)
+        hint_px = 11.5 if left + bw + 18 + self._chat_text_width(_MV_HELP_HINT, 11.5) <= right else 11
+        self._text(c, left + bw + 18, foot + 35, _MV_HELP_HINT, px=hint_px, fill=_MV_CHAT_NOTE_COLOR)
+
+        for key in list(self._edit_items):
+            if key not in self._edit_used:
+                self._drop_window(key)
+        c.configure(scrollregion=(0, 0, width, height))
+
     # рисование чата
 
     def _chat_font(self, px: float, bold: bool = False):
@@ -2865,6 +3071,10 @@ class MainView(_DrawKit, tk.Frame):
         c.create_rectangle(0, 0, width, P(view_top), fill=_MV_BG, outline="", tags="dyn")
         c.create_rectangle(0, P(view_bottom), width, max(height, P(view_bottom) + 1), fill=_MV_BG, outline="", tags="dyn")
         self._text(c, left, 32.5, "Помощник", px=18.5, fill="#f8f8fa", bold=True)
+        qx = left + self._chat_text_width("Помощник", 18.5, True) + 10
+        c.create_image(P(qx), P(20.5), image=self._rr(24, 24, None, _MV_HELP_BACK_LINE, 8), anchor="nw", tags="dyn")
+        self._text(c, qx + 12, 33, "?", px=12.5, fill=_MV_TEXT_SOFT, bold=True, anchor="center")
+        hits.add(P(qx), P(20.5), P(qx + 24), P(44.5), self.open_help)
         c.create_oval(P(right - 178.4 - 8.4 + 0), P(27.4), P(right - 178.4), P(35.8), fill=_MV_GREEN, outline=_MV_GREEN, tags="dyn")
         self._text(c, right, 33.3, "Работает на этом устройстве", px=11.2, fill=_MV_CHAT_STATUS, anchor="e")
         c.create_line(0, P(63.6), width, P(63.6), fill=_MV_CHAT_HEADER_LINE, tags="dyn")
